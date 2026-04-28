@@ -171,23 +171,61 @@ export async function transformRequestToGemini(
   // Claude Code sends `thinking: { type: "enabled", budget_tokens: N }`.
   // Flipping `includeThoughts: true` makes Gemini return reasoning as thought
   // parts so we can surface them back as Anthropic thinking blocks.
-  const thinking = anthropicReq.thinking;
-  if (thinking && typeof thinking === 'object' && thinking.type === 'enabled') {
-    const budget = Number(thinking.budget_tokens);
-    const thinkingConfig: any = { includeThoughts: true };
-    if (Number.isFinite(budget) && budget > 0) {
-      thinkingConfig.thinkingBudget = Math.floor(budget);
-    } else {
-      // -1 = dynamic budget; Gemini picks per-request.
-      thinkingConfig.thinkingBudget = -1;
-    }
-    generationConfig.thinkingConfig = thinkingConfig;
+  // const thinking = anthropicReq.thinking;
+  // if (thinking && typeof thinking === 'object' && thinking.type === 'enabled') {
+  //   const budget = Number(thinking.budget_tokens);
+  //   const thinkingConfig: any = { includeThoughts: true };
+  //   if (Number.isFinite(budget) && budget > 0) {
+  //     thinkingConfig.thinkingBudget = Math.floor(budget);
+  //   } else {
+  //     // -1 = dynamic budget; Gemini picks per-request.
+  //     thinkingConfig.thinkingBudget = -1;
+  //   }
+  //   generationConfig.thinkingConfig = thinkingConfig;
 
-    // Reasoning benchmarks favor ~0.7 over Gemini's 1.0 default.
-    if (anthropicReq.temperature === undefined) {
-      generationConfig.temperature = 0.7;
+  //   // Reasoning benchmarks favor ~0.7 over Gemini's 1.0 default.
+  //   if (anthropicReq.temperature === undefined) {
+  //     generationConfig.temperature = 0.7;
+  //   }
+  // }
+
+const thinking = anthropicReq.thinking;
+
+if (
+  thinking &&
+  typeof thinking === "object" &&
+  thinking.type === "enabled"
+) {
+  const GEMINI_MAX_THINKING_BUDGET = 24576;
+  const budget = Number(thinking.budget_tokens);
+
+  const thinkingConfig: any = {
+    includeThoughts: true,
+  };
+
+  if (Number.isFinite(budget)) {
+    if (budget < 0) {
+      // Let Gemini decide dynamically
+      thinkingConfig.thinkingBudget = -1;
+    } else {
+      // Clamp to Gemini-supported range
+      thinkingConfig.thinkingBudget = Math.min(
+        Math.max(0, Math.floor(budget)),
+        GEMINI_MAX_THINKING_BUDGET
+      );
     }
+  } else {
+    // Invalid/missing budget → dynamic
+    thinkingConfig.thinkingBudget = -1;
   }
+
+  generationConfig.thinkingConfig = thinkingConfig;
+
+  // Better default for reasoning workloads
+  if (anthropicReq.temperature === undefined) {
+    generationConfig.temperature = 0.7;
+  }
+}
 
   const result: any = {
     contents,
