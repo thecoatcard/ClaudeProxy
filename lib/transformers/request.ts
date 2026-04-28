@@ -20,7 +20,15 @@ export async function transformRequestToGemini(
   if (typeof anthropicReq.system === 'string') {
     systemText = anthropicReq.system;
   } else if (Array.isArray(anthropicReq.system)) {
-    systemText = anthropicReq.system.map((s: any) => s.text).join('\n');
+    systemText = anthropicReq.system
+      .map((s: any) => {
+        if (typeof s === 'string') return s;
+        if (s?.type === 'text' && typeof s.text === 'string') return s.text;
+        if (typeof s?.text === 'string') return s.text;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
   }
 
   const systemInstruction = systemText ? {

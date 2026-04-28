@@ -7,7 +7,6 @@ for (const line of env) {
   if (line.startsWith('REDIS_URL=')) redisUrl = line.split('=')[1].trim().replace(/['"]/g, '');
   if (line.startsWith('REDIS_TOKEN=')) redisToken = line.split('=')[1].trim().replace(/['"]/g, '');
 }
-
 async function activateAllKeys() {
   const res = await fetch(`${redisUrl}/zrange/gemini:key_pool/0/-1`, {
     headers: { Authorization: `Bearer ${redisToken}` }
