@@ -2,6 +2,12 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
 export default function StatsPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [stats, setStats] = useState<any>(null);
@@ -43,20 +49,36 @@ export default function StatsPage() {
       </div>
 
       {stats && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
-          <div className="card" style={{ textAlign: 'center' }}>
-            <h3>Total Requests</h3>
-            <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--accent)' }}>{stats.requests}</p>
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Total Requests</h3>
+              <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--accent)' }}>{stats.requests}</p>
+            </div>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Total Errors</h3>
+              <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--danger)' }}>{stats.errors}</p>
+            </div>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Avg Latency</h3>
+              <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--success)' }}>{stats.avgLatency} ms</p>
+            </div>
           </div>
-          <div className="card" style={{ textAlign: 'center' }}>
-            <h3>Total Errors</h3>
-            <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--danger)' }}>{stats.errors}</p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Input Tokens</h3>
+              <p style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent)' }}>{formatTokens(stats.inputTokens || 0)}</p>
+            </div>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Output Tokens</h3>
+              <p style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent)' }}>{formatTokens(stats.outputTokens || 0)}</p>
+            </div>
+            <div className="card" style={{ textAlign: 'center' }}>
+              <h3>Total Tokens</h3>
+              <p style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--success)' }}>{formatTokens(stats.totalTokens || 0)}</p>
+            </div>
           </div>
-          <div className="card" style={{ textAlign: 'center' }}>
-            <h3>Avg Latency</h3>
-            <p style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--success)' }}>{stats.avgLatency} ms</p>
-          </div>
-        </div>
+        </>
       )}
     </div>
   );

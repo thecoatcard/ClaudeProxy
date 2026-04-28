@@ -62,6 +62,17 @@ export default function KeysPage() {
     }
   };
 
+  const activateAllKeys = async () => {
+    const res = await fetch('/api/admin/keys?action=activate-all', { method: 'PATCH' });
+    if (res.ok) {
+      const data = await res.json();
+      alert(`Activated ${data.activated} key(s).`);
+      fetchKeys();
+    } else {
+      alert("Failed to activate keys.");
+    }
+  };
+
   if (!isAuthenticated) {
     return (
       <div style={{ maxWidth: '400px', margin: '4rem auto' }} className="card">
@@ -83,7 +94,10 @@ export default function KeysPage() {
       </div>
       
       <div className="card">
-        <h2 className="card-title">Gemini Provider Keys</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 className="card-title" style={{ margin: 0 }}>Gemini Provider Keys</h2>
+          <button className="btn" onClick={activateAllKeys} disabled={geminiKeys.length === 0}>Activate All</button>
+        </div>
         <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
           <input type="text" placeholder="New Gemini API Key" className="input" value={newGKey} onChange={e => setNewGKey(e.target.value)} />
           <button className="btn" onClick={addGeminiKey}>Add Key</button>

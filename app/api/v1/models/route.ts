@@ -7,7 +7,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
   }
   
-  const isValid = await validateUserKey(token) || validateAdminKey(req);
+  const isValid = (await validateUserKey(token)) || (await validateAdminKey(req));
   if (!isValid) {
     return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
   }

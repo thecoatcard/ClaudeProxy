@@ -20,13 +20,14 @@ async function run() {
   const data2 = await res2.json();
   const apiKey = data2.result;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
   
   const payload = {
     contents: [
-      { role: 'user', parts: [{ text: 'hi' }] }
-    ],
-    generationConfig: { maxOutputTokens: 64000 }
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'model', parts: [{ functionCall: { name: 'Bash', args: {} } }] },
+      { role: 'user', parts: [{ functionResponse: { name: 'Bash', response: null } }] }
+    ]
   };
 
   const gres = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

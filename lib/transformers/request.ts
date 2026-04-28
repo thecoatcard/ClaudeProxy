@@ -1,7 +1,21 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
 
-export async function transformRequestToGemini(anthropicReq: any, toolIdMap: Map<string, string>) {
+export async function transformRequestToGemini(
+  anthropicReq: any,
+  toolIdMap: Map<string, string>,
+  toolSchemas?: Map<string, any>
+) {
+  // Capture original Anthropic input_schemas so the response/stream path can
+  // repair Gemini functionCall args against them before emitting tool_use.
+  if (toolSchemas && Array.isArray(anthropicReq.tools)) {
+    for (const tool of anthropicReq.tools) {
+      if (tool && typeof tool.name === 'string' && tool.input_schema) {
+        toolSchemas.set(tool.name, tool.input_schema);
+      }
+    }
+  }
+
   let systemText = "";
   if (typeof anthropicReq.system === 'string') {
     systemText = anthropicReq.system;
@@ -13,7 +27,7 @@ export async function transformRequestToGemini(anthropicReq: any, toolIdMap: Map
     parts: [{ text: systemText }]
   } : undefined;
 
-  const contents = [];
+  const contents: any[] = [];
   
   for (const msg of anthropicReq.messages || []) {
     const role = msg.role === 'assistant' ? 'model' : 'user';
@@ -25,6 +39,23 @@ export async function transformRequestToGemini(anthropicReq: any, toolIdMap: Map
       for (const block of msg.content) {
         if (block.type === 'text') {
           parts.push({ text: block.text || " " });
+        } else if (block.type === 'image') {
+          const src = block.source || {};
+          if (src.type === 'base64' && src.data) {
+            parts.push({
+              inlineData: {
+                mimeType: src.media_type || 'image/png',
+                data: src.data,
+              },
+            });
+          } else if (src.type === 'url' && src.url) {
+            parts.push({
+              fileData: {
+                mimeType: src.media_type || 'image/png',
+                fileUri: src.url,
+              },
+            });
+          }
         } else if (block.type === 'thinking') {
           parts.push({ text: `<thought>\n${block.thinking}\n</thought>` });
         } else if (block.type === 'redacted_thinking') {
@@ -36,7 +67,7 @@ export async function transformRequestToGemini(anthropicReq: any, toolIdMap: Map
             parts.push({
               functionCall: {
                 name: block.name,
-                args: block.input
+                args: block.input && typeof block.input === 'object' ? block.input : {}
               },
               thoughtSignature: sig
             });
@@ -48,36 +79,86 @@ export async function transformRequestToGemini(anthropicReq: any, toolIdMap: Map
           }
         } else if (block.type === 'tool_result') {
           const fnName = toolIdMap.get(block.tool_use_id) || 'unknown_tool';
-          let outputObj = block.content;
-          if (typeof outputObj === 'string') {
-             try { outputObj = JSON.parse(outputObj); } catch(e) {}
+
+          // Claude Code sends tool_result.content as string OR as an array of
+          // content blocks (text/image). Normalize to a plain string, then
+          // wrap in { output } / { error } for Gemini's functionResponse.
+          // Any image blocks are forwarded as separate inlineData/fileData parts.
+          let outputText = '';
+          const imageParts: any[] = [];
+          if (typeof block.content === 'string') {
+            outputText = block.content;
+          } else if (Array.isArray(block.content)) {
+            outputText = block.content
+              .map((c: any) => {
+                if (typeof c === 'string') return c;
+                if (c?.type === 'text') return c.text || '';
+                if (c?.type === 'image') {
+                  const src = c.source || {};
+                  if (src.type === 'base64' && src.data) {
+                    imageParts.push({
+                      inlineData: { mimeType: src.media_type || 'image/png', data: src.data },
+                    });
+                  } else if (src.type === 'url' && src.url) {
+                    imageParts.push({
+                      fileData: { mimeType: src.media_type || 'image/png', fileUri: src.url },
+                    });
+                  }
+                  return '';
+                }
+                return '';
+              })
+              .filter(Boolean)
+              .join('\n');
+          } else if (block.content != null) {
+            try { outputText = JSON.stringify(block.content); } catch(e) { outputText = String(block.content); }
           }
-          
+
+          const responseObj = block.is_error
+            ? { error: outputText || 'tool error' }
+            : { output: outputText };
+
           const sig = await redis.get(`gemini:thought:${block.tool_use_id}`);
           if (sig) {
             parts.push({
               functionResponse: {
                 name: fnName,
-                response: { output: outputObj }
+                response: responseObj
               }
             });
           } else {
             // Cross-model fallback: convert response to text
             parts.push({
-              text: `[Tool Result for \`${fnName}\`]:\n${typeof outputObj === 'string' ? outputObj : JSON.stringify(outputObj)}`
+              text: `[Tool Result for \`${fnName}\`${block.is_error ? ' (error)' : ''}]:\n${outputText}`
             });
           }
+          for (const imgPart of imageParts) parts.push(imgPart);
         }
       }
     }
 
     if (parts.length > 0) {
-      contents.push({ role, parts });
+      const lastMsg = contents[contents.length - 1];
+      if (lastMsg && lastMsg.role === role) {
+        lastMsg.parts.push(...parts);
+      } else {
+        contents.push({ role, parts });
+      }
     }
+  }
+
+  // Ensure history ends with a user message (Gemini requirement for generation)
+  if (contents.length > 0 && contents[contents.length - 1].role === 'model') {
+    contents.push({ role: 'user', parts: [{ text: "Continue" }] });
   }
 
   if (contents.length === 0) {
     contents.push({ role: 'user', parts: [{ text: " " }] });
+  }
+
+  // Gemini requires history to start with a user turn.
+  if (contents[0].role !== 'user') {
+    contents.unshift({ role: 'user', parts: [{ text: " " }] });
   }
 
   // Remove empty configs

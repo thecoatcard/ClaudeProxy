@@ -1,11 +1,19 @@
 import { nanoid } from 'nanoid';
 import { mapStopReason } from './stop-reason';
 import { redis } from '../redis';
+import { repairToolInput } from './repair';
+
+export interface StreamUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
 
 export async function* transformStream(
   geminiStream: ReadableStream<Uint8Array>,
   reqModel: string,
-  toolIdMap: Map<string, string>
+  toolIdMap: Map<string, string>,
+  toolSchemas?: Map<string, any>,
+  usageRef?: StreamUsage
 ) {
   const msgId = 'msg_' + nanoid(24);
   
@@ -41,6 +49,10 @@ export async function* transformStream(
   let fullText = '';
   let cleanedText = '';
   let outputTextLength = 0;
+  let finalFinishReason: string | null = null;
+  let finalOutputTokens = 0;
+  let sawToolUse = false;
+  let messageStopped = false;
 
   try {
     while (true) {
@@ -109,6 +121,7 @@ export async function* transformStream(
             }
 
             if (part?.functionCall) {
+              // Flush pending text
               if (inContentBlock) {
                 if (outputTextLength < cleanedText.length) {
                   yield `event: content_block_delta\ndata: ${JSON.stringify({
@@ -122,57 +135,82 @@ export async function* transformStream(
                 inContentBlock = false;
               }
 
-              if (!inToolCall) {
-                currentToolId = 'toolu_' + nanoid(24);
-                toolIdMap.set(currentToolId, part.functionCall.name);
-                inToolCall = true;
-                
-                yield `event: content_block_start\ndata: ${JSON.stringify({
-                  type: 'content_block_start',
-                  index: contentBlockIndex,
-                  content_block: { type: 'tool_use', id: currentToolId, name: part.functionCall.name, input: {} }
-                })}\n\n`;
+              // Gemini sends each function call as a complete part. Close any
+              // open tool block before opening a new one so parallel tool
+              // calls don't get merged.
+              if (inToolCall) {
+                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+                contentBlockIndex++;
+                inToolCall = false;
+                currentToolId = null;
               }
-              
+
+              currentToolId = 'toolu_' + nanoid(24);
+              toolIdMap.set(currentToolId, part.functionCall.name);
+              inToolCall = true;
+              sawToolUse = true;
+
+              yield `event: content_block_start\ndata: ${JSON.stringify({
+                type: 'content_block_start',
+                index: contentBlockIndex,
+                content_block: { type: 'tool_use', id: currentToolId, name: part.functionCall.name, input: {} }
+              })}\n\n`;
+
               if (part.thoughtSignature && currentToolId) {
                 await redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature);
               }
-              
+
+              const repairedArgs = repairToolInput(
+                part.functionCall.args,
+                toolSchemas?.get(part.functionCall.name)
+              );
+
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
-                delta: { type: 'input_json_delta', partial_json: JSON.stringify(part.functionCall.args) }
+                delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedArgs) }
               })}\n\n`;
             }
           }
 
-          if (finishReason) {
-            if (inContentBlock || inToolCall) {
-              if (inContentBlock && outputTextLength < cleanedText.length) {
-                yield `event: content_block_delta\ndata: ${JSON.stringify({
-                  type: 'content_block_delta',
-                  index: contentBlockIndex,
-                  delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
-                })}\n\n`;
-              }
-              yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-              inContentBlock = false;
-              inToolCall = false;
-              currentToolId = null;
-            }
-
-            yield `event: message_delta\ndata: ${JSON.stringify({
-              type: 'message_delta',
-              delta: { stop_reason: mapStopReason(finishReason), stop_sequence: null },
-              usage: { output_tokens: usage?.candidatesTokenCount ?? 0 }
-            })}\n\n`;
-
-            yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+          if (finishReason) finalFinishReason = finishReason;
+          if (usage?.candidatesTokenCount != null) finalOutputTokens = usage.candidatesTokenCount;
+          if (usageRef) {
+            if (usage?.promptTokenCount != null) usageRef.inputTokens = usage.promptTokenCount;
+            if (usage?.candidatesTokenCount != null) usageRef.outputTokens = usage.candidatesTokenCount;
           }
         }
       }
     }
   } finally {
-    reader.releaseLock();
+    try { reader.releaseLock(); } catch(e) {}
+  }
+
+  // Always emit a clean close, even if Gemini ended the stream without
+  // a finishReason chunk (otherwise Claude Code hangs waiting).
+  if (!messageStopped) {
+    if (inContentBlock && outputTextLength < cleanedText.length) {
+      yield `event: content_block_delta\ndata: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: contentBlockIndex,
+        delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
+      })}\n\n`;
+    }
+    if (inContentBlock || inToolCall) {
+      yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+      inContentBlock = false;
+      inToolCall = false;
+      currentToolId = null;
+    }
+
+    const stopReason = sawToolUse ? 'tool_use' : mapStopReason(finalFinishReason || 'STOP');
+    yield `event: message_delta\ndata: ${JSON.stringify({
+      type: 'message_delta',
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: finalOutputTokens }
+    })}\n\n`;
+
+    yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+    messageStopped = true;
   }
 }

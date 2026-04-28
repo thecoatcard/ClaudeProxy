@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server';
 import { extractToken, validateUserKey } from '@/lib/auth';
 import { transformRequestToGemini } from '@/lib/transformers/request';
 import { transformGeminiToAnthropic } from '@/lib/transformers/response';
-import { transformStream } from '@/lib/transformers/stream';
+import { transformStream, type StreamUsage } from '@/lib/transformers/stream';
 import { executeWithRetry } from '@/lib/retry-engine';
 import { logRequest } from '@/lib/logger';
-import { incrementRequestCount, incrementErrorCount, recordLatency } from '@/lib/metrics';
+import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens } from '@/lib/metrics';
 
 export const runtime = 'edge';
 
@@ -37,15 +37,17 @@ export async function POST(req: Request) {
   await incrementRequestCount();
 
   const toolIdMap = new Map<string, string>();
-  const geminiReq = await transformRequestToGemini(body, toolIdMap);
+  const toolSchemas = new Map<string, any>();
+  const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas);
 
   try {
     const res = await executeWithRetry(model, geminiReq, stream || false);
 
     if (stream) {
       if (!res.body) throw new Error("No stream body");
-      const transformIterator = transformStream(res.body, model, toolIdMap);
-      
+      const usageRef: StreamUsage = { inputTokens: 0, outputTokens: 0 };
+      const transformIterator = transformStream(res.body, model, toolIdMap, toolSchemas, usageRef);
+
       const streamBody = new ReadableStream({
         async start(controller) {
           try {
@@ -58,6 +60,7 @@ export async function POST(req: Request) {
           } finally {
             controller.close();
             recordLatency(Date.now() - startTime);
+            recordTokens(usageRef.inputTokens, usageRef.outputTokens);
           }
         }
       });
@@ -71,9 +74,10 @@ export async function POST(req: Request) {
       });
     } else {
       const geminiRes = await res.json();
-      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap);
-      
+      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas);
+
       recordLatency(Date.now() - startTime);
+      await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens);
       logRequest({
         model,
         stream: false,

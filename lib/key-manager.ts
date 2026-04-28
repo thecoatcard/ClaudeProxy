@@ -13,16 +13,30 @@ export interface GeminiKey {
 
 export async function getHealthiestKeyObj(): Promise<{ id: string, key: string } | null> {
   const keys = await redis.zrange<string[]>('gemini:key_pool', 0, -1, { rev: true });
+  const now = Math.floor(Date.now() / 1000);
+
   for (const keyId of keys) {
-    const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey;
-    if (!keyData) continue;
-    if (keyData.status === 'healthy' && Number(keyData.cooldown_until || 0) < Math.floor(Date.now() / 1000)) {
+    const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey | null;
+    if (!keyData || !keyData.key) continue;
+    if (keyData.status === 'revoked') continue;
+
+    const cooldownUntil = Number(keyData.cooldown_until || 0);
+    const rpmUsed = Number(keyData.rpm_used || 0);
+    const cooldownOver = cooldownUntil <= now;
+
+    if (keyData.status === 'healthy' && cooldownOver) {
       return { id: keyId, key: keyData.key };
     }
-    
-    // Lazy recovery: If key is in cooldown but the period has expired, recover it inline
-    if (keyData.status === 'cooldown' && Number(keyData.cooldown_until || 0) < Math.floor(Date.now() / 1000)) {
-      await redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0 });
+
+    // Lazy recovery: cooldown period elapsed — mark healthy, clear the timer,
+    // and restore the zset score so the key re-enters the healthy pool.
+    if (keyData.status === 'cooldown' && cooldownOver) {
+      await redis.hset(`gemini:key:${keyId}`, {
+        status: 'healthy',
+        failure_count: 0,
+        cooldown_until: 0,
+      });
+      await redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId });
       return { id: keyId, key: keyData.key };
     }
   }
