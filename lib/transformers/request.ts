@@ -167,6 +167,28 @@ export async function transformRequestToGemini(
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;
   if (anthropicReq.top_p !== undefined) generationConfig.topP = anthropicReq.top_p;
 
+  // Map Anthropic extended thinking → Gemini thinkingConfig.
+  // Claude Code sends `thinking: { type: "enabled", budget_tokens: N }`.
+  // Flipping `includeThoughts: true` makes Gemini return reasoning as thought
+  // parts so we can surface them back as Anthropic thinking blocks.
+  const thinking = anthropicReq.thinking;
+  if (thinking && typeof thinking === 'object' && thinking.type === 'enabled') {
+    const budget = Number(thinking.budget_tokens);
+    const thinkingConfig: any = { includeThoughts: true };
+    if (Number.isFinite(budget) && budget > 0) {
+      thinkingConfig.thinkingBudget = Math.floor(budget);
+    } else {
+      // -1 = dynamic budget; Gemini picks per-request.
+      thinkingConfig.thinkingBudget = -1;
+    }
+    generationConfig.thinkingConfig = thinkingConfig;
+
+    // Reasoning benchmarks favor ~0.7 over Gemini's 1.0 default.
+    if (anthropicReq.temperature === undefined) {
+      generationConfig.temperature = 0.7;
+    }
+  }
+
   const result: any = {
     contents,
   };

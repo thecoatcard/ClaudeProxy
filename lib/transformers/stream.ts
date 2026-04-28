@@ -40,6 +40,8 @@ export async function* transformStream(
   let inContentBlock = false;
   let currentToolId: string | null = null;
   let inToolCall = false;
+  let inThinking = false;
+  let pendingThinkingSignature: string | null = null;
 
   const prefixes = [
     '<', '<t', '<th', '<thi', '<thin', '<think',
@@ -78,7 +80,61 @@ export async function* transformStream(
           const usage = chunk.usageMetadata;
 
           for (const part of parts) {
+            // Thinking part — surface as an Anthropic thinking content block
+            // so Claude Code renders reasoning AND can echo it back next turn.
+            if (part?.thought === true && part?.text) {
+              if (inContentBlock) {
+                if (outputTextLength < cleanedText.length) {
+                  yield `event: content_block_delta\ndata: ${JSON.stringify({
+                    type: 'content_block_delta',
+                    index: contentBlockIndex,
+                    delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
+                  })}\n\n`;
+                }
+                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+                contentBlockIndex++;
+                inContentBlock = false;
+              }
+              if (inToolCall) {
+                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+                contentBlockIndex++;
+                inToolCall = false;
+                currentToolId = null;
+              }
+              if (!inThinking) {
+                yield `event: content_block_start\ndata: ${JSON.stringify({
+                  type: 'content_block_start',
+                  index: contentBlockIndex,
+                  content_block: { type: 'thinking', thinking: '' }
+                })}\n\n`;
+                inThinking = true;
+                pendingThinkingSignature = null;
+              }
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: contentBlockIndex,
+                delta: { type: 'thinking_delta', thinking: part.text }
+              })}\n\n`;
+              if (part.thoughtSignature) {
+                pendingThinkingSignature = part.thoughtSignature;
+              }
+              continue;
+            }
+
             if (part?.text) {
+              if (inThinking) {
+                if (pendingThinkingSignature) {
+                  yield `event: content_block_delta\ndata: ${JSON.stringify({
+                    type: 'content_block_delta',
+                    index: contentBlockIndex,
+                    delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+                  })}\n\n`;
+                  pendingThinkingSignature = null;
+                }
+                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+                contentBlockIndex++;
+                inThinking = false;
+              }
               if (inToolCall) {
                 yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
                 contentBlockIndex++;
@@ -133,6 +189,21 @@ export async function* transformStream(
                 yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
                 contentBlockIndex++;
                 inContentBlock = false;
+              }
+
+              // Flush any open thinking block so the tool_use opens cleanly.
+              if (inThinking) {
+                if (pendingThinkingSignature) {
+                  yield `event: content_block_delta\ndata: ${JSON.stringify({
+                    type: 'content_block_delta',
+                    index: contentBlockIndex,
+                    delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+                  })}\n\n`;
+                  pendingThinkingSignature = null;
+                }
+                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+                contentBlockIndex++;
+                inThinking = false;
               }
 
               // Gemini sends each function call as a complete part. Close any
@@ -196,10 +267,19 @@ export async function* transformStream(
         delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
       })}\n\n`;
     }
-    if (inContentBlock || inToolCall) {
+    if (inThinking && pendingThinkingSignature) {
+      yield `event: content_block_delta\ndata: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: contentBlockIndex,
+        delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+      })}\n\n`;
+      pendingThinkingSignature = null;
+    }
+    if (inContentBlock || inToolCall || inThinking) {
       yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
       inContentBlock = false;
       inToolCall = false;
+      inThinking = false;
       currentToolId = null;
     }
 

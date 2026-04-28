@@ -14,10 +14,24 @@ export async function transformGeminiToAnthropic(
     throw new Error('No candidate returned from Gemini');
   }
 
-  const contentBlocks = [];
-  
+  const contentBlocks: any[] = [];
+
   for (const part of candidate.content?.parts || []) {
+    // Gemini returns reasoning as parts with `thought: true` when
+    // thinkingConfig.includeThoughts was set on the request. Surface these
+    // as Anthropic thinking blocks so Claude Code can render them AND feed
+    // them back on subsequent turns.
+    if (part.thought === true && part.text) {
+      const block: any = { type: 'thinking', thinking: part.text };
+      if (part.thoughtSignature) block.signature = part.thoughtSignature;
+      contentBlocks.push(block);
+      continue;
+    }
+
     if (part.text) {
+      // Strip legacy <think>/<thought> text that some Gemini models still emit
+      // inline when thoughtConfig isn't honored. Real thoughts are already
+      // captured above, so anything left here is fallback garbage.
       let cleanedText = part.text.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
       if (cleanedText) {
         contentBlocks.push({
