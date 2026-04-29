@@ -43,6 +43,7 @@ export async function transformGeminiToAnthropic(
       const toolId = 'toolu_' + nanoid(24);
       toolIdMap.set(toolId, part.functionCall.name);
       
+      await redis.setex(`gemini:toolname:${toolId}`, 3600, part.functionCall.name);
       if (part.thoughtSignature) {
         await redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature);
       }

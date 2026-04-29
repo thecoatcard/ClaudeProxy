@@ -7,6 +7,8 @@ import { executeWithRetry } from '@/lib/retry-engine';
 import { getModelMapping } from '@/lib/model-router';
 import { logRequest } from '@/lib/logger';
 import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens } from '@/lib/metrics';
+import { tryOptimizations } from '@/lib/transformers/optimizations';
+import { transformError } from '@/lib/transformers/errors';
 
 export const runtime = 'edge';
 
@@ -18,6 +20,26 @@ const ANTHROPIC_PASSTHROUGH_HEADERS = [
   'anthropic-beta',
   'x-api-key',
 ] as const;
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'POST, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
+
+export async function HEAD() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'POST, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
 
 export async function POST(req: Request) {
   const startTime = Date.now();
@@ -39,6 +61,14 @@ export async function POST(req: Request) {
   const { model, stream } = body;
   if (!model) {
     return NextResponse.json({ type: "error", error: { type: "invalid_request_error", message: "Model is required" } }, { status: 400 });
+  }
+
+  // 3. Local Optimizations (Fast-path for Claude Code probes)
+  const optimized = await tryOptimizations(body);
+  if (optimized) {
+    recordLatency(Date.now() - startTime);
+    recordTokens(optimized.usage.input_tokens, optimized.usage.output_tokens);
+    return NextResponse.json(optimized);
   }
 
   // 3. Parallel Pre-flight (Auth + Routing)
@@ -109,17 +139,7 @@ export async function POST(req: Request) {
       return NextResponse.json(anthropicRes);
     }
   } catch (err: any) {
-    await incrementErrorCount();
-    recordLatency(Date.now() - startTime);
-    
-    if (err.message === 'overloaded_error') {
-      return NextResponse.json({ type: "error", error: { type: "overloaded_error", message: "All Gemini keys exhausted or failing" } }, { status: 529 });
-    }
-    if (err.status === 400) {
-      const geminiMsg = err.data?.error?.message || "Bad Request / Safety Block";
-      return NextResponse.json({ type: "error", error: { type: "invalid_request_error", message: geminiMsg } }, { status: 400 });
-    }
-    
-    return NextResponse.json({ type: "error", error: { type: "api_error", message: "Internal Server Error" } }, { status: 500 });
+    const anthropicErr = transformError(err);
+    return NextResponse.json(anthropicErr, { status: err.status || 500 });
   }
 }

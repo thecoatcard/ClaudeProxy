@@ -4,6 +4,26 @@ import { countTokens } from '@/lib/tokenizer';
 
 export const runtime = 'edge';
 
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'POST, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
+
+export async function HEAD() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'POST, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
+
 /**
  * POST /v1/messages/count_tokens
  *

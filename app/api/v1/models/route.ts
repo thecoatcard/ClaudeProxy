@@ -1,6 +1,26 @@
 import { NextResponse } from 'next/server';
 import { extractToken, validateUserKey, validateAdminKey } from '@/lib/auth';
 
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'GET, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
+
+export async function HEAD() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Allow': 'GET, OPTIONS, HEAD',
+      'Anthropic-Version': '2023-06-01',
+    },
+  });
+}
+
 export async function GET(req: Request) {
   const token = extractToken(req);
   if (!token) {

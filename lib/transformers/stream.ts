@@ -1,234 +1,92 @@
-import { nanoid } from 'nanoid';
-import { mapStopReason } from './stop-reason';
+import { BlockPolicy } from './block-policy';
+import { ThinkTagParser, ContentType } from './thinking-parser';
 import { redis } from '../redis';
+import { nanoid } from 'nanoid';
 import { repairToolInput } from './repair';
 
-export interface StreamUsage {
-  inputTokens: number;
-  outputTokens: number;
-}
-
 export async function* transformStream(
-  geminiStream: ReadableStream<Uint8Array>,
+  geminiStream: ReadableStream,
   reqModel: string,
   toolIdMap: Map<string, string>,
-  toolSchemas?: Map<string, any>,
-  usageRef?: StreamUsage
+  toolSchemas: Map<string, any>,
+  usageRef: { input_tokens: number; output_tokens: number }
 ) {
-  const msgId = 'msg_' + nanoid(24);
-  
-  yield `event: message_start\ndata: ${JSON.stringify({
-    type: 'message_start',
-    message: {
-      id: msgId,
-      type: 'message',
-      role: 'assistant',
-      model: reqModel,
-      content: [],
-      stop_reason: null,
-      usage: { input_tokens: 0, output_tokens: 0 }
-    }
-  })}\n\n`;
-
-  yield `event: ping\ndata: {"type":"ping"}\n\n`;
-
   const reader = geminiStream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  let contentBlockIndex = 0;
-  let inContentBlock = false;
-  let currentToolId: string | null = null;
-  let inToolCall = false;
-  let inThinking = false;
-  let pendingThinkingSignature: string | null = null;
-
-  const prefixes = [
-    '<', '<t', '<th', '<thi', '<thin', '<think',
-    '<tho', '<thou', '<thoug', '<though', '<thought'
-  ];
-
-  let fullText = '';
-  let cleanedText = '';
-  let outputTextLength = 0;
-  let finalFinishReason: string | null = null;
-  let finalOutputTokens = 0;
-  let sawToolUse = false;
-  let messageStopped = false;
+  const policy = new BlockPolicy();
+  const tagParser = new ThinkTagParser();
+  let messageStarted = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+
+      const chunk = new TextDecoder().decode(value);
+      const lines = chunk.split('\n');
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const dataStr = line.slice(6).trim();
-          if (!dataStr || dataStr === '[DONE]') continue;
-          
-          let chunk;
-          try {
-            chunk = JSON.parse(dataStr);
-          } catch(e) { continue; }
+        if (!line.startsWith('data: ')) continue;
+        
+        let data: any;
+        try {
+          data = JSON.parse(line.slice(6));
+        } catch (e) {
+          continue;
+        }
 
-          const parts = chunk.candidates?.[0]?.content?.parts || [];
-          const finishReason = chunk.candidates?.[0]?.finishReason;
-          const usage = chunk.usageMetadata;
+        // 1. Message Start
+        if (!messageStarted) {
+          yield `event: message_start\ndata: ${JSON.stringify({
+            type: 'message_start',
+            message: {
+              id: 'msg_' + nanoid(24),
+              type: 'message',
+              role: 'assistant',
+              model: reqModel,
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: usageRef.input_tokens, output_tokens: 0 }
+            }
+          })}\n\n`;
+          messageStarted = true;
+        }
 
-          for (const part of parts) {
-            // Thinking part — surface as an Anthropic thinking content block
-            // so Claude Code renders reasoning AND can echo it back next turn.
-            if (part?.thought === true && part?.text) {
-              if (inContentBlock) {
-                if (outputTextLength < cleanedText.length) {
-                  yield `event: content_block_delta\ndata: ${JSON.stringify({
-                    type: 'content_block_delta',
-                    index: contentBlockIndex,
-                    delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
-                  })}\n\n`;
-                }
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inContentBlock = false;
-              }
-              if (inToolCall) {
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inToolCall = false;
-                currentToolId = null;
-              }
-              if (!inThinking) {
-                yield `event: content_block_start\ndata: ${JSON.stringify({
-                  type: 'content_block_start',
-                  index: contentBlockIndex,
-                  content_block: { type: 'thinking', thinking: '' }
-                })}\n\n`;
-                inThinking = true;
-                pendingThinkingSignature = null;
-              }
-              yield `event: content_block_delta\ndata: ${JSON.stringify({
-                type: 'content_block_delta',
-                index: contentBlockIndex,
-                delta: { type: 'thinking_delta', thinking: part.text }
-              })}\n\n`;
+        const candidate = data.candidates?.[0];
+        if (!candidate) {
+          // Check for terminal metadata in non-candidate chunks
+          if (data.usageMetadata) {
+            usageRef.output_tokens = data.usageMetadata.candidatesTokenCount || usageRef.output_tokens;
+          }
+          continue;
+        }
+
+        // 2. Process Content Parts
+        for (const part of candidate.content?.parts || []) {
+          // A. Thought Block (Native Gemini Thinking)
+          if (part.thought === true && part.text) {
+            const [events, index] = policy.getOrStartBlock(0, 'thinking');
+            for (const e of events) yield e;
+            
+            yield `event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: index,
+              delta: { type: 'thinking_delta', thinking: part.text }
+            })}\n\n`;
+            continue;
+          }
+
+          // B. Function Call
+          if (part.functionCall) {
+            const [events, index] = policy.getOrStartBlock(0, 'tool_use', { name: part.functionCall.name });
+            for (const e of events) yield e;
+
+            const toolId = policy.getToolId(0);
+            if (toolId) {
+              toolIdMap.set(toolId, part.functionCall.name);
+              await redis.setex(`gemini:toolname:${toolId}`, 3600, part.functionCall.name);
               if (part.thoughtSignature) {
-                pendingThinkingSignature = part.thoughtSignature;
-              }
-              continue;
-            }
-
-            if (part?.text) {
-              if (inThinking) {
-                if (pendingThinkingSignature) {
-                  yield `event: content_block_delta\ndata: ${JSON.stringify({
-                    type: 'content_block_delta',
-                    index: contentBlockIndex,
-                    delta: { type: 'signature_delta', signature: pendingThinkingSignature }
-                  })}\n\n`;
-                  pendingThinkingSignature = null;
-                }
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inThinking = false;
-              }
-              if (inToolCall) {
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inToolCall = false;
-                currentToolId = null;
-              }
-              if (!inContentBlock) {
-                yield `event: content_block_start\ndata: ${JSON.stringify({
-                  type: 'content_block_start',
-                  index: contentBlockIndex,
-                  content_block: { type: 'text', text: '' }
-                })}\n\n`;
-                inContentBlock = true;
-                fullText = '';
-                cleanedText = '';
-                outputTextLength = 0;
-              }
-
-              fullText += part.text;
-              cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
-              
-              let safeLength = cleanedText.length;
-              for (let i = cleanedText.length - 1; i >= Math.max(0, cleanedText.length - 10); i--) {
-                const suffix = cleanedText.slice(i).toLowerCase();
-                if (prefixes.includes(suffix)) {
-                  safeLength = i;
-                  break;
-                }
-              }
-
-              if (safeLength > outputTextLength) {
-                const newText = cleanedText.slice(outputTextLength, safeLength);
-                outputTextLength = safeLength;
-                yield `event: content_block_delta\ndata: ${JSON.stringify({
-                  type: 'content_block_delta',
-                  index: contentBlockIndex,
-                  delta: { type: 'text_delta', text: newText }
-                })}\n\n`;
-              }
-            }
-
-            if (part?.functionCall) {
-              // Flush pending text
-              if (inContentBlock) {
-                if (outputTextLength < cleanedText.length) {
-                  yield `event: content_block_delta\ndata: ${JSON.stringify({
-                    type: 'content_block_delta',
-                    index: contentBlockIndex,
-                    delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
-                  })}\n\n`;
-                }
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inContentBlock = false;
-              }
-
-              // Flush any open thinking block so the tool_use opens cleanly.
-              if (inThinking) {
-                if (pendingThinkingSignature) {
-                  yield `event: content_block_delta\ndata: ${JSON.stringify({
-                    type: 'content_block_delta',
-                    index: contentBlockIndex,
-                    delta: { type: 'signature_delta', signature: pendingThinkingSignature }
-                  })}\n\n`;
-                  pendingThinkingSignature = null;
-                }
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inThinking = false;
-              }
-
-              // Gemini sends each function call as a complete part. Close any
-              // open tool block before opening a new one so parallel tool
-              // calls don't get merged.
-              if (inToolCall) {
-                yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-                contentBlockIndex++;
-                inToolCall = false;
-                currentToolId = null;
-              }
-
-              currentToolId = 'toolu_' + nanoid(24);
-              toolIdMap.set(currentToolId, part.functionCall.name);
-              inToolCall = true;
-              sawToolUse = true;
-
-              yield `event: content_block_start\ndata: ${JSON.stringify({
-                type: 'content_block_start',
-                index: contentBlockIndex,
-                content_block: { type: 'tool_use', id: currentToolId, name: part.functionCall.name, input: {} }
-              })}\n\n`;
-
-              if (part.thoughtSignature && currentToolId) {
-                await redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature);
+                await redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature);
               }
 
               const repairedArgs = repairToolInput(
@@ -238,59 +96,71 @@ export async function* transformStream(
 
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
-                index: contentBlockIndex,
+                index: index,
                 delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedArgs) }
               })}\n\n`;
             }
+            continue;
           }
 
-          if (finishReason) finalFinishReason = finishReason;
-          if (usage?.candidatesTokenCount != null) finalOutputTokens = usage.candidatesTokenCount;
-          if (usageRef) {
-            if (usage?.promptTokenCount != null) usageRef.inputTokens = usage.promptTokenCount;
-            if (usage?.candidatesTokenCount != null) usageRef.outputTokens = usage.candidatesTokenCount;
+          // C. Text Part (with Tag Parsing Fallback)
+          if (part.text) {
+            for (const chunk of tagParser.feed(part.text)) {
+              const type = chunk.type === ContentType.THINKING ? 'thinking' : 'text';
+              const [events, index] = policy.getOrStartBlock(0, type);
+              for (const e of events) yield e;
+
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: index,
+                delta: type === 'thinking' 
+                  ? { type: 'thinking_delta', thinking: chunk.content }
+                  : { type: 'text_delta', text: chunk.content }
+              })}\n\n`;
+            }
           }
+        }
+
+        if (data.usageMetadata) {
+          usageRef.output_tokens = data.usageMetadata.candidatesTokenCount || usageRef.output_tokens;
         }
       }
     }
-  } finally {
-    try { reader.releaseLock(); } catch(e) {}
-  }
 
-  // Always emit a clean close, even if Gemini ended the stream without
-  // a finishReason chunk (otherwise Claude Code hangs waiting).
-  if (!messageStopped) {
-    if (inContentBlock && outputTextLength < cleanedText.length) {
+    // Flush remaining text/thinking
+    const finalChunk = tagParser.flush();
+    if (finalChunk) {
+      const type = finalChunk.type === ContentType.THINKING ? 'thinking' : 'text';
+      const [events, index] = policy.getOrStartBlock(0, type);
+      for (const e of events) yield e;
       yield `event: content_block_delta\ndata: ${JSON.stringify({
         type: 'content_block_delta',
-        index: contentBlockIndex,
-        delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
+        index: index,
+        delta: type === 'thinking'
+          ? { type: 'thinking_delta', thinking: finalChunk.content }
+          : { type: 'text_delta', text: finalChunk.content }
       })}\n\n`;
-    }
-    if (inThinking && pendingThinkingSignature) {
-      yield `event: content_block_delta\ndata: ${JSON.stringify({
-        type: 'content_block_delta',
-        index: contentBlockIndex,
-        delta: { type: 'signature_delta', signature: pendingThinkingSignature }
-      })}\n\n`;
-      pendingThinkingSignature = null;
-    }
-    if (inContentBlock || inToolCall || inThinking) {
-      yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-      inContentBlock = false;
-      inToolCall = false;
-      inThinking = false;
-      currentToolId = null;
     }
 
-    const stopReason = sawToolUse ? 'tool_use' : mapStopReason(finalFinishReason || 'STOP');
+    // Close all open blocks
+    for (const e of policy.closeAll()) yield e;
+
+    // 3. Message Stop
     yield `event: message_delta\ndata: ${JSON.stringify({
       type: 'message_delta',
-      delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: finalOutputTokens }
+      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      usage: { output_tokens: usageRef.output_tokens }
     })}\n\n`;
 
-    yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
-    messageStopped = true;
+    yield `event: message_stop\ndata: {"type": "message_stop"}\n\n`;
+
+  } catch (error) {
+    console.error('Stream Error:', error);
+    yield `event: error\ndata: ${JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: String(error) }
+    })}\n\n`;
+  } finally {
+    reader.releaseLock();
   }
 }

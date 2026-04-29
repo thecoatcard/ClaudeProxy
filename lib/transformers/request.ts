@@ -91,8 +91,8 @@ export async function transformRequestToGemini(
       parts.push({ text: msg.content || " " });
     } else if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
-        if (block.type === 'text') {
-          parts.push({ text: block.text || " " });
+        if (block.type === 'text' && block.text?.trim()) {
+          parts.push({ text: block.text });
         } else if (block.type === 'image') {
           const src = block.source || {};
           if (src.type === 'base64' && src.data) {
@@ -132,61 +132,33 @@ export async function transformRequestToGemini(
             });
           }
         } else if (block.type === 'tool_result') {
-          const fnName = toolIdMap.get(block.tool_use_id) || 'unknown_tool';
-
-          // Claude Code sends tool_result.content as string OR as an array of
-          // content blocks (text/image). Normalize to a plain string, then
-          // wrap in { output } / { error } for Gemini's functionResponse.
-          // Any image blocks are forwarded as separate inlineData/fileData parts.
-          let outputText = '';
-          const imageParts: any[] = [];
-          if (typeof block.content === 'string') {
-            outputText = block.content;
-          } else if (Array.isArray(block.content)) {
-            outputText = block.content
-              .map((c: any) => {
-                if (typeof c === 'string') return c;
-                if (c?.type === 'text') return c.text || '';
-                if (c?.type === 'image') {
-                  const src = c.source || {};
-                  if (src.type === 'base64' && src.data) {
-                    imageParts.push({
-                      inlineData: { mimeType: src.media_type || 'image/png', data: src.data },
-                    });
-                  } else if (src.type === 'url' && src.url) {
-                    imageParts.push({
-                      fileData: { mimeType: src.media_type || 'image/png', fileUri: src.url },
-                    });
-                  }
-                  return '';
-                }
-                return '';
-              })
-              .filter(Boolean)
-              .join('\n');
-          } else if (block.content != null) {
-            try { outputText = JSON.stringify(block.content); } catch(e) { outputText = String(block.content); }
-          }
-
-          const responseObj = block.is_error
-            ? { error: outputText || 'tool error' }
-            : { output: outputText };
-
-          const sig = await redis.get(`gemini:thought:${block.tool_use_id}`);
-          if (sig) {
-            parts.push({
-              functionResponse: {
-                name: fnName,
-                response: responseObj
-              }
-            });
+          // Look up the actual function name from Redis.
+          const cachedName = await redis.get(`gemini:toolname:${block.tool_use_id}`);
+          const fnName = cachedName ? String(cachedName) : 'unknown_tool';
+          
+          let content = block.content;
+          if (!content || (Array.isArray(content) && content.length === 0)) {
+            content = { result: "Tool executed (empty result)." };
+          } else if (typeof content === 'string') {
+            content = { result: content };
+          } else if (!Array.isArray(content)) {
+            content = Object.keys(content).length > 0 ? content : { result: "Success" };
           } else {
-            // Cross-model fallback: convert response to text
-            parts.push({
-              text: `[Tool Result for \`${fnName}\`${block.is_error ? ' (error)' : ''}]:\n${outputText}`
-            });
+            content = {
+              result: content.map((c: any) => {
+                if (c.type === 'text') return c.text;
+                if (c.type === 'image') return "[image]";
+                return JSON.stringify(c);
+              }).join("\n")
+            };
           }
-          for (const imgPart of imageParts) parts.push(imgPart);
+
+          parts.push({
+            functionResponse: {
+              name: fnName,
+              response: content,
+            },
+          });
         }
       }
     }
@@ -242,47 +214,46 @@ export async function transformRequestToGemini(
   // Claude Code sends `thinking: { type: "enabled", budget_tokens: N }`.
   // Flipping `includeThoughts: true` makes Gemini return reasoning as thought
   // parts so we can surface them back as Anthropic thinking blocks.
-  // The `interleaved-thinking-2025-05-14` beta allows thinking blocks to appear
-  // between tool_use blocks — no extra handling needed here; the stream/response
-  // transformers already emit thought parts as thinking content_blocks.
+  const thinking = anthropicReq.thinking;
 
-const thinking = anthropicReq.thinking;
+  if (
+    thinking &&
+    typeof thinking === "object" &&
+    thinking.type === "enabled"
+  ) {
+    // Gemini 2.0 Flash/Pro supports up to 24k thinking budget.
+    // Claude 3.7 Sonnet supports up to 128k (but we must clamp to Gemini's limit).
+    const GEMINI_MAX_THINKING_BUDGET = 24576;
+    const budget = Number(thinking.budget_tokens);
 
-if (
-  thinking &&
-  typeof thinking === "object" &&
-  thinking.type === "enabled"
-) {
-  const GEMINI_MAX_THINKING_BUDGET = 24576;
-  const budget = Number(thinking.budget_tokens);
+    const thinkingConfig: any = {
+      includeThoughts: true,
+    };
 
-  const thinkingConfig: any = {
-    includeThoughts: true,
-  };
-
-  if (Number.isFinite(budget)) {
-    if (budget < 0) {
-      // Let Gemini decide dynamically
-      thinkingConfig.thinkingBudget = -1;
+    if (Number.isFinite(budget)) {
+      if (budget < 0) {
+        // Let Gemini decide dynamically if -1 or invalid
+        thinkingConfig.thinkingBudget = -1;
+      } else {
+        // Clamp to Gemini-supported range [0, 24576]
+        thinkingConfig.thinkingBudget = Math.min(
+          Math.max(0, Math.floor(budget)),
+          GEMINI_MAX_THINKING_BUDGET
+        );
+      }
     } else {
-      // Clamp to Gemini-supported range
-      thinkingConfig.thinkingBudget = Math.min(
-        Math.max(0, Math.floor(budget)),
-        GEMINI_MAX_THINKING_BUDGET
-      );
+      // Invalid/missing budget → dynamic
+      thinkingConfig.thinkingBudget = -1;
     }
-  } else {
-    // Invalid/missing budget → dynamic
-    thinkingConfig.thinkingBudget = -1;
-  }
 
-  generationConfig.thinkingConfig = thinkingConfig;
+    generationConfig.thinkingConfig = thinkingConfig;
 
-  // Better default for reasoning workloads
-  if (anthropicReq.temperature === undefined) {
-    generationConfig.temperature = 0.7;
+    // Claude 3.7 Sonnet defaults to temp 1.0 when thinking is enabled, 
+    // but Gemini performs better at 0.7 for reasoning tasks.
+    if (anthropicReq.temperature === undefined) {
+      generationConfig.temperature = 0.7;
+    }
   }
-}
 
   const result: any = {
     contents,

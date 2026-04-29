@@ -19,21 +19,20 @@ const CLAUDE_FAST_CHAIN = [
 ];
 
 export const DEFAULT_MODEL_ROUTING: Record<string, { primary: string; fallback: string[] }> = {
-  // --- Claude 4.5 / 4 / 3.7 (Ultra/High Capability) ---
-  "claude-opus-4-5-20251101":    { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
-  "claude-sonnet-4-5-20250929":  { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
-  "claude-opus-4":               { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
+  // --- Claude 4 Series (Next-Gen) ---
+  "claude-4-7-opus":             { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
+  "claude-4-6-sonnet":           { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
+  "claude-4-5-haiku":            { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
+  "claude-4-5-opus":             { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
+  "claude-4-opus":               { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
+  "claude-4-sonnet":             { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
+  "claude-4-haiku":              { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
+
+  // --- Claude 3.7 / 3.5 (Legacy/Current) ---
   "claude-3-7-sonnet":           { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
   "claude-3-5-sonnet":           { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
-  
-  // --- Claude 4 / 4.6 (Next-Gen Sonnet) ---
-  "claude-sonnet-4-6":           { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
-  "claude-sonnet-4":             { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
-
-  // --- Claude Haiku (Fast/Efficient) ---
-  "claude-haiku-4-5-20251001":   { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
-  "claude-haiku-4":              { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
-  "claude-haiku":                { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
+  "claude-3-5-haiku":            { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
+  "claude-3-opus":               { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
   "claude-3-haiku":              { "primary": CLAUDE_FAST_CHAIN[0], "fallback": CLAUDE_FAST_CHAIN.slice(1) },
 
   // --- Native Gemini & Gemma Mappings ---
