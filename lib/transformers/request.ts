@@ -111,25 +111,26 @@ export async function transformRequestToGemini(
             });
           }
         } else if (block.type === 'thinking') {
-          parts.push({ text: `<think>\n${block.thinking}\n</think>` });
+          parts.push({ text: `<thought>\n${block.thinking}\n</thought>` });
         } else if (block.type === 'redacted_thinking') {
-          parts.push({ text: `<think>\n[Redacted internal thinking]\n</think>` });
+          parts.push({ text: `<thought>\n[Redacted internal thinking]\n</thought>` });
         } else if (block.type === 'tool_use') {
           toolIdMap.set(block.id, block.name);
           const sig = await redis.get(`gemini:thought:${block.id}`);
-          
-          const part: any = {
-            functionCall: {
-              name: block.name,
-              args: block.input && typeof block.input === 'object' ? block.input : {}
-            }
-          };
-
           if (sig) {
-            part.thoughtSignature = sig;
+            parts.push({
+              functionCall: {
+                name: block.name,
+                args: block.input && typeof block.input === 'object' ? block.input : {}
+              },
+              thoughtSignature: sig
+            });
+          } else {
+            // Cross-model fallback: if signature is lost, convert to text to prevent strict API 400s
+            parts.push({
+              text: `[Action: I will now call the tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
+            });
           }
-
-          parts.push(part);
         } else if (block.type === 'tool_result') {
           // Look up the actual function name from Redis.
           const cachedName = await redis.get(`gemini:toolname:${block.tool_use_id}`);
@@ -172,8 +173,10 @@ export async function transformRequestToGemini(
     }
   }
 
-  // history can end with a model turn in Gemini, so no need to force a 'Continue' prompt
-  // which often causes the model to repeat its last thought.
+  // Ensure history ends with a user message (Gemini requirement for generation)
+  if (contents.length > 0 && contents[contents.length - 1].role === 'model') {
+    contents.push({ role: 'user', parts: [{ text: "Continue" }] });
+  }
 
   if (contents.length === 0) {
     contents.push({ role: 'user', parts: [{ text: " " }] });
