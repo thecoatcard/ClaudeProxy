@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { validateAdminKey } from '@/lib/auth';
 import { resetAllKeys } from '@/lib/key-manager';
 
-export const runtime = 'edge';
+// Node.js runtime required for ioredis
 
 export async function POST(req: Request) {
   // 1. Auth check

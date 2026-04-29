@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { extractToken, validateUserKey } from '@/lib/auth';
 import { countTokens } from '@/lib/tokenizer';
 
-export const runtime = 'edge';
+// Node.js runtime required for ioredis
 
 export async function OPTIONS() {
   return new Response(null, {

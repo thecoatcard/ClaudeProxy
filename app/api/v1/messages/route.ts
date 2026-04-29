@@ -10,7 +10,7 @@ import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens
 import { tryOptimizations } from '@/lib/transformers/optimizations';
 import { transformError } from '@/lib/transformers/errors';
 
-export const runtime = 'edge';
+// Node.js runtime required for ioredis (TCP connection)
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
  *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
@@ -91,7 +91,7 @@ export async function POST(req: Request) {
   const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
 
   try {
-    const res = await executeWithRetry(model, geminiReq, stream || false, token);
+    const res = await executeWithRetry(model, geminiReq, stream || false, token, req.signal);
 
     if (stream) {
       if (!res.body) throw new Error("No stream body");

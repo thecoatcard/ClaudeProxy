@@ -1,21 +1,25 @@
 import fs from 'fs';
-import https from 'https';
+import Redis from 'ioredis';
 
 const env = fs.readFileSync('.env', 'utf8').split('\n');
-let redisUrl = '', redisToken = '';
+let redisUrl = '';
 for (const line of env) {
   if (line.startsWith('REDIS_URL=')) redisUrl = line.split('=')[1].trim().replace(/['"]/g, '');
-  if (line.startsWith('REDIS_TOKEN=')) redisToken = line.split('=')[1].trim().replace(/['"]/g, '');
 }
+
+if (!redisUrl) {
+  console.error("REDIS_URL not found in .env");
+  process.exit(1);
+}
+
+const client = new Redis(redisUrl);
+
 async function activateAllKeys() {
-  const res = await fetch(`${redisUrl}/zrange/gemini:key_pool/0/-1`, {
-    headers: { Authorization: `Bearer ${redisToken}` }
-  });
-  const data = await res.json();
-  const keys = data.result;
+  const keys = await client.zrange('gemini:key_pool', 0, -1);
 
   if (!keys || keys.length === 0) {
     console.log("No keys found.");
+    await client.quit();
     return;
   }
 
@@ -24,36 +28,28 @@ async function activateAllKeys() {
   let count = 0;
   for (const id of keys) {
     // get key data
-    const kRes = await fetch(`${redisUrl}/hgetall/gemini:key:${id}`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
-    });
-    const kData = await kRes.json();
-    const props = kData.result;
+    const props = await client.hgetall(`gemini:key:${id}`);
     
-    // Convert array format [k1, v1, k2, v2] to object if needed
-    let rpmUsed = 0;
-    if (Array.isArray(props)) {
-      for (let i = 0; i < props.length; i += 2) {
-        if (props[i] === 'rpm_used') rpmUsed = Number(props[i+1]);
-      }
-    } else if (props && props.rpm_used) {
-      rpmUsed = Number(props.rpm_used);
-    }
+    let rpmUsed = Number(props.rpm_used || 0);
 
     // Set status healthy, failure_count 0, cooldown_until 0
-    await fetch(`${redisUrl}/hset/gemini:key:${id}/status/healthy/failure_count/0/cooldown_until/0`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
+    await client.hset(`gemini:key:${id}`, {
+      status: 'healthy',
+      failure_count: 0,
+      cooldown_until: 0
     });
 
     // Reset score to 100 - rpmUsed
-    await fetch(`${redisUrl}/zadd/gemini:key_pool/${100 - rpmUsed}/${id}`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
-    });
+    await client.zadd('gemini:key_pool', 100 - rpmUsed, id);
     
     count++;
   }
 
   console.log(`Successfully activated ${count} keys!`);
+  await client.quit();
 }
 
-activateAllKeys().catch(console.error);
+activateAllKeys().catch(async (err) => {
+  console.error(err);
+  await client.quit();
+});
