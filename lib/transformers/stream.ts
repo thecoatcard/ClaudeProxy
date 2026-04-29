@@ -143,12 +143,17 @@ export async function* transformStream(
     }
 
     // Close all open blocks
+    let hasToolUse = false;
+    for (const [idx, state] of (policy as any).byUpstream.entries()) {
+      if (state.type === 'tool_use') hasToolUse = true;
+    }
+
     for (const e of policy.closeAll()) yield e;
 
     // 3. Message Stop
     yield `event: message_delta\ndata: ${JSON.stringify({
       type: 'message_delta',
-      delta: { stop_reason: 'end_turn', stop_sequence: null },
+      delta: { stop_reason: hasToolUse ? 'tool_use' : 'end_turn', stop_sequence: null },
       usage: { output_tokens: usageRef.output_tokens }
     })}\n\n`;
 

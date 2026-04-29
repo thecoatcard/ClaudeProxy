@@ -75,13 +75,11 @@ export async function tryOptimizations(body: any): Promise<OptimizationResult | 
     
     if (toolName === 'web_search') {
       const query = extractValue(rawText, ['query', 'search', 'q']) || rawText.slice(0, 50);
-      const results = await performWebSearch(query);
-      return createToolResponse(model, toolName, { query }, results);
+      return createToolResponse(model, toolName, { query });
     } else {
       const url = extractValue(rawText, ['url', 'href', 'link']) || (rawText.match(/https?:\/\/[^\s]+/)?.[0]);
       if (url) {
-        const result = await performWebFetch(url);
-        return createToolResponse(model, toolName, { url }, result);
+        return createToolResponse(model, toolName, { url });
       }
     }
   }
@@ -165,7 +163,7 @@ function createTextResponse(model: string, text: string, inputTokens: number, ou
   };
 }
 
-function createToolResponse(model: string, toolName: string, input: any, result: string): OptimizationResult {
+function createToolResponse(model: string, toolName: string, input: any): OptimizationResult {
   const toolId = 'srvtoolu_' + nanoid(24);
   return {
     id: 'msg_' + nanoid(24),
@@ -178,17 +176,13 @@ function createToolResponse(model: string, toolName: string, input: any, result:
         id: toolId,
         name: toolName,
         input: input
-      },
-      {
-        type: 'text',
-        text: `[Local Executor Result]:\n${result}`
       }
     ],
-    stop_reason: 'end_turn',
+    stop_reason: 'tool_use',
     stop_sequence: null,
     usage: {
       input_tokens: 100,
-      output_tokens: Math.ceil(result.length / 4)
+      output_tokens: 50
     }
   };
 }
