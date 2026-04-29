@@ -63,13 +63,13 @@ export default function KeysPage() {
   };
 
   const activateAllKeys = async () => {
-    const res = await fetch('/api/admin/keys?action=activate-all', { method: 'PATCH' });
+    if (!confirm("This will reset failure counts and cooldowns for all 93 keys. Proceed?")) return;
+    const res = await fetch('/api/admin/reset-keys', { method: 'POST' });
     if (res.ok) {
-      const data = await res.json();
-      alert(`Activated ${data.activated} key(s).`);
+      alert(`All keys have been reset and activated.`);
       fetchKeys();
     } else {
-      alert("Failed to activate keys.");
+      alert("Failed to reset keys.");
     }
   };
 
@@ -95,8 +95,13 @@ export default function KeysPage() {
       
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h2 className="card-title" style={{ margin: 0 }}>Gemini Provider Keys</h2>
-          <button className="btn" onClick={activateAllKeys} disabled={geminiKeys.length === 0}>Activate All</button>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <h2 className="card-title" style={{ margin: 0 }}>Gemini Provider Keys</h2>
+            <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+              <span style={{ color: 'var(--success)', fontWeight: 'bold' }}>●</span> Auto-Refill Active (Triggers at 20% Pool Health)
+            </p>
+          </div>
+          <button className="btn btn-primary" onClick={activateAllKeys} disabled={geminiKeys.length === 0}>Reset Stats & Activate All</button>
         </div>
         <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
           <input type="text" placeholder="New Gemini API Key" className="input" value={newGKey} onChange={e => setNewGKey(e.target.value)} />

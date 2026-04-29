@@ -117,7 +117,8 @@ async function applyCache(
 export async function executeWithRetry(
   anthropicModel: string,
   geminiBody: any,
-  stream: boolean
+  stream: boolean,
+  userId?: string
 ) {
   const modelMap = await getModelMapping(anthropicModel);
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
@@ -133,7 +134,7 @@ export async function executeWithRetry(
   let lastCacheHash: string | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const keyObj = await getHealthiestKeyObj();
+    const keyObj = await getHealthiestKeyObj(userId);
 
     if (!keyObj) {
       throw new Error('overloaded_error'); // will be mapped to 529

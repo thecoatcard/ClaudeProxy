@@ -1,10 +1,56 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
 
+// Per-model max output token ceilings (Gemini rejects values above these).
+const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  'gemini-2.5-flash':               65536,
+  'gemini-2.5-flash-lite':          32768,
+  'gemini-3.1-flash-lite-preview':  131072, // Preview models often have massive ceilings
+  'gemini-3-flash-preview':         65536,
+  'gemini-flash-latest':            8192,
+  'gemini-flash-lite-latest':       8192,
+  'gemma-4-31b-it':                 8192,
+  'gemma-4-26b-a4b-it':             8192,
+};
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384; // Increased from 8192
+
+/**
+ * Build a Gemini toolConfig from an Anthropic tool_choice object.
+ *
+ *  { type: "auto" }                → AUTO  (default — model decides)
+ *  { type: "any" }                 → ANY   (model must call a tool)
+ *  { type: "tool", name: "foo" }   → ANY + allowedFunctionNames: ["foo"]
+ *  { type: "none" }                → NONE  (model must NOT call any tool)
+ *
+ * Ref: https://ai.google.dev/gemini-api/docs/function-calling
+ */
+function buildToolConfig(toolChoice: any): any | undefined {
+  if (!toolChoice || typeof toolChoice !== 'object') return undefined;
+  switch (toolChoice.type) {
+    case 'auto':
+      return { functionCallingConfig: { mode: 'AUTO' } };
+    case 'any':
+      return { functionCallingConfig: { mode: 'ANY' } };
+    case 'tool': {
+      const cfg: any = { functionCallingConfig: { mode: 'ANY' } };
+      if (typeof toolChoice.name === 'string' && toolChoice.name) {
+        cfg.functionCallingConfig.allowedFunctionNames = [toolChoice.name];
+      }
+      return cfg;
+    }
+    case 'none':
+      return { functionCallingConfig: { mode: 'NONE' } };
+    default:
+      return undefined;
+  }
+}
+
 export async function transformRequestToGemini(
   anthropicReq: any,
   toolIdMap: Map<string, string>,
-  toolSchemas?: Map<string, any>
+  toolSchemas?: Map<string, any>,
+  /** Internal model name resolved by model-router — used for max_token clamping */
+  internalModel?: string
 ) {
   // Capture original Anthropic input_schemas so the response/stream path can
   // repair Gemini functionCall args against them before emitting tool_use.
@@ -169,33 +215,36 @@ export async function transformRequestToGemini(
     contents.unshift({ role: 'user', parts: [{ text: " " }] });
   }
 
-  // Remove empty configs
+  // ── Generation config ────────────────────────────────────────────────────
   const generationConfig: any = {};
-  if (anthropicReq.max_tokens !== undefined) generationConfig.maxOutputTokens = anthropicReq.max_tokens;
+
+  // max_tokens: clamp to the model's output ceiling so we never send an
+  // oversized value that Gemini rejects with a 400.
+  if (anthropicReq.max_tokens !== undefined) {
+    const ceiling = internalModel
+      ? (MODEL_MAX_OUTPUT_TOKENS[internalModel] ?? DEFAULT_MAX_OUTPUT_TOKENS)
+      : DEFAULT_MAX_OUTPUT_TOKENS;
+    generationConfig.maxOutputTokens = Math.min(Number(anthropicReq.max_tokens), ceiling);
+  }
+
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;
-  if (anthropicReq.top_p !== undefined) generationConfig.topP = anthropicReq.top_p;
+  if (anthropicReq.top_p       !== undefined) generationConfig.topP        = anthropicReq.top_p;
+  // top_k is not in the Anthropic spec but Claude Code occasionally forwards it.
+  if (anthropicReq.top_k       !== undefined) generationConfig.topK        = anthropicReq.top_k;
+
+  // stop_sequences → Gemini stopSequences.
+  // Claude Code uses stop sequences as flow-control signals.
+  if (Array.isArray(anthropicReq.stop_sequences) && anthropicReq.stop_sequences.length > 0) {
+    generationConfig.stopSequences = anthropicReq.stop_sequences;
+  }
 
   // Map Anthropic extended thinking → Gemini thinkingConfig.
   // Claude Code sends `thinking: { type: "enabled", budget_tokens: N }`.
   // Flipping `includeThoughts: true` makes Gemini return reasoning as thought
   // parts so we can surface them back as Anthropic thinking blocks.
-  // const thinking = anthropicReq.thinking;
-  // if (thinking && typeof thinking === 'object' && thinking.type === 'enabled') {
-  //   const budget = Number(thinking.budget_tokens);
-  //   const thinkingConfig: any = { includeThoughts: true };
-  //   if (Number.isFinite(budget) && budget > 0) {
-  //     thinkingConfig.thinkingBudget = Math.floor(budget);
-  //   } else {
-  //     // -1 = dynamic budget; Gemini picks per-request.
-  //     thinkingConfig.thinkingBudget = -1;
-  //   }
-  //   generationConfig.thinkingConfig = thinkingConfig;
-
-  //   // Reasoning benchmarks favor ~0.7 over Gemini's 1.0 default.
-  //   if (anthropicReq.temperature === undefined) {
-  //     generationConfig.temperature = 0.7;
-  //   }
-  // }
+  // The `interleaved-thinking-2025-05-14` beta allows thinking blocks to appear
+  // between tool_use blocks — no extra handling needed here; the stream/response
+  // transformers already emit thought parts as thinking content_blocks.
 
 const thinking = anthropicReq.thinking;
 
@@ -238,9 +287,17 @@ if (
   const result: any = {
     contents,
   };
-  
+
   if (systemInstruction) result.systemInstruction = systemInstruction;
-  if (anthropicReq.tools && anthropicReq.tools.length > 0) result.tools = transformToolsToGemini(anthropicReq.tools);
+
+  if (anthropicReq.tools && anthropicReq.tools.length > 0) {
+    result.tools = transformToolsToGemini(anthropicReq.tools);
+
+    // tool_choice → toolConfig — only meaningful when tools are present.
+    const toolConfig = buildToolConfig(anthropicReq.tool_choice);
+    if (toolConfig) result.toolConfig = toolConfig;
+  }
+
   if (Object.keys(generationConfig).length > 0) result.generationConfig = generationConfig;
 
   return result;

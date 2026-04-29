@@ -1,5 +1,7 @@
 import { redis } from './redis';
 
+const CACHE_ENABLED = process.env.GEMINI_CACHE_ENABLED === 'true';
+
 export interface GeminiKey {
   key: string;
   status: 'healthy' | 'cooldown' | 'revoked';
@@ -11,14 +13,60 @@ export interface GeminiKey {
   last_used: number;
 }
 
-export async function getHealthiestKeyObj(): Promise<{ id: string, key: string } | null> {
+export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string, key: string } | null> {
+  // Get all key IDs sorted by health/score
   const keys = await redis.zrange<string[]>('gemini:key_pool', 0, -1, { rev: true });
+  if (keys.length === 0) return null;
+
   const now = Math.floor(Date.now() / 1000);
 
-  for (const keyId of keys) {
-    const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey | null;
-    if (!keyData || !keyData.key) continue;
-    if (keyData.status === 'revoked') continue;
+  // --- Auto-Activation Trigger (20% Threshold) ---
+  // If we have many keys but most are on cooldown/failing, trigger a 
+  // background reset to prevent the pool from drying up entirely.
+  const checkPoolHealth = async () => {
+    // Only check occasionally to avoid Redis overhead
+    if (Math.random() > 0.1) return; 
+
+    const healthyCount = await redis.zcount('gemini:key_pool', 50, 100);
+    const totalCount = keys.length;
+    
+    if (totalCount > 5 && healthyCount < (totalCount * 0.2)) {
+      console.log(`[Auto-Refill] Pool healthy count (${healthyCount}) below 20% of total (${totalCount}). Triggering reset...`);
+      await resetAllKeys();
+    }
+  };
+  checkPoolHealth().catch(() => {});
+  // ------------------------------------------------
+
+  // If caching is enabled, try the sticky key first.
+  let preferredId: string | null = null;
+  if (CACHE_ENABLED && userId) {
+    let hash = 0;
+    for (let i = 0; i < userId.length; i++) {
+      hash = ((hash << 5) - hash) + userId.charCodeAt(i);
+      hash |= 0; 
+    }
+    preferredId = keys[Math.abs(hash) % keys.length];
+  }
+
+  // To handle 93+ keys efficiently, we pipeline the metadata lookup for the 
+  // top 10 healthiest candidates in one round-trip.
+  const candidates = preferredId 
+    ? [preferredId, ...keys.filter(id => id !== preferredId).slice(0, 9)]
+    : keys.slice(0, 10);
+
+  const pipeline = redis.pipeline();
+  for (const id of candidates) {
+    pipeline.hgetall(`gemini:key:${id}`);
+  }
+  
+  const results = await pipeline.exec() as (GeminiKey | null)[];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const keyId = candidates[i];
+    const keyData = results[i];
+
+    if (!keyData || !keyData.key || keyData.status === 'revoked') continue;
 
     const cooldownUntil = Number(keyData.cooldown_until || 0);
     const rpmUsed = Number(keyData.rpm_used || 0);
@@ -28,18 +76,26 @@ export async function getHealthiestKeyObj(): Promise<{ id: string, key: string }
       return { id: keyId, key: keyData.key };
     }
 
-    // Lazy recovery: cooldown period elapsed — mark healthy, clear the timer,
-    // and restore the zset score so the key re-enters the healthy pool.
     if (keyData.status === 'cooldown' && cooldownOver) {
-      await redis.hset(`gemini:key:${keyId}`, {
-        status: 'healthy',
-        failure_count: 0,
-        cooldown_until: 0,
-      });
-      await redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId });
+      // Lazy recovery
+      await Promise.all([
+        redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 }),
+        redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId })
+      ]);
       return { id: keyId, key: keyData.key };
     }
   }
+
+  // Fallback: If top 10 are all busy, do a slow scan of the rest (rare)
+  if (keys.length > 10) {
+    for (const keyId of keys.slice(10)) {
+       const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey | null;
+       if (keyData && keyData.key && keyData.status === 'healthy' && Number(keyData.cooldown_until || 0) <= now) {
+         return { id: keyId, key: keyData.key };
+       }
+    }
+  }
+
   return null;
 }
 
@@ -62,5 +118,26 @@ export async function reportKeyFailure(id: string, isRateLimit: boolean) {
 }
 
 export async function recordKeyUsage(id: string) {
-  await redis.hset(`gemini:key:${id}`, { last_used: Math.floor(Date.now() / 1000) });
+  await Promise.all([
+    redis.hset(`gemini:key:${id}`, { last_used: Math.floor(Date.now() / 1000) }),
+    // Track in-flight requests to help the load balancer avoid hotspots
+    redis.hincrby(`gemini:key:${id}`, 'rpm_used', 1)
+  ]);
+}
+
+export async function resetAllKeys() {
+  const keys = await redis.zrange<string[]>('gemini:key_pool', 0, -1);
+  if (!keys || keys.length === 0) return;
+
+  const pipeline = redis.pipeline();
+  for (const id of keys) {
+    pipeline.hset(`gemini:key:${id}`, {
+      status: 'healthy',
+      failure_count: 0,
+      cooldown_until: 0,
+    });
+    // Reset scores to a high starting value (e.g. 100)
+    pipeline.zadd('gemini:key_pool', { score: 100, member: id });
+  }
+  await pipeline.exec();
 }

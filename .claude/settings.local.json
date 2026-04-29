@@ -2,10 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(npx tsc *)",
+      "Bash(npx tsc --noEmit)",
       "Bash(echo \"exit=$?\")",
+      "Bash(npm run dev)",
+      "Bash(npm run build)",
+      "Bash(npm run lint)",
+      "Bash(node activate-keys.mjs)",
+      "Bash(node test-*.mjs)",
       "mcp__plugin_context7_context7__resolve-library-id",
       "mcp__plugin_context7_context7__query-docs",
       "mcp__ide__getDiagnostics"
-    ]
+    ],
+    "deny": []
   }
 }

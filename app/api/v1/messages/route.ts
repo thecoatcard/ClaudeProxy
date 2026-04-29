@@ -4,25 +4,32 @@ import { transformRequestToGemini } from '@/lib/transformers/request';
 import { transformGeminiToAnthropic } from '@/lib/transformers/response';
 import { transformStream, type StreamUsage } from '@/lib/transformers/stream';
 import { executeWithRetry } from '@/lib/retry-engine';
+import { getModelMapping } from '@/lib/model-router';
 import { logRequest } from '@/lib/logger';
 import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens } from '@/lib/metrics';
 
 export const runtime = 'edge';
 
+/** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
+ *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
+ *  here in the gateway. Unknown betas are ignored rather than rejected. */
+const ANTHROPIC_PASSTHROUGH_HEADERS = [
+  'anthropic-version',
+  'anthropic-beta',
+  'x-api-key',
+] as const;
+
 export async function POST(req: Request) {
   const startTime = Date.now();
-  const token = extractToken(req);
   
+  // 1. Auth check
+  const token = extractToken(req);
   if (!token) {
     return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
   }
 
-  const isValid = await validateUserKey(token);
-  if (!isValid) {
-    return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
-  }
-
-  let body;
+  // 2. Parse Body
+  let body: any;
   try {
     body = await req.json();
   } catch (e) {
@@ -34,14 +41,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ type: "error", error: { type: "invalid_request_error", message: "Model is required" } }, { status: 400 });
   }
 
+  // 3. Parallel Pre-flight (Auth + Routing)
+  const [isValid, modelMap] = await Promise.all([
+    validateUserKey(token),
+    getModelMapping(model)
+  ]);
+
+  if (!isValid) {
+    return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
+  }
+
   await incrementRequestCount();
 
   const toolIdMap = new Map<string, string>();
   const toolSchemas = new Map<string, any>();
-  const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas);
+  const internalModel = modelMap.primary;
+
+  // 4. Transform
+  const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
 
   try {
-    const res = await executeWithRetry(model, geminiReq, stream || false);
+    const res = await executeWithRetry(model, geminiReq, stream || false, token);
 
     if (stream) {
       if (!res.body) throw new Error("No stream body");
@@ -70,6 +90,7 @@ export async function POST(req: Request) {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
         }
       });
     } else {
