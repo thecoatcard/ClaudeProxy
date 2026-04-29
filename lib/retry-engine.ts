@@ -118,8 +118,7 @@ export async function executeWithRetry(
   anthropicModel: string,
   geminiBody: any,
   stream: boolean,
-  userId?: string,
-  signal?: AbortSignal
+  userId?: string
 ) {
   const modelMap = await getModelMapping(anthropicModel);
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
@@ -185,7 +184,7 @@ export async function executeWithRetry(
     }
 
     try {
-      const res = await callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream, signal);
+      const res = await callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream);
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, true);
