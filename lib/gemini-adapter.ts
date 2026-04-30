@@ -7,13 +7,20 @@ export async function callGemini(internalModel: string, apiKey: string, body: an
   // automatic decompression the moment this header is user-controlled, and
   // json()/stream parsing then fails on raw compressed bytes. The runtime
   // already negotiates gzip/br on our behalf.
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
-  return res;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }

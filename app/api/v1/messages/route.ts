@@ -11,6 +11,7 @@ import { tryOptimizations } from '@/lib/transformers/optimizations';
 import { transformError } from '@/lib/transformers/errors';
 
 export const runtime = 'edge';
+export const maxDuration = 300; // Increase timeout to 5 minutes
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
  *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
