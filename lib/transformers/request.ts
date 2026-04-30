@@ -126,15 +126,27 @@ export async function transformRequestToGemini(
               thoughtSignature: sig
             });
           } else {
-            // Cross-model fallback: if signature is lost, convert to text to prevent strict API 400s
+            // If signature is lost, we send the functionCall anyway. Gemini may 400,
+            // but that is better than a guaranteed 400 on the next turn due to
+            // turn-taking violation if we converted this to text.
             parts.push({
-              text: `[Action: I will now call the tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
+              functionCall: {
+                name: block.name,
+                args: block.input && typeof block.input === 'object' ? block.input : {}
+              }
             });
           }
         } else if (block.type === 'tool_result') {
-          // Look up the actual function name from Redis.
+          // Look up the actual function name.
           const cachedName = await redis.get(`gemini:toolname:${block.tool_use_id}`);
-          const fnName = cachedName ? String(cachedName) : 'unknown_tool';
+          let fnName = cachedName ? String(cachedName) : undefined;
+          
+          if (!fnName) {
+            // Fallback: check if we saw this tool ID earlier in the history (populated in this request's loop)
+            fnName = toolIdMap.get(block.tool_use_id);
+          }
+          
+          if (!fnName) fnName = 'unknown_tool';
           
           let content = block.content;
           if (!content || (Array.isArray(content) && content.length === 0)) {
@@ -193,10 +205,14 @@ export async function transformRequestToGemini(
   // max_tokens: clamp to the model's output ceiling so we never send an
   // oversized value that Gemini rejects with a 400.
   if (anthropicReq.max_tokens !== undefined) {
+    const requestedMax = Number(anthropicReq.max_tokens);
     const ceiling = internalModel
       ? (MODEL_MAX_OUTPUT_TOKENS[internalModel] ?? DEFAULT_MAX_OUTPUT_TOKENS)
       : DEFAULT_MAX_OUTPUT_TOKENS;
-    generationConfig.maxOutputTokens = Math.min(Number(anthropicReq.max_tokens), ceiling);
+    
+    if (requestedMax > 0) {
+      generationConfig.maxOutputTokens = Math.min(requestedMax, ceiling);
+    }
   }
 
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;

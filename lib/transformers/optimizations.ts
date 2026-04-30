@@ -191,7 +191,7 @@ function createToolResponse(model: string, toolName: string, input: any, result:
         text: `[Local Executor Result]:\n${result}`
       }
     ],
-    stop_reason: 'end_turn',
+    stop_reason: 'tool_use',
     stop_sequence: null,
     usage: {
       input_tokens: 100,
