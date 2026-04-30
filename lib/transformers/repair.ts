@@ -120,7 +120,15 @@ function coerce(value: any, schema: JsonSchema): any {
 
     case 'string':
     default: {
-      if (typeof value === 'string') return value;
+      if (typeof value === 'string') {
+        let val = value;
+        // Trim leading/trailing whitespace which models often hallucinate in JSON values
+        val = val.trim();
+        // If it looks like a Windows path with unescaped backslashes (e.g. "C:\Users" vs "C:\\Users")
+        // but it's already in a string, we don't need to do anything as JS strings handle them.
+        // However, if the model sent a space before the path, the trim() above fixed it.
+        return val;
+      }
       if (value === null || value === undefined) return '';
       if (typeof value === 'object') {
         try { return JSON.stringify(value); } catch { return ''; }
