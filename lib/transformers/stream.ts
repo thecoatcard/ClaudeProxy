@@ -9,7 +9,7 @@ export interface StreamUsage {
 }
 
 export async function* transformStream(
-  geminiStream: ReadableStream<Uint8Array>,
+  geminiResponsePromise: Promise<Response>,
   reqModel: string,
   toolIdMap: Map<string, string>,
   toolSchemas?: Map<string, any>,
@@ -37,6 +37,7 @@ export async function* transformStream(
   ];
 
   try {
+    // 1. Send initial events IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel)
     yield `event: message_start\ndata: ${JSON.stringify({
       type: 'message_start',
       message: {
@@ -52,7 +53,37 @@ export async function* transformStream(
 
     yield `event: ping\ndata: {"type":"ping"}\n\n`;
 
-    const reader = geminiStream.getReader();
+    // 2. Now await the actual Gemini response (which might take >25s if reasoning is enabled)
+    let res: Response;
+    try {
+      res = await geminiResponsePromise;
+    } catch (e: any) {
+      console.error("Gemini request failed before stream start", e);
+      yield `event: error\ndata: ${JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: e.message || "Failed to connect to Gemini" }
+      })}\n\n`;
+      return;
+    }
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      console.error("Gemini error response:", errBody);
+      yield `event: error\ndata: ${JSON.stringify({
+        type: "error",
+        error: { 
+          type: "api_error", 
+          message: errBody?.error?.message || `Gemini error (status ${res.status})` 
+        }
+      })}\n\n`;
+      return;
+    }
+
+    if (!res.body) {
+      throw new Error("No response body from Gemini");
+    }
+
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 

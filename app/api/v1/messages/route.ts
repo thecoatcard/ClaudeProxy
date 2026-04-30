@@ -92,12 +92,14 @@ export async function POST(req: Request) {
   const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
 
   try {
-    const res = await executeWithRetry(model, geminiReq, stream || false, token);
-
     if (stream) {
-      if (!res.body) throw new Error("No stream body");
+      // Return response IMMEDIATELY to avoid platform "initial response" timeouts (e.g. 25s on Vercel)
       const usageRef: StreamUsage = { inputTokens: 0, outputTokens: 0 };
-      const transformIterator = transformStream(res.body, model, toolIdMap, toolSchemas, usageRef);
+      
+      // We pass the promise directly. transformStream will yield 'message_start' and 'ping' 
+      // immediately before awaiting this promise.
+      const geminiResPromise = executeWithRetry(model, geminiReq, true, token);
+      const transformIterator = transformStream(geminiResPromise, model, toolIdMap, toolSchemas, usageRef);
 
       const streamBody = new ReadableStream({
         async start(controller) {
@@ -122,9 +124,12 @@ export async function POST(req: Request) {
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
           'X-Accel-Buffering': 'no',
+          'Anthropic-Version': '2023-06-01', // Forward the version header
         }
       });
     } else {
+      // For non-streaming, we must still await since the client expects a JSON body
+      const res = await executeWithRetry(model, geminiReq, false, token);
       const geminiRes = await res.json();
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas);
 
