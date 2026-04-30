@@ -52,6 +52,7 @@ export async function transformRequestToGemini(
   /** Internal model name resolved by model-router — used for max_token clamping */
   internalModel?: string
 ) {
+  const convertedToolIds = new Set<string>();
   // Capture original Anthropic input_schemas so the response/stream path can
   // repair Gemini functionCall args against them before emitting tool_use.
   if (toolSchemas && Array.isArray(anthropicReq.tools)) {
@@ -126,17 +127,29 @@ export async function transformRequestToGemini(
               thoughtSignature: sig
             });
           } else {
-            // If signature is lost, we send the functionCall anyway. Gemini may 400,
-            // but that is better than a guaranteed 400 on the next turn due to
-            // turn-taking violation if we converted this to text.
+            // If signature is lost, we MUST convert to text. 
+            // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
+            // We record this ID so we can also convert the corresponding tool_result to text.
+            convertedToolIds.add(block.id);
             parts.push({
-              functionCall: {
-                name: block.name,
-                args: block.input && typeof block.input === 'object' ? block.input : {}
-              }
+              text: `[Action: I am calling tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
             });
           }
         } else if (block.type === 'tool_result') {
+          if (convertedToolIds.has(block.tool_use_id)) {
+            // Corresponding tool_use was converted to text, so this must be text too.
+            let resultText = "";
+            if (typeof block.content === 'string') {
+              resultText = block.content;
+            } else if (Array.isArray(block.content)) {
+              resultText = block.content.map((c: any) => c.text || JSON.stringify(c)).join("\n");
+            } else {
+              resultText = JSON.stringify(block.content);
+            }
+            parts.push({ text: `[Tool Result]:\n${resultText}` });
+            continue;
+          }
+
           // Look up the actual function name.
           const cachedName = await redis.get(`gemini:toolname:${block.tool_use_id}`);
           let fnName = cachedName ? String(cachedName) : undefined;
