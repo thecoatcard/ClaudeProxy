@@ -90,7 +90,22 @@ export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string
   if (keys.length > 10) {
     for (const keyId of keys.slice(10)) {
        const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey | null;
-       if (keyData && keyData.key && keyData.status === 'healthy' && Number(keyData.cooldown_until || 0) <= now) {
+       if (!keyData || !keyData.key || keyData.status === 'revoked') continue;
+
+       const cooldownUntil = Number(keyData.cooldown_until || 0);
+       const cooldownOver = cooldownUntil <= now;
+
+       if (keyData.status === 'healthy' && cooldownOver) {
+         return { id: keyId, key: keyData.key };
+       }
+
+       if (keyData.status === 'cooldown' && cooldownOver) {
+         // Lazy recovery for fallback keys
+         const rpmUsed = Number(keyData.rpm_used || 0);
+         await Promise.all([
+           redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 }),
+           redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId })
+         ]);
          return { id: keyId, key: keyData.key };
        }
     }
