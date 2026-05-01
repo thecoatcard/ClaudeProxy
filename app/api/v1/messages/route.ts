@@ -97,6 +97,14 @@ export async function POST(req: Request) {
 
       const streamBody = new ReadableStream({
         async start(controller) {
+          const pingInterval = setInterval(() => {
+            try {
+              controller.enqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
+            } catch (e) {
+              // Stream might be closed
+            }
+          }, 5000);
+
           try {
             for await (const chunk of transformIterator) {
               controller.enqueue(new TextEncoder().encode(chunk));
@@ -105,7 +113,8 @@ export async function POST(req: Request) {
             console.error("Stream error", e);
             controller.enqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
-            controller.close();
+            clearInterval(pingInterval);
+            try { controller.close(); } catch (e) {}
             recordLatency(Date.now() - startTime);
             recordTokens(usageRef.inputTokens, usageRef.outputTokens);
           }

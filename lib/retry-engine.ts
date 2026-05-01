@@ -212,14 +212,22 @@ export async function executeWithRetry(
       }
 
       if (!res.ok) {
-        const err = await res.json().catch(()=>({}));
+        const err = await res.json().catch(() => ({}));
         const msg = err?.error?.message || '';
 
-        // Retry on transient "unexpected error" from Gemini backend (often a 400 or 500 variant)
-        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
-        if (isTransientBackendErr) {
+        // Handle 503 Service Unavailable or 500 Internal Server Error
+        // Also handle transient 400 "unexpected error" as a server-side glitch
+        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error|service is currently unavailable/i.test(msg));
+        
+        if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
           await reportKeyFailure(keyObj.id, 'server');
-          lastError = { status: 400, message: msg };
+
+          // Improve fallback: Try at least 2 keys on the current model before degrading
+          if (attempt % 2 === 0 && fallbackIndex < fallbacks.length) {
+            currentInternalModel = fallbacks[fallbackIndex];
+            fallbackIndex++;
+          }
+          lastError = { status: res.status, message: msg };
           continue;
         }
 
@@ -242,13 +250,19 @@ export async function executeWithRetry(
           continue;
         }
 
-        // On 400 INVALID_ARGUMENT, retry once with thoughtSignatures stripped —
-        // mismatched/stale sigs are a common cause of this error.
-        const isInvalidArg = res.status === 400 && /invalid argument|INVALID_ARGUMENT/i.test(msg);
+        // On 400 INVALID_ARGUMENT (often related to signatures or caching), 
+        // retry once with thoughtSignatures stripped.
+        const isSignatureErr = msg.includes('thought_signature') || msg.includes('thoughtSignature');
+        const isInvalidArg = res.status === 400 && (
+          /invalid argument|INVALID_ARGUMENT/i.test(msg) || 
+          err?.error?.status === 'INVALID_ARGUMENT' ||
+          isSignatureErr
+        );
+        
         const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
         if (isInvalidArg && hasSigs && !stripSigs) {
           stripSigs = true;
-          lastError = { status: 400 };
+          lastError = { status: 400, message: msg };
           continue;
         }
 

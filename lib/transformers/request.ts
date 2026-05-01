@@ -3,14 +3,18 @@ import { redis } from '../redis';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  'gemini-2.0-flash-exp':           65536,
+  'gemini-2.0-flash-lite-preview':  32768,
+  'gemini-2.0-pro-exp-02-05':       65536,
   'gemini-2.5-flash':               65536,
   'gemini-2.5-flash-lite':          32768,
-  'gemini-3.1-flash-lite-preview':  131072, // Preview models often have massive ceilings
+  'gemini-3.1-flash-lite-preview':  131072, 
+  'gemini-3.1-pro-preview':         131072,
   'gemini-3-flash-preview':         65536,
   'gemini-flash-latest':            8192,
   'gemini-flash-lite-latest':       8192,
-  'gemma-4-31b-it':                 8192,
-  'gemma-4-26b-a4b-it':             8192,
+  'gemma-4-31b-it':                 16384,
+  'gemma-4-26b-a4b-it':             16384,
 };
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384; // Increased from 8192
 
@@ -303,8 +307,16 @@ export async function transformRequestToGemini(
       // Invalid/missing budget → dynamic
       thinkingConfig.thinkingBudget = -1;
     }
+    const supportsThinking = internalModel && (
+      internalModel.includes('2.0') || 
+      internalModel.includes('3.1') || 
+      internalModel.includes('3.5') ||
+      internalModel.includes('thinking')
+    );
 
-    generationConfig.thinkingConfig = thinkingConfig;
+    if (supportsThinking) {
+      generationConfig.thinkingConfig = thinkingConfig;
+    }
 
     // Claude 3.7 Sonnet defaults to temp 1.0 when thinking is enabled, 
     // but Gemini performs better at 0.7 for reasoning tasks.
