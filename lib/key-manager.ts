@@ -114,8 +114,21 @@ export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string
   return null;
 }
 
-export async function reportKeyFailure(id: string, isRateLimit: boolean) {
-  const cooldownSecs = isRateLimit ? Number(process.env.KEY_COOLDOWN_429 || 60) : Number(process.env.KEY_COOLDOWN_503 || 20);
+export async function reportKeyFailure(id: string, type: 'ratelimit' | 'server' | 'auth') {
+  if (type === 'auth') {
+    // Permanently disable revoked/invalid keys
+    await Promise.all([
+      redis.hset(`gemini:key:${id}`, { status: 'revoked', failure_count: 999 }),
+      redis.zrem('gemini:key_pool', id)
+    ]);
+    console.warn(`[KeyManager] Key ${id} revoked (403 Forbidden). Removed from pool.`);
+    return;
+  }
+
+  const cooldownSecs = type === 'ratelimit' 
+    ? Number(process.env.KEY_COOLDOWN_429 || 60) 
+    : Number(process.env.KEY_COOLDOWN_503 || 20);
+    
   const until = Math.floor(Date.now() / 1000) + cooldownSecs;
   
   await redis.hset(`gemini:key:${id}`, {

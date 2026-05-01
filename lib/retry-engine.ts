@@ -186,14 +186,21 @@ export async function executeWithRetry(
     try {
       const res = await callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream);
 
+      if (res.status === 403) {
+        // Invalid or revoked key — mark as revoked and move to next key immediately
+        await reportKeyFailure(keyObj.id, 'auth');
+        lastError = { status: 403 };
+        continue;
+      }
+
       if (res.status === 429) {
-        await reportKeyFailure(keyObj.id, true);
+        await reportKeyFailure(keyObj.id, 'ratelimit');
         lastError = { status: 429 };
         continue;
       }
 
       if (res.status === 503 || res.status >= 500) {
-        await reportKeyFailure(keyObj.id, false);
+        await reportKeyFailure(keyObj.id, 'server');
 
         // Improve fallback: Try at least 2 keys on the current model before degrading
         if (attempt % 2 === 0 && fallbackIndex < fallbacks.length) {
@@ -206,6 +213,16 @@ export async function executeWithRetry(
 
       if (!res.ok) {
         const err = await res.json().catch(()=>({}));
+        const msg = err?.error?.message || '';
+
+        // Retry on transient "unexpected error" from Gemini backend (often a 400 or 500 variant)
+        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
+        if (isTransientBackendErr) {
+          await reportKeyFailure(keyObj.id, 'server');
+          lastError = { status: 400, message: msg };
+          continue;
+        }
+
         console.error("Gemini API Error:", JSON.stringify(err, null, 2));
         console.error("DEBUG PAYLOAD:", JSON.stringify({
           model: currentInternalModel,
@@ -213,8 +230,6 @@ export async function executeWithRetry(
           geminiBody: bodyForThisAttempt,
           error: err,
         }));
-
-        const msg = err?.error?.message || '';
 
         // Cache miss / expired / bad reference: drop the mapping, flip the
         // skip flag so the next attempt sends the full uncached body.
@@ -247,7 +262,7 @@ export async function executeWithRetry(
       if (err.message === 'overloaded_error') throw err;
       if (err.status === 400) throw err; // Safety or bad request
       if (err.name === 'AbortError' || err.message?.includes('timeout')) {
-        await reportKeyFailure(keyObj.id, false);
+        await reportKeyFailure(keyObj.id, 'server');
         lastError = err;
         continue;
       }
