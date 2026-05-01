@@ -10,6 +10,7 @@ import {
   createCachedContent,
   isCacheSupported,
 } from './cache-manager';
+import { redis } from './redis';
 
 // Models that can't see images. We strip inlineData/fileData parts before
 // sending to avoid a round-trip 400.
@@ -123,7 +124,9 @@ export async function executeWithRetry(
   const modelMap = await getModelMapping(anthropicModel);
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
   const configuredRetries = Number(process.env.MAX_RETRIES || 3);
-  const maxRetries = Math.max(configuredRetries, (fallbacks.length * 2) + 2);
+  // Use a higher retry limit if many keys are available
+  const poolKeys = await redis.zrange('gemini:key_pool', 0, -1);
+  const maxRetries = Math.max(configuredRetries, Math.min(poolKeys.length, 10), (fallbacks.length * 2) + 2);
 
   const primaryModel = modelMap.primary;
   let currentInternalModel = primaryModel;
@@ -132,6 +135,7 @@ export async function executeWithRetry(
   let stripSigs = false;
   let skipCache = false;
   let lastCacheHash: string | null = null;
+  let keyFailuresInARow = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const keyObj = await getHealthiestKeyObj(userId);
@@ -140,10 +144,10 @@ export async function executeWithRetry(
       throw new Error('overloaded_error'); // will be mapped to 529
     }
 
-    // thoughtSignatures are only valid for the model that produced them.
-    // If we fall back to a different model (or a previous 400 hinted at a
-    // signature mismatch), strip them to avoid INVALID_ARGUMENT errors.
-    let bodyForThisAttempt = (currentInternalModel !== primaryModel || stripSigs)
+    // thoughtSignatures are only valid for the model/key that produced them.
+    // If we switch keys after a failure, or if we fall back to a different model,
+    // strip them to avoid INVALID_ARGUMENT errors.
+    let bodyForThisAttempt = (currentInternalModel !== primaryModel || stripSigs || keyFailuresInARow > 0)
       ? stripThoughtSignatures(geminiBody)
       : geminiBody;
 
@@ -189,18 +193,21 @@ export async function executeWithRetry(
       if (res.status === 403) {
         // Invalid or revoked key — mark as revoked and move to next key immediately
         await reportKeyFailure(keyObj.id, 'auth');
+        keyFailuresInARow++;
         lastError = { status: 403 };
         continue;
       }
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, 'ratelimit');
+        keyFailuresInARow++;
         lastError = { status: 429 };
         continue;
       }
 
       if (res.status === 503 || res.status >= 500) {
         await reportKeyFailure(keyObj.id, 'server');
+        keyFailuresInARow++;
 
         // Improve fallback: Try at least 2 keys on the current model before degrading
         if (attempt % 2 === 0 && fallbackIndex < fallbacks.length) {
@@ -216,9 +223,10 @@ export async function executeWithRetry(
         const msg = err?.error?.message || '';
 
         // Retry on transient "unexpected error" from Gemini backend (often a 400 or 500 variant)
-        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
+        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error|unknown error/i.test(msg));
         if (isTransientBackendErr) {
           await reportKeyFailure(keyObj.id, 'server');
+          keyFailuresInARow++;
           lastError = { status: 400, message: msg };
           continue;
         }
@@ -231,6 +239,16 @@ export async function executeWithRetry(
           error: err,
         }));
 
+        // On 400 INVALID_ARGUMENT, retry once with thoughtSignatures stripped —
+        // mismatched/stale sigs are a common cause of this error.
+        const isInvalidArg = res.status === 400 && /invalid argument|INVALID_ARGUMENT/i.test(msg);
+        if (isInvalidArg && !stripSigs) {
+          stripSigs = true;
+          keyFailuresInARow++;
+          lastError = { status: 400 };
+          continue;
+        }
+
         // Cache miss / expired / bad reference: drop the mapping, flip the
         // skip flag so the next attempt sends the full uncached body.
         const isCacheErr = res.status === 400 && /cached ?content|cache/i.test(msg);
@@ -238,16 +256,7 @@ export async function executeWithRetry(
           await deleteCache(lastCacheHash);
           lastCacheHash = null;
           skipCache = true;
-          lastError = { status: 400 };
-          continue;
-        }
-
-        // On 400 INVALID_ARGUMENT, retry once with thoughtSignatures stripped —
-        // mismatched/stale sigs are a common cause of this error.
-        const isInvalidArg = res.status === 400 && /invalid argument|INVALID_ARGUMENT/i.test(msg);
-        const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
-        if (isInvalidArg && hasSigs && !stripSigs) {
-          stripSigs = true;
+          keyFailuresInARow++;
           lastError = { status: 400 };
           continue;
         }
@@ -263,6 +272,7 @@ export async function executeWithRetry(
       if (err.status === 400) throw err; // Safety or bad request
       if (err.name === 'AbortError' || err.message?.includes('timeout')) {
         await reportKeyFailure(keyObj.id, 'server');
+        keyFailuresInARow++;
         lastError = err;
         continue;
       }
