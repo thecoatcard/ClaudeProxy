@@ -84,22 +84,16 @@ export async function POST(req: Request) {
 
   await incrementRequestCount();
 
-  const toolIdMap = new Map<string, string>();
-  const toolSchemas = new Map<string, any>();
   const internalModel = modelMap.primary;
-
-  // 4. Transform
-  const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
 
   try {
     if (stream) {
       // Return response IMMEDIATELY to avoid platform "initial response" timeouts (e.g. 25s on Vercel)
       const usageRef: StreamUsage = { inputTokens: 0, outputTokens: 0 };
       
-      // We pass the promise directly. transformStream will yield 'message_start' and 'ping' 
-      // immediately before awaiting this promise.
-      const geminiResPromise = executeWithRetry(model, geminiReq, true, token);
-      const transformIterator = transformStream(geminiResPromise, model, toolIdMap, toolSchemas, usageRef);
+      // All heavy work (Redis lookups, transformation, and Gemini API call) happens 
+      // inside transformStream AFTER it has yielded the first headers/chunks.
+      const transformIterator = transformStream(body, model, internalModel, token, usageRef);
 
       const streamBody = new ReadableStream({
         async start(controller) {
@@ -129,6 +123,10 @@ export async function POST(req: Request) {
       });
     } else {
       // For non-streaming, we must still await since the client expects a JSON body
+      const toolIdMap = new Map<string, string>();
+      const toolSchemas = new Map<string, any>();
+      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
+      
       const res = await executeWithRetry(model, geminiReq, false, token);
       const geminiRes = await res.json();
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas);

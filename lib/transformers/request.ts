@@ -83,7 +83,34 @@ export async function transformRequestToGemini(
   } : undefined;
 
   const contents: any[] = [];
-  
+
+  // --- Optimization: Vectorized Metadata Lookup ---
+  // Scan history to collect all tool IDs. We'll fetch all signatures and 
+  // tool names in one round-trip (mget) to avoid 25s timeouts on long threads.
+  const allToolIds = new Set<string>();
+  for (const msg of anthropicReq.messages || []) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use') allToolIds.add(block.id);
+        if (block.type === 'tool_result') allToolIds.add(block.tool_use_id);
+      }
+    }
+  }
+
+  const idList = Array.from(allToolIds);
+  const [sigs, names] = idList.length > 0 ? await Promise.all([
+    redis.mget<string[]>(idList.map(id => `gemini:thought:${id}`)),
+    redis.mget<string[]>(idList.map(id => `gemini:toolname:${id}`))
+  ]) : [[], []];
+
+  const sigMap = new Map<string, string>();
+  const nameMap = new Map<string, string>();
+  idList.forEach((id, i) => {
+    if (sigs[i]) sigMap.set(id, sigs[i]);
+    if (names[i]) nameMap.set(id, names[i]);
+  });
+  // ------------------------------------------------
+
   for (const msg of anthropicReq.messages || []) {
     const role = msg.role === 'assistant' ? 'model' : 'user';
     const parts = [];
@@ -117,7 +144,7 @@ export async function transformRequestToGemini(
           parts.push({ text: `<thought>\n[Redacted internal thinking]\n</thought>` });
         } else if (block.type === 'tool_use') {
           toolIdMap.set(block.id, block.name);
-          const sig = await redis.get(`gemini:thought:${block.id}`);
+          const sig = sigMap.get(block.id);
           if (sig) {
             parts.push({
               functionCall: {
@@ -129,7 +156,6 @@ export async function transformRequestToGemini(
           } else {
             // If signature is lost, we MUST convert to text. 
             // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
-            // We record this ID so we can also convert the corresponding tool_result to text.
             convertedToolIds.add(block.id);
             parts.push({
               text: `[Action: I am calling tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
@@ -151,8 +177,7 @@ export async function transformRequestToGemini(
           }
 
           // Look up the actual function name.
-          const cachedName = await redis.get(`gemini:toolname:${block.tool_use_id}`);
-          let fnName = cachedName ? String(cachedName) : undefined;
+          let fnName = nameMap.get(block.tool_use_id);
           
           if (!fnName) {
             // Fallback: check if we saw this tool ID earlier in the history (populated in this request's loop)

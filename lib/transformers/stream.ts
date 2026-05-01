@@ -8,14 +8,19 @@ export interface StreamUsage {
   outputTokens: number;
 }
 
+import { transformRequestToGemini } from './request';
+import { executeWithRetry } from '../retry-engine';
+
 export async function* transformStream(
-  geminiResponsePromise: Promise<Response>,
+  anthropicBody: any,
   reqModel: string,
-  toolIdMap: Map<string, string>,
-  toolSchemas?: Map<string, any>,
+  internalModel: string,
+  token: string,
   usageRef?: StreamUsage
 ) {
   const msgId = 'msg_' + nanoid(24);
+  const toolIdMap = new Map<string, string>();
+  const toolSchemas = new Map<string, any>();
   
   // State variables for the stream
   let contentBlockIndex = 0;
@@ -53,10 +58,24 @@ export async function* transformStream(
 
     yield `event: ping\ndata: {"type":"ping"}\n\n`;
 
-    // 2. Now await the actual Gemini response (which might take >25s if reasoning is enabled)
+    // 2. Perform the heavy work (Transformation + Execution) INSIDE the stream
+    // This work can take >25s on long histories, but the platform timeout is 
+    // now averted because we've already sent the headers and initial chunks.
+    let geminiReq;
+    try {
+      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel);
+    } catch (e: any) {
+      console.error("Request transformation failed", e);
+      yield `event: error\ndata: ${JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: "Failed to process conversation history" }
+      })}\n\n`;
+      return;
+    }
+
     let res: Response;
     try {
-      res = await geminiResponsePromise;
+      res = await executeWithRetry(reqModel, geminiReq, true, token);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
       yield `event: error\ndata: ${JSON.stringify({
