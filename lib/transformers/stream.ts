@@ -229,8 +229,8 @@ export async function* transformStream(
           // Filter out <think> tags if they appear in text (cross-model compatibility)
           cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
           
-          // Hallucinated Tool Call Recovery in Stream
-          const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+(\{[\s\S]*?\})\]/i;
+          // catch it here and convert to a real tool_use block.
+          const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+({[\s\S]*})\s*\]/i;
           const match = cleanedText.match(actionRegex);
           if (match) {
             const toolName = match[1];
