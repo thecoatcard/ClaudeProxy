@@ -118,16 +118,18 @@ export async function transformRequestToGemini(
         } else if (block.type === 'tool_use') {
           toolIdMap.set(block.id, block.name);
           const sig = await redis.get(`gemini:thought:${block.id}`);
-          if (sig) {
+          if (sig && typeof sig === 'string' && sig.length > 5) {
             parts.push({
               functionCall: {
                 name: block.name,
                 args: block.input && typeof block.input === 'object' ? block.input : {}
               },
-              thoughtSignature: sig
+              // Provide both camelCase and snake_case to satisfy different API versions/runtimes
+              thoughtSignature: sig,
+              thought_signature: sig
             });
           } else {
-            // If signature is lost, we MUST convert to text. 
+            // If signature is lost or invalid, we MUST convert to text. 
             // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
             // We record this ID so we can also convert the corresponding tool_result to text.
             convertedToolIds.add(block.id);

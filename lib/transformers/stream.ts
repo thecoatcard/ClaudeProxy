@@ -164,8 +164,8 @@ export async function* transformStream(
             index: contentBlockIndex,
             delta: { type: 'thinking_delta', thinking: part.text }
           })}\n\n`;
-          if (part.thoughtSignature) {
-            pendingThinkingSignature = part.thoughtSignature;
+          if (part.thoughtSignature || part.thought_signature) {
+            pendingThinkingSignature = part.thoughtSignature || part.thought_signature;
           }
           continue;
         }
@@ -279,8 +279,9 @@ export async function* transformStream(
             const redisPromises = [
               redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
             ];
-            if (part.thoughtSignature) {
-              redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
+            const sig = part.thoughtSignature || part.thought_signature;
+            if (sig) {
+              redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, sig));
             }
             await Promise.race([
               Promise.all(redisPromises),

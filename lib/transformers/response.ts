@@ -44,8 +44,9 @@ export async function transformGeminiToAnthropic(
       toolIdMap.set(toolId, part.functionCall.name);
       
       await redis.setex(`gemini:toolname:${toolId}`, 3600, part.functionCall.name);
-      if (part.thoughtSignature) {
-        await redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature);
+      const sig = part.thoughtSignature || part.thought_signature;
+      if (sig) {
+        await redis.setex(`gemini:thought:${toolId}`, 3600, sig);
       }
 
       const repairedInput = repairToolInput(

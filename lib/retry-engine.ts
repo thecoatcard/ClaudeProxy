@@ -57,8 +57,8 @@ function stripThoughtSignatures(body: any): any {
       ...c,
       parts: Array.isArray(c.parts)
         ? c.parts.map((p: any) => {
-            if (p && 'thoughtSignature' in p) {
-              const { thoughtSignature, ...rest } = p;
+            if (p && typeof p === 'object') {
+              const { thoughtSignature, thought_signature, ...rest } = p;
               return rest;
             }
             return p;
