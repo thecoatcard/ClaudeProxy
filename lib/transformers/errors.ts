@@ -8,8 +8,8 @@ export interface AnthropicErrorResponse {
 
 export function transformError(err: any): AnthropicErrorResponse {
   const status = err.status || 500;
-  const message = err.message || "An unexpected error occurred.";
   const data = err.data?.error || {};
+  const message = err.message || data.message || "An unexpected error occurred.";
 
   // Gemini Safety Blocks
   if (status === 400 && (message.includes('SAFETY') || message.includes('blocked'))) {
@@ -34,7 +34,7 @@ export function transformError(err: any): AnthropicErrorResponse {
   }
 
   // Overloaded / Capacity
-  if (status === 503 || status === 504 || status === 502 || message.includes('overloaded') || message.includes('capacity')) {
+  if (status === 529 || status === 503 || status === 504 || status === 502 || message.includes('overloaded') || message.includes('capacity')) {
     return {
       type: 'error',
       error: {

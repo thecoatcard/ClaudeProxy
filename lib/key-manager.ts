@@ -79,35 +79,45 @@ export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string
     if (keyData.status === 'cooldown' && cooldownOver) {
       // Lazy recovery
       await Promise.all([
-        redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 }),
-        redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId })
+        redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0, rpm_used: 0 }),
+        redis.zadd('gemini:key_pool', { score: 100, member: keyId })
       ]);
       return { id: keyId, key: keyData.key };
     }
   }
 
-  // Fallback: If top 10 are all busy, do a slow scan of the rest (rare)
+  // Fallback: If top 10 are all busy, do a batched scan of the rest (pipeline batches of 20)
   if (keys.length > 10) {
-    for (const keyId of keys.slice(10)) {
-       const keyData = await redis.hgetall(`gemini:key:${keyId}`) as unknown as GeminiKey | null;
-       if (!keyData || !keyData.key || keyData.status === 'revoked') continue;
+    const BATCH_SIZE = 20;
+    for (let i = 10; i < keys.length; i += BATCH_SIZE) {
+      const batch = keys.slice(i, i + BATCH_SIZE);
+      const pipeline = redis.pipeline();
+      for (const id of batch) {
+        pipeline.hgetall(`gemini:key:${id}`);
+      }
+      const results = await pipeline.exec() as (GeminiKey | null)[];
 
-       const cooldownUntil = Number(keyData.cooldown_until || 0);
-       const cooldownOver = cooldownUntil <= now;
+      for (let j = 0; j < batch.length; j++) {
+        const keyId = batch[j];
+        const keyData = results[j];
+        if (!keyData || !keyData.key || keyData.status === 'revoked') continue;
 
-       if (keyData.status === 'healthy' && cooldownOver) {
-         return { id: keyId, key: keyData.key };
-       }
+        const cooldownUntil = Number(keyData.cooldown_until || 0);
+        const cooldownOver = cooldownUntil <= now;
 
-       if (keyData.status === 'cooldown' && cooldownOver) {
-         // Lazy recovery for fallback keys
-         const rpmUsed = Number(keyData.rpm_used || 0);
-         await Promise.all([
-           redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 }),
-           redis.zadd('gemini:key_pool', { score: 100 - rpmUsed, member: keyId })
-         ]);
-         return { id: keyId, key: keyData.key };
-       }
+        if (keyData.status === 'healthy' && cooldownOver) {
+          return { id: keyId, key: keyData.key };
+        }
+
+        if (keyData.status === 'cooldown' && cooldownOver) {
+          // Lazy recovery
+          await Promise.all([
+            redis.hset(`gemini:key:${keyId}`, { status: 'healthy', failure_count: 0, cooldown_until: 0, rpm_used: 0 }),
+            redis.zadd('gemini:key_pool', { score: 100, member: keyId })
+          ]);
+          return { id: keyId, key: keyData.key };
+        }
+      }
     }
   }
 
@@ -163,6 +173,7 @@ export async function resetAllKeys() {
       status: 'healthy',
       failure_count: 0,
       cooldown_until: 0,
+      rpm_used: 0,
     });
     // Reset scores to a high starting value (e.g. 100)
     pipeline.zadd('gemini:key_pool', { score: 100, member: id });

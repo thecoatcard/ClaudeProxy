@@ -78,9 +78,10 @@ export async function* transformStream(
       res = await executeWithRetry(reqModel, geminiReq, true, token);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
+      const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
       yield `event: error\ndata: ${JSON.stringify({
         type: "error",
-        error: { type: "api_error", message: e.message || "Failed to connect to Gemini" }
+        error: { type: "api_error", message: msg }
       })}\n\n`;
       return;
     }

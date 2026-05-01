@@ -130,6 +130,7 @@ export async function executeWithRetry(
   let fallbackIndex = 0;
   let lastError;
   let stripSigs = false;
+  let stripThinking = false;
   let skipCache = false;
   let lastCacheHash: string | null = null;
 
@@ -146,6 +147,16 @@ export async function executeWithRetry(
     let bodyForThisAttempt = (currentInternalModel !== primaryModel || stripSigs)
       ? stripThoughtSignatures(geminiBody)
       : geminiBody;
+
+    // If a previous attempt hit a 400 related to thinking (budget/unsupported),
+    // strip thinking config for the next attempt.
+    if (stripThinking && bodyForThisAttempt.generationConfig?.thinkingConfig) {
+      const { thinkingConfig, ...restGenConfig } = bodyForThisAttempt.generationConfig;
+      bodyForThisAttempt = {
+        ...bodyForThisAttempt,
+        generationConfig: restGenConfig
+      };
+    }
 
     // Fast-fail: strip images before sending to text-only models so we don't
     // pay a round-trip 400 just to discover the model can't read them.
@@ -213,7 +224,7 @@ export async function executeWithRetry(
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        const msg = err?.error?.message || '';
+        const msg = err?.error?.message || err?.message || '';
 
         // Handle 503 Service Unavailable or 500 Internal Server Error
         // Also handle transient 400 "unexpected error" as a server-side glitch
@@ -250,18 +261,24 @@ export async function executeWithRetry(
           continue;
         }
 
-        // On 400 INVALID_ARGUMENT (often related to signatures or caching), 
-        // retry once with thoughtSignatures stripped.
-        const isSignatureErr = msg.includes('thought_signature') || msg.includes('thoughtSignature');
-        const isInvalidArg = res.status === 400 && (
-          /invalid argument|INVALID_ARGUMENT/i.test(msg) || 
-          err?.error?.status === 'INVALID_ARGUMENT' ||
-          isSignatureErr
-        );
-        
-        const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
-        if (isInvalidArg && hasSigs && !stripSigs) {
-          stripSigs = true;
+        // If we hit a 400, try degrading the request in sequence:
+        // 1. Strip thoughtSignatures (common for model mismatches)
+        // 2. Strip thinkingConfig (budget/unsupported issues)
+        // 3. Move to fallback model
+        if (res.status === 400) {
+          const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
+          const hasThinking = JSON.stringify(bodyForThisAttempt).includes('thinkingConfig');
+
+          if (hasSigs && !stripSigs) {
+            stripSigs = true;
+          } else if (hasThinking && !stripThinking) {
+            stripThinking = true;
+          } else if (fallbackIndex < fallbacks.length) {
+            currentInternalModel = fallbacks[fallbackIndex];
+            fallbackIndex++;
+          }
+          
+          await reportKeyFailure(keyObj.id, 'server');
           lastError = { status: 400, message: msg };
           continue;
         }
@@ -274,7 +291,15 @@ export async function executeWithRetry(
       return res;
     } catch (err: any) {
       if (err.message === 'overloaded_error') throw err;
-      if (err.status === 400) throw err; // Safety or bad request
+      
+      // If it's a 400 (likely safety or bad request), try one more time with a fallback model
+      if (err.status === 400 && fallbackIndex < fallbacks.length) {
+        currentInternalModel = fallbacks[fallbackIndex];
+        fallbackIndex++;
+        lastError = err;
+        continue;
+      }
+
       if (err.name === 'AbortError' || err.message?.includes('timeout')) {
         await reportKeyFailure(keyObj.id, 'server');
         lastError = err;

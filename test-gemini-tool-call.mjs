@@ -1,7 +1,7 @@
 
 
 
-const key = "AIzaSyBO0DkzGzQryyvFL_x8wsCtRZ-1EuWXYsk"; 
+const key = "REPLACE_WITH_YOUR_GEMINI_API_KEY"; 
 
 async function test() {
   const req = {

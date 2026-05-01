@@ -153,6 +153,6 @@ export async function POST(req: Request) {
     }
   } catch (err: any) {
     const anthropicErr = transformError(err);
-    return NextResponse.json(anthropicErr, { status: err.status || 500 });
+    return NextResponse.json(anthropicErr, { status: anthropicErr.error.type === 'overloaded_error' ? 529 : (err.status || 500) });
   }
 }

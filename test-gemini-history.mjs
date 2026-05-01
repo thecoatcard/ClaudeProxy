@@ -131,7 +131,7 @@ const toolIdMap = new Map();
 const geminiBody = transformRequestToGemini(req, toolIdMap);
 console.log("Gemini Payload:", JSON.stringify(geminiBody, null, 2));
 
-const key = "AIzaSyBO0DkzGzQryyvFL_x8wsCtRZ-1EuWXYsk"; 
+const key = "REPLACE_WITH_YOUR_GEMINI_API_KEY"; 
 
 async function test() {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`, {

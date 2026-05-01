@@ -1,0 +1,23 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://aimagicproxy.vercel.app/api",
+    "ANTHROPIC_AUTH_TOKEN": "ccm_live_B5U3h06D3mrLYmRmtZH_1yV0"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Bash",
+      "Glob",
+      "Grep",
+      "LS",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "TodoRead",
+      "TodoWrite"
+    ]
+  }
+}

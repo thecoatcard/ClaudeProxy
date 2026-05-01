@@ -116,7 +116,10 @@ function extractValue(text: string, keys: string[]): string | null {
 
 async function performWebSearch(query: string): Promise<string> {
   try {
-    const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+    clearTimeout(timeout);
     if (!res.ok) return "Search failed.";
     const html = await res.text();
     
@@ -138,7 +141,13 @@ async function performWebSearch(query: string): Promise<string> {
 
 async function performWebFetch(url: string): Promise<string> {
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClaudeBot/1.0)' } });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s for full page
+    const res = await fetch(url, { 
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClaudeBot/1.0)' },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
     if (!res.ok) return `Failed to fetch URL: ${res.status}`;
     const text = await res.text();
     

@@ -285,7 +285,7 @@ export async function transformRequestToGemini(
   ) {
     // Gemini 2.0 Flash/Pro supports up to 24k thinking budget.
     // Claude 3.7 Sonnet supports up to 128k (but we must clamp to Gemini's limit).
-    const GEMINI_MAX_THINKING_BUDGET = 64000;
+    const GEMINI_MAX_THINKING_BUDGET = 24576;
     const budget = Number(thinking.budget_tokens);
 
     const thinkingConfig: any = {
@@ -309,6 +309,7 @@ export async function transformRequestToGemini(
     }
     const supportsThinking = internalModel && (
       internalModel.includes('2.0') || 
+      internalModel.includes('2.5') || 
       internalModel.includes('3.1') || 
       internalModel.includes('3.5') ||
       internalModel.includes('thinking')
