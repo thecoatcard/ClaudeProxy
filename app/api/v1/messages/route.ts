@@ -134,11 +134,12 @@ export async function POST(req: Request) {
       // For non-streaming, we must still await since the client expects a JSON body
       const toolIdMap = new Map<string, string>();
       const toolSchemas = new Map<string, any>();
-      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel);
+      const originalToolNames = new Map<string, string>();
+      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames);
       
       const res = await executeWithRetry(model, geminiReq, false, token);
       const geminiRes = await res.json();
-      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas);
+      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames);
 
       recordLatency(Date.now() - startTime);
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens);

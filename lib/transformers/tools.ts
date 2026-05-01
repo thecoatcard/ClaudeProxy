@@ -81,15 +81,21 @@ function convertSchema(schema: any): any {
   return result;
 }
 
-export function transformToolsToGemini(tools: any[]) {
+export function transformToolsToGemini(tools: any[], originalNameMap?: Map<string, string>) {
   if (!tools || tools.length === 0) return undefined;
 
   const declarations = tools
     .filter(t => t && typeof t.name === 'string')
     .map(tool => {
       const parameters = convertSchema(tool.input_schema || { type: 'object', properties: {} });
+      const sanitizedName = tool.name.replace(/[^a-zA-Z0-9_]/g, '_');
+      
+      if (originalNameMap) {
+        originalNameMap.set(sanitizedName, tool.name);
+      }
+
       const decl: any = {
-        name: tool.name,
+        name: sanitizedName,
         description: tool.description || '',
       };
 

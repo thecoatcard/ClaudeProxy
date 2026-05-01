@@ -21,6 +21,7 @@ export async function* transformStream(
   const msgId = 'msg_' + nanoid(24);
   const toolIdMap = new Map<string, string>();
   const toolSchemas = new Map<string, any>();
+  const originalToolNames = new Map<string, string>();
   
   // State variables for the stream
   let contentBlockIndex = 0;
@@ -38,7 +39,8 @@ export async function* transformStream(
 
   const prefixes = [
     '<', '<t', '<th', '<thi', '<thin', '<think',
-    '<tho', '<thou', '<thoug', '<though', '<thought'
+    '<tho', '<thou', '<thoug', '<though', '<thought',
+    '[', '[A', '[Ac', '[Act', '[Acti', '[Actio', '[Action', '[Action:'
   ];
 
   try {
@@ -63,7 +65,7 @@ export async function* transformStream(
     // now averted because we've already sent the headers and initial chunks.
     let geminiReq;
     try {
-      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel);
+      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames);
     } catch (e: any) {
       console.error("Request transformation failed", e);
       yield `event: error\ndata: ${JSON.stringify({
@@ -227,6 +229,63 @@ export async function* transformStream(
           // Filter out <think> tags if they appear in text (cross-model compatibility)
           cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
           
+          // Hallucinated Tool Call Recovery in Stream
+          const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+(\{[\s\S]*?\})\]/i;
+          const match = cleanedText.match(actionRegex);
+          if (match) {
+            const toolName = match[1];
+            const argsStr = match[2];
+            const originalName = originalToolNames.get(toolName) || toolName;
+
+            try {
+              const args = JSON.parse(argsStr);
+              const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
+              
+              // 1. Emit the text delta for anything BEFORE the action
+              const beforeAction = cleanedText.slice(outputTextLength, match.index);
+              if (beforeAction.length > 0) {
+                yield `event: content_block_delta\ndata: ${JSON.stringify({
+                  type: 'content_block_delta',
+                  index: contentBlockIndex,
+                  delta: { type: 'text_delta', text: beforeAction }
+                })}\n\n`;
+              }
+              
+              // 2. Stop the current text block
+              yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+              contentBlockIndex++;
+              inContentBlock = false;
+              
+              // 3. Start and emit the recovered tool call
+              const toolId = 'toolu_' + nanoid(24);
+              toolIdMap.set(toolId, originalName);
+              sawToolUse = true;
+              
+              yield `event: content_block_start\ndata: ${JSON.stringify({
+                type: 'content_block_start',
+                index: contentBlockIndex,
+                content_block: { type: 'tool_use', id: toolId, name: originalName, input: {} }
+              })}\n\n`;
+              
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: contentBlockIndex,
+                delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedInput) }
+              })}\n\n`;
+              
+              yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+              contentBlockIndex++;
+              
+              // 4. Update outputTextLength to skip the recovered action
+              outputTextLength = (match.index || 0) + match[0].length;
+              
+              // Persist for history turns
+              await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
+            } catch (e) {
+              // Fail silently and let it stream as text if parsing fails
+            }
+          }
+
           let safeLength = cleanedText.length;
           for (let i = cleanedText.length - 1; i >= Math.max(0, cleanedText.length - 10); i--) {
             const suffix = cleanedText.slice(i).toLowerCase();
@@ -284,14 +343,15 @@ export async function* transformStream(
           }
 
           currentToolId = 'toolu_' + nanoid(24);
-          toolIdMap.set(currentToolId, part.functionCall.name);
+          const originalName = originalToolNames.get(part.functionCall.name) || part.functionCall.name;
+          toolIdMap.set(currentToolId, originalName);
           inToolCall = true;
           sawToolUse = true;
 
           yield `event: content_block_start\ndata: ${JSON.stringify({
             type: 'content_block_start',
             index: contentBlockIndex,
-            content_block: { type: 'tool_use', id: currentToolId, name: part.functionCall.name, input: {} }
+            content_block: { type: 'tool_use', id: currentToolId, name: originalName, input: {} }
           })}\n\n`;
 
           // Persistence for next turn (non-blocking best effort)

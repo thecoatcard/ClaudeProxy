@@ -7,7 +7,8 @@ export async function transformGeminiToAnthropic(
   geminiRes: any,
   reqModel: string,
   toolIdMap: Map<string, string>,
-  toolSchemas?: Map<string, any>
+  toolSchemas?: Map<string, any>,
+  originalToolNames?: Map<string, string>
 ) {
   const candidate = geminiRes.candidates?.[0];
   if (!candidate) {
@@ -29,10 +30,23 @@ export async function transformGeminiToAnthropic(
     }
 
     if (part.text) {
-      // Strip legacy <think>/<thought> text that some Gemini models still emit
-      // inline when thoughtConfig isn't honored. Real thoughts are already
-      // captured above, so anything left here is fallback garbage.
       let cleanedText = part.text.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
+      const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+(\{[\s\S]*?\})\]/i;
+      const match = cleanedText.match(actionRegex);
+      if (match) {
+        const toolName = match[1];
+        const argsStr = match[2];
+        const toolId = 'toolu_' + nanoid(24);
+        const originalName = originalToolNames?.get(toolName) || toolName;
+        try {
+          const args = JSON.parse(argsStr);
+          const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
+          cleanedText = cleanedText.replace(match[0], '').trim();
+          contentBlocks.push({ type: 'tool_use', id: toolId, name: originalName, input: repairedInput });
+          toolIdMap.set(toolId, originalName);
+          await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
+        } catch (e) { console.warn('[recovery] failed to parse hallucinated tool args', e); }
+      }
       if (cleanedText) {
         contentBlocks.push({
           type: 'text',
@@ -41,9 +55,10 @@ export async function transformGeminiToAnthropic(
       }
     } else if (part.functionCall) {
       const toolId = 'toolu_' + nanoid(24);
-      toolIdMap.set(toolId, part.functionCall.name);
+      const originalName = originalToolNames?.get(part.functionCall.name) || part.functionCall.name;
+      toolIdMap.set(toolId, originalName);
       
-      await redis.setex(`gemini:toolname:${toolId}`, 3600, part.functionCall.name);
+      await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
       if (part.thoughtSignature) {
         await redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature);
       }
@@ -56,7 +71,7 @@ export async function transformGeminiToAnthropic(
       contentBlocks.push({
         type: 'tool_use',
         id: toolId,
-        name: part.functionCall.name,
+        name: originalName,
         input: repairedInput
       });
     }

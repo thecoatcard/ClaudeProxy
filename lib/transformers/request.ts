@@ -38,7 +38,8 @@ function buildToolConfig(toolChoice: any): any | undefined {
     case 'tool': {
       const cfg: any = { functionCallingConfig: { mode: 'ANY' } };
       if (typeof toolChoice.name === 'string' && toolChoice.name) {
-        cfg.functionCallingConfig.allowedFunctionNames = [toolChoice.name];
+        const sanitized = toolChoice.name.replace(/[^a-zA-Z0-9_]/g, '_');
+        cfg.functionCallingConfig.allowedFunctionNames = [sanitized];
       }
       return cfg;
     }
@@ -54,7 +55,8 @@ export async function transformRequestToGemini(
   toolIdMap: Map<string, string>,
   toolSchemas?: Map<string, any>,
   /** Internal model name resolved by model-router — used for max_token clamping */
-  internalModel?: string
+  internalModel?: string,
+  originalToolNames?: Map<string, string>
 ) {
   const convertedToolIds = new Set<string>();
   // Capture original Anthropic input_schemas so the response/stream path can
@@ -264,12 +266,15 @@ export async function transformRequestToGemini(
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;
   if (anthropicReq.top_p       !== undefined) generationConfig.topP        = anthropicReq.top_p;
   // top_k is not in the Anthropic spec but Claude Code occasionally forwards it.
-  if (anthropicReq.top_k       !== undefined) generationConfig.topK        = anthropicReq.top_k;
+  // Gemini's topK is usually capped at 40.
+  if (anthropicReq.top_k       !== undefined) {
+    generationConfig.topK = Math.min(Number(anthropicReq.top_k), 40);
+  }
 
   // stop_sequences → Gemini stopSequences.
   // Claude Code uses stop sequences as flow-control signals.
   if (Array.isArray(anthropicReq.stop_sequences) && anthropicReq.stop_sequences.length > 0) {
-    generationConfig.stopSequences = anthropicReq.stop_sequences;
+    generationConfig.stopSequences = anthropicReq.stop_sequences.slice(0, 5);
   }
 
   // Map Anthropic extended thinking → Gemini thinkingConfig.
@@ -297,10 +302,13 @@ export async function transformRequestToGemini(
         // Let Gemini decide dynamically if -1 or invalid
         thinkingConfig.thinkingBudget = -1;
       } else {
-        // Clamp to Gemini-supported range [0, 24576]
+        // Clamp to Gemini-supported range [0, 24576] AND ensured it doesn't exceed 
+        // the total maxOutputTokens (otherwise Gemini returns a 400).
+        const maxTotal = generationConfig.maxOutputTokens || ceiling;
         thinkingConfig.thinkingBudget = Math.min(
           Math.max(0, Math.floor(budget)),
-          GEMINI_MAX_THINKING_BUDGET
+          GEMINI_MAX_THINKING_BUDGET,
+          Math.max(0, maxTotal - 1024) // Leave 1k tokens for the actual text response
         );
       }
     } else {
@@ -333,7 +341,7 @@ export async function transformRequestToGemini(
   if (systemInstruction) result.systemInstruction = systemInstruction;
 
   if (anthropicReq.tools && anthropicReq.tools.length > 0) {
-    result.tools = transformToolsToGemini(anthropicReq.tools);
+    result.tools = transformToolsToGemini(anthropicReq.tools, originalToolNames);
 
     // tool_choice → toolConfig — only meaningful when tools are present.
     const toolConfig = buildToolConfig(anthropicReq.tool_choice);
@@ -341,6 +349,15 @@ export async function transformRequestToGemini(
   }
 
   if (Object.keys(generationConfig).length > 0) result.generationConfig = generationConfig;
+  
+  // Add permissive safety settings to avoid blocking technical/coding content.
+  result.safetySettings = [
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
+  ];
 
   return result;
 }
