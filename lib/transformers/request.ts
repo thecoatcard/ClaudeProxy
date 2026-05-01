@@ -161,27 +161,28 @@ export async function transformRequestToGemini(
           
           if (!fnName) fnName = 'unknown_tool';
           
-          let content = block.content;
+          let resultText = "";
+          const content = block.content;
+          
           if (!content || (Array.isArray(content) && content.length === 0)) {
-            content = { result: "Tool executed (empty result)." };
+            resultText = "Tool executed (empty result).";
           } else if (typeof content === 'string') {
-            content = { result: content };
+            resultText = content;
           } else if (!Array.isArray(content)) {
-            content = Object.keys(content).length > 0 ? content : { result: "Success" };
+            resultText = Object.keys(content).length > 0 ? JSON.stringify(content) : "Success";
           } else {
-            content = {
-              result: content.map((c: any) => {
-                if (c.type === 'text') return c.text;
-                if (c.type === 'image') return "[image]";
-                return JSON.stringify(c);
-              }).join("\n")
-            };
+            // Merge multiple content blocks (text, tool_result parts) into one string for Gemini
+            resultText = content.map((c: any) => {
+              if (c.type === 'text') return c.text;
+              if (c.type === 'image') return "[image omitted]";
+              return JSON.stringify(c);
+            }).join("\n");
           }
 
           parts.push({
             functionResponse: {
               name: fnName,
-              response: content,
+              response: { result: resultText },
             },
           });
         }
@@ -208,7 +209,7 @@ export async function transformRequestToGemini(
   }
 
   // Gemini requires history to start with a user turn.
-  if (contents[0].role !== 'user') {
+  if (contents.length > 0 && contents[0].role !== 'user') {
     contents.unshift({ role: 'user', parts: [{ text: " " }] });
   }
 
@@ -217,15 +218,18 @@ export async function transformRequestToGemini(
 
   // max_tokens: clamp to the model's output ceiling so we never send an
   // oversized value that Gemini rejects with a 400.
+  const ceiling = internalModel
+    ? (MODEL_MAX_OUTPUT_TOKENS[internalModel] ?? DEFAULT_MAX_OUTPUT_TOKENS)
+    : DEFAULT_MAX_OUTPUT_TOKENS;
+
   if (anthropicReq.max_tokens !== undefined) {
     const requestedMax = Number(anthropicReq.max_tokens);
-    const ceiling = internalModel
-      ? (MODEL_MAX_OUTPUT_TOKENS[internalModel] ?? DEFAULT_MAX_OUTPUT_TOKENS)
-      : DEFAULT_MAX_OUTPUT_TOKENS;
-    
     if (requestedMax > 0) {
       generationConfig.maxOutputTokens = Math.min(requestedMax, ceiling);
     }
+  } else {
+    // Set a sensible default if not provided (prevents premature truncation)
+    generationConfig.maxOutputTokens = Math.min(8192, ceiling);
   }
 
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;
@@ -252,7 +256,7 @@ export async function transformRequestToGemini(
   ) {
     // Gemini 2.0 Flash/Pro supports up to 24k thinking budget.
     // Claude 3.7 Sonnet supports up to 128k (but we must clamp to Gemini's limit).
-    const GEMINI_MAX_THINKING_BUDGET = 24576;
+    const GEMINI_MAX_THINKING_BUDGET = 64000;
     const budget = Number(thinking.budget_tokens);
 
     const thinkingConfig: any = {
