@@ -1,183 +1,202 @@
 "use client";
-import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useEffect, useMemo, useState } from 'react';
+
+type RouteConfig = { primary: string; fallback: string[] };
+type Routes = Record<string, RouteConfig>;
 
 export default function ModelsPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [models, setModels] = useState<Record<string, { primary: string, fallback: string[] }>>({});
-  const [isEditingJson, setIsEditingJson] = useState(false);
-  const [jsonValue, setJsonValue] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [routes, setRoutes] = useState<Routes>({});
+  const [jsonMode, setJsonMode] = useState(false);
+  const [jsonValue, setJsonValue] = useState('');
 
-  // Form state for adding/editing a route
-  const [newAlias, setNewAlias] = useState("");
-  const [newPrimary, setNewPrimary] = useState("");
-  const [newFallbacks, setNewFallbacks] = useState("");
+  const [alias, setAlias] = useState('');
+  const [primary, setPrimary] = useState('');
+  const [fallbacks, setFallbacks] = useState('');
 
-  useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
-    const res = await fetch('/api/auth/me');
-    if (res.ok) {
-      setIsAuthenticated(true);
-      fetchModels();
-    }
-  };
-
-  const fetchModels = async () => {
+  const fetchRoutes = async () => {
     const res = await fetch('/api/admin/models', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      if (data.models) {
-        setModels(data.models);
-        setJsonValue(JSON.stringify(data.models, null, 2));
+      setRoutes(data.models || {});
+      setJsonValue(JSON.stringify(data.models || {}, null, 2));
+    }
+  };
+
+  useEffect(() => {
+    const load = async () => {
+      const authRes = await fetch('/api/auth/me');
+      if (!authRes.ok) {
+        setLoading(false);
+        return;
       }
-    }
-  };
+      setIsAuthenticated(true);
+      await fetchRoutes();
+      setLoading(false);
+    };
+    load();
+  }, []);
 
-  const saveModels = async (updatedModels: any) => {
-    const res = await fetch('/api/admin/models', { 
-      method: 'POST', 
-      body: JSON.stringify({ models: updatedModels }), 
-      headers: { 'Content-Type': 'application/json' } 
+  const saveRoutes = async (nextRoutes: Routes) => {
+    const res = await fetch('/api/admin/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ models: nextRoutes }),
     });
-    if (res.ok) {
-      alert("Mapping saved successfully.");
-      fetchModels();
-    } else {
-      alert("Failed to save mapping.");
+    if (!res.ok) {
+      alert('Failed to save model routes');
+      return false;
     }
+    setRoutes(nextRoutes);
+    setJsonValue(JSON.stringify(nextRoutes, null, 2));
+    return true;
   };
 
-  const handleAddRoute = () => {
-    if (!newAlias || !newPrimary) {
-      alert("Please enter both an alias and a primary model.");
+  const addOrUpdateRoute = async () => {
+    if (!alias.trim() || !primary.trim()) {
+      alert('Alias and primary model are required.');
       return;
     }
-    const fallbackList = newFallbacks.split(',').map(s => s.trim()).filter(Boolean);
-    const updated = {
-      ...models,
-      [newAlias]: { primary: newPrimary, fallback: fallbackList }
+    const fallbackList = fallbacks
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    const next = {
+      ...routes,
+      [alias.trim().toLowerCase()]: {
+        primary: primary.trim(),
+        fallback: fallbackList,
+      },
     };
-    setModels(updated);
-    setJsonValue(JSON.stringify(updated, null, 2));
-    setNewAlias("");
-    setNewPrimary("");
-    setNewFallbacks("");
-    saveModels(updated);
-  };
-
-  const handleDeleteRoute = (alias: string) => {
-    if (!confirm(`Delete routing for ${alias}?`)) return;
-    const { [alias]: removed, ...rest } = models;
-    setModels(rest);
-    setJsonValue(JSON.stringify(rest, null, 2));
-    saveModels(rest);
-  };
-
-  const handleJsonSave = () => {
-    try {
-      const parsed = JSON.parse(jsonValue);
-      setModels(parsed);
-      saveModels(parsed);
-      setIsEditingJson(false);
-    } catch (e) {
-      alert("Invalid JSON format.");
+    const ok = await saveRoutes(next);
+    if (ok) {
+      setAlias('');
+      setPrimary('');
+      setFallbacks('');
     }
   };
+
+  const deleteRoute = async (name: string) => {
+    if (!confirm(`Delete route mapping for ${name}?`)) return;
+    const { [name]: _, ...rest } = routes;
+    await saveRoutes(rest);
+  };
+
+  const saveJson = async () => {
+    try {
+      const parsed = JSON.parse(jsonValue);
+      await saveRoutes(parsed);
+      setJsonMode(false);
+    } catch {
+      alert('Invalid JSON');
+    }
+  };
+
+  const counts = useMemo(() => {
+    const aliases = Object.keys(routes).length;
+    const uniqueTargets = new Set<string>();
+    for (const cfg of Object.values(routes)) {
+      uniqueTargets.add((cfg.primary || '').trim());
+      for (const fallback of cfg.fallback || []) uniqueTargets.add((fallback || '').trim());
+    }
+    return { aliases, uniqueTargets: Array.from(uniqueTargets).filter(Boolean).length };
+  }, [routes]);
+
+  if (loading) return <div className="panel">Loading...</div>;
 
   if (!isAuthenticated) {
     return (
-      <div style={{ maxWidth: '400px', margin: '4rem auto', textAlign: 'center' }} className="card">
-        <p>Admin authentication required.</p>
-        <Link href="/dashboard/keys"><button className="btn" style={{ marginTop: '1rem' }}>Go to Login</button></Link>
+      <div className="panel">
+        <h2 className="section-title">Admin Login Required</h2>
+        <p className="muted-text">Please sign in from Provider Keys.</p>
+        <div className="toolbar-row">
+          <Link href="/dashboard/keys" className="btn btn-primary">Go to Login</Link>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+    <div className="dashboard-page">
+      <header className="page-header">
         <div>
-          <h1 style={{ margin: 0 }}>Model Routing</h1>
-          <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            Map Anthropic model names to Gemini provider models.
-          </p>
+          <h1 className="page-title">Model Routing</h1>
+          <p className="muted-text">Configure Anthropic alias to Gemini routing and fallback chains.</p>
         </div>
-        <div style={{ display: 'flex', gap: '1rem' }}>
-           <button className="btn" onClick={() => setIsEditingJson(!isEditingJson)}>
-            {isEditingJson ? "Cancel JSON Edit" : "Edit Raw JSON"}
-          </button>
-          <button className="btn" onClick={fetchModels}>Refresh</button>
+        <div className="toolbar-row">
+          <button className="btn" onClick={fetchRoutes}>Refresh</button>
+          <button className="btn" onClick={() => setJsonMode((v) => !v)}>{jsonMode ? 'Close JSON' : 'Edit JSON'}</button>
         </div>
-      </div>
+      </header>
 
-      {isEditingJson ? (
-        <div className="card">
-          <h2 className="card-title">JSON Editor</h2>
-          <textarea 
-            className="input" 
-            style={{ height: '500px', fontFamily: 'monospace', marginBottom: '1rem', fontSize: '0.85rem' }}
-            value={jsonValue}
-            onChange={e => setJsonValue(e.target.value)}
-          />
-          <button className="btn btn-primary" onClick={handleJsonSave}>Save JSON Changes</button>
-        </div>
+      <section className="kpi-grid kpi-grid-3">
+        <article className="kpi-card">
+          <p className="kpi-label">Route Aliases</p>
+          <p className="kpi-value">{counts.aliases}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Unique Target Models</p>
+          <p className="kpi-value">{counts.uniqueTargets}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Fallback Strategy</p>
+          <p className="kpi-subtle">Configured per alias for reliability.</p>
+        </article>
+      </section>
+
+      {jsonMode ? (
+        <section className="panel">
+          <div className="panel-header">
+            <h2 className="section-title">Raw JSON Editor</h2>
+          </div>
+          <textarea className="input json-input" value={jsonValue} onChange={(e) => setJsonValue(e.target.value)} />
+          <div className="toolbar-row">
+            <button className="btn btn-primary" onClick={saveJson}>Save JSON</button>
+          </div>
+        </section>
       ) : (
         <>
-          <div className="card" style={{ marginBottom: '2rem' }}>
-            <h2 className="card-title">Add / Update Route</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: '1rem', alignItems: 'end' }}>
-              <div>
-                <label style={{ fontSize: '0.8rem', display: 'block', marginBottom: '0.3rem' }}>Anthropic Alias (e.g. claude-3-opus)</label>
-                <input type="text" className="input" value={newAlias} onChange={e => setNewAlias(e.target.value)} placeholder="claude-..." />
-              </div>
-              <div>
-                <label style={{ fontSize: '0.8rem', display: 'block', marginBottom: '0.3rem' }}>Primary Gemini Model</label>
-                <input type="text" className="input" value={newPrimary} onChange={e => setNewPrimary(e.target.value)} placeholder="gemini-..." />
-              </div>
-              <div>
-                <label style={{ fontSize: '0.8rem', display: 'block', marginBottom: '0.3rem' }}>Fallbacks (comma separated)</label>
-                <input type="text" className="input" value={newFallbacks} onChange={e => setNewFallbacks(e.target.value)} placeholder="mod-1, mod-2" />
-              </div>
-              <button className="btn btn-primary" onClick={handleAddRoute}>Update Route</button>
+          <section className="panel">
+            <div className="panel-header">
+              <h2 className="section-title">Add or Update Route</h2>
             </div>
-          </div>
+            <div className="form-grid form-grid-4">
+              <input className="input" type="text" placeholder="Anthropic alias (claude-...)" value={alias} onChange={(e) => setAlias(e.target.value)} />
+              <input className="input" type="text" placeholder="Primary model (gemini-...)" value={primary} onChange={(e) => setPrimary(e.target.value)} />
+              <input className="input" type="text" placeholder="Fallbacks comma-separated" value={fallbacks} onChange={(e) => setFallbacks(e.target.value)} />
+              <button className="btn btn-primary" onClick={addOrUpdateRoute}>Save Route</button>
+            </div>
+          </section>
 
-          <div className="card">
-            <h2 className="card-title">Current Mappings</h2>
-            <table>
+          <section className="panel">
+            <div className="panel-header">
+              <h2 className="section-title">Current Routing Table</h2>
+            </div>
+            <table className="data-table">
               <thead>
                 <tr>
-                  <th>Anthropic Model (Alias)</th>
-                  <th>Primary Gemini</th>
-                  <th>Fallback Chain</th>
-                  <th style={{ textAlign: 'right' }}>Actions</th>
+                  <th>Alias</th>
+                  <th>Primary</th>
+                  <th>Fallbacks</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(models).sort().map(([alias, config]) => (
-                  <tr key={alias}>
-                    <td style={{ fontWeight: 'bold' }}>{alias}</td>
-                    <td><code style={{ color: 'var(--primary)' }}>{config.primary}</code></td>
-                    <td style={{ fontSize: '0.85rem' }}>
-                      {config.fallback?.join(' → ') || 'none'}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      <button 
-                        className="btn btn-danger" 
-                        style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem' }} 
-                        onClick={() => handleDeleteRoute(alias)}
-                      >
-                        Delete
-                      </button>
-                    </td>
+                {Object.keys(routes).length === 0 && <tr><td colSpan={4}>No routes configured.</td></tr>}
+                {Object.entries(routes).sort(([a], [b]) => a.localeCompare(b)).map(([name, cfg]) => (
+                  <tr key={name}>
+                    <td><code>{name}</code></td>
+                    <td><code>{cfg.primary}</code></td>
+                    <td>{(cfg.fallback || []).join(' -> ') || '-'}</td>
+                    <td><button className="btn btn-danger" onClick={() => deleteRoute(name)}>Delete</button></td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </section>
         </>
       )}
     </div>

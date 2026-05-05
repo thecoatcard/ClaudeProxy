@@ -1,5 +1,6 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
+import { compactMessagesDetailed } from './compaction';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
@@ -17,6 +18,52 @@ const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gemma-4-26b-a4b-it':             16384,
 };
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384; // Increased from 8192
+const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h
+const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 90000);
+const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 65000);
+
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function extractText(content: any): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map((block: any) => {
+    if (typeof block === 'string') return block;
+    if (block?.type === 'text' && typeof block.text === 'string') return block.text;
+    if (block?.type === 'thinking' && typeof block.thinking === 'string') return block.thinking;
+    return '';
+  }).join('\n');
+}
+
+function deriveSummaryKey(anthropicReq: any, userId?: string): string {
+  const explicitId = anthropicReq?.metadata?.conversation_id
+    || anthropicReq?.conversation_id
+    || anthropicReq?.session_id
+    || anthropicReq?.thread_id;
+
+  if (typeof explicitId === 'string' && explicitId.trim()) {
+    return `context:summary:${explicitId.trim()}`;
+  }
+
+  const systemText = typeof anthropicReq?.system === 'string' ? anthropicReq.system : '';
+  const firstUser = (anthropicReq?.messages || []).find((msg: any) => msg?.role === 'user');
+  const anchor = `${userId || 'anon'}|${systemText.slice(0, 400)}|${extractText(firstUser?.content).slice(0, 400)}`;
+  return `context:summary:${stableHash(anchor)}`;
+}
+
+function getCompactionTargetTokens(internalModel?: string): number {
+  if (!internalModel) return DEFAULT_COMPACTION_TARGET_TOKENS;
+  if (internalModel.includes('lite')) return LITE_COMPACTION_TARGET_TOKENS;
+  return DEFAULT_COMPACTION_TARGET_TOKENS;
+}
 
 /**
  * Build a Gemini toolConfig from an Anthropic tool_choice object.
@@ -56,8 +103,26 @@ export async function transformRequestToGemini(
   toolSchemas?: Map<string, any>,
   /** Internal model name resolved by model-router — used for max_token clamping */
   internalModel?: string,
-  originalToolNames?: Map<string, string>
+  originalToolNames?: Map<string, string>,
+  userId?: string
 ) {
+  if (Array.isArray(anthropicReq.messages)) {
+    const summaryKey = deriveSummaryKey(anthropicReq, userId);
+    const rollingSummary = await redis.get<string>(summaryKey).catch(() => '');
+    const compaction = compactMessagesDetailed(anthropicReq.messages, {
+      maxTokensApprox: getCompactionTargetTokens(internalModel),
+      maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
+      keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
+      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 14),
+      rollingSummary: typeof rollingSummary === 'string' ? rollingSummary : '',
+    });
+    anthropicReq.messages = compaction.messages;
+
+    if (compaction.didCompact && compaction.generatedSummary) {
+      await redis.set(summaryKey, compaction.generatedSummary, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
+    }
+  }
+
   const convertedToolIds = new Set<string>();
   // Capture original Anthropic input_schemas so the response/stream path can
   // repair Gemini functionCall args against them before emitting tool_use.

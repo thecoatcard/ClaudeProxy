@@ -67,22 +67,27 @@ export async function POST(req: Request) {
   // 3. Local Optimizations (Fast-path for Claude Code probes)
   const optimized = await tryOptimizations(body);
   if (optimized) {
-    recordLatency(Date.now() - startTime);
-    recordTokens(optimized.usage.input_tokens, optimized.usage.output_tokens);
+    await recordLatency(Date.now() - startTime);
+    await recordTokens(optimized.usage.input_tokens, optimized.usage.output_tokens, { model, userToken: token });
     return NextResponse.json(optimized);
   }
 
   // 3. Parallel Pre-flight (Auth + Routing)
+  const isThinking = !!(body.thinking && body.thinking.type === 'enabled');
   const [isValid, modelMap] = await Promise.all([
     validateUserKey(token),
-    getModelMapping(model)
+    getModelMapping(model, {
+      thinkingEnabled: isThinking,
+      requestBody: body,
+      userId: token,
+    })
   ]);
 
   if (!isValid) {
     return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
   }
 
-  await incrementRequestCount();
+  await incrementRequestCount({ model, userToken: token });
 
   const internalModel = modelMap.primary;
 
@@ -93,7 +98,7 @@ export async function POST(req: Request) {
       
       // All heavy work (Redis lookups, transformation, and Gemini API call) happens 
       // inside transformStream AFTER it has yielded the first headers/chunks.
-      const transformIterator = transformStream(body, model, internalModel, token, usageRef);
+      const transformIterator = transformStream(body, model, internalModel, token, usageRef, modelMap);
 
       const streamBody = new ReadableStream({
         async start(controller) {
@@ -111,12 +116,13 @@ export async function POST(req: Request) {
             }
           } catch (e) {
             console.error("Stream error", e);
+            await incrementErrorCount({ model, userToken: token });
             controller.enqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
             clearInterval(pingInterval);
             try { controller.close(); } catch (e) {}
-            recordLatency(Date.now() - startTime);
-            recordTokens(usageRef.inputTokens, usageRef.outputTokens);
+            await recordLatency(Date.now() - startTime);
+            await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
           }
         }
       });
@@ -135,14 +141,14 @@ export async function POST(req: Request) {
       const toolIdMap = new Map<string, string>();
       const toolSchemas = new Map<string, any>();
       const originalToolNames = new Map<string, string>();
-      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames);
+      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
       
-      const res = await executeWithRetry(model, geminiReq, false, token);
+      const res = await executeWithRetry(model, geminiReq, false, token, modelMap);
       const geminiRes = await res.json();
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames);
 
-      recordLatency(Date.now() - startTime);
-      await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens);
+      await recordLatency(Date.now() - startTime);
+      await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
       logRequest({
         model,
         stream: false,
@@ -153,6 +159,7 @@ export async function POST(req: Request) {
       return NextResponse.json(anthropicRes);
     }
   } catch (err: any) {
+    await incrementErrorCount({ model, userToken: token });
     const anthropicErr = transformError(err);
     return NextResponse.json(anthropicErr, { status: anthropicErr.error.type === 'overloaded_error' ? 529 : (err.status || 500) });
   }

@@ -18,7 +18,39 @@ const CLAUDE_FAST_CHAIN = [
   'gemini-2.5-flash',
 ];
 
-export const DEFAULT_MODEL_ROUTING: Record<string, { primary: string; fallback: string[] }> = {
+const CLAUDE_REASONING_CHAIN = [
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite-preview',
+];
+
+const CLAUDE_TOOL_CHAIN = [
+  'gemini-2.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
+];
+
+const CLAUDE_LONG_CONTEXT_CHAIN = [
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+];
+
+export interface ModelRoute {
+  primary: string;
+  fallback: string[];
+  profile?: 'simple' | 'balanced' | 'complex' | 'agentic';
+  reason?: string;
+  estimatedInputTokens?: number;
+}
+
+export interface ModelRoutingOptions {
+  thinkingEnabled?: boolean;
+  requestBody?: any;
+  userId?: string;
+}
+
+export const DEFAULT_MODEL_ROUTING: Record<string, ModelRoute> = {
   // --- Claude 4 Series (Next-Gen) ---
   "claude-4-7-opus":             { "primary": CLAUDE_HIGH_CAPABILITY_CHAIN[0], "fallback": CLAUDE_HIGH_CAPABILITY_CHAIN.slice(1) },
   "claude-4-6-sonnet":           { "primary": CLAUDE_BALANCED_CHAIN[0], "fallback": CLAUDE_BALANCED_CHAIN.slice(1) },
@@ -51,51 +83,268 @@ function normalizeModelName(rawModel: string): string {
   return rawModel.trim().toLowerCase();
 }
 
-function buildClaudeDefaultRoute() {
+function buildClaudeDefaultRoute(): ModelRoute {
   return {
     primary: CLAUDE_BALANCED_CHAIN[0],
     fallback: CLAUDE_BALANCED_CHAIN.slice(1),
   };
 }
 
-export async function getModelMapping(anthropicModel: string) {
-  const normalizedModel = normalizeModelName(anthropicModel);
+function dedupeChain(models: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const model of models) {
+    const normalized = normalizeModelName(model);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
 
-  // Allow runtime overrides via Redis
-  const registryStr = await redis.get<string>('models:registry');
-  let registry = DEFAULT_MODEL_ROUTING;
-  if (registryStr) {
-    try {
-      const parsed = typeof registryStr === 'string' ? JSON.parse(registryStr) : registryStr;
-      registry = { ...DEFAULT_MODEL_ROUTING, ...parsed };
-    } catch(e) {}
+function extractText(content: any): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((entry) => {
+      if (typeof entry === 'string') return entry;
+      if (entry?.type === 'text' && typeof entry.text === 'string') return entry.text;
+      if (entry?.type === 'thinking' && typeof entry.thinking === 'string') return entry.thinking;
+      if (typeof entry?.text === 'string') return entry.text;
+      return '';
+    }).join('\n');
+  }
+  return '';
+}
+
+function estimateInputTokensFromRequest(requestBody: any): number {
+  if (!requestBody || typeof requestBody !== 'object') return 0;
+  let chars = 0;
+
+  if (typeof requestBody.system === 'string') chars += requestBody.system.length;
+  if (Array.isArray(requestBody.system)) {
+    chars += requestBody.system.map((s: any) => extractText(s)).join('\n').length;
   }
 
-  // Exact match
-  if (registry[normalizedModel]) {
-    return registry[normalizedModel];
+  for (const msg of requestBody.messages || []) {
+    chars += extractText(msg?.content).length;
   }
 
-  // Prefix match (e.g. "claude-3-5-sonnet-latest" -> "claude-3-5-sonnet")
-  for (const [key, val] of Object.entries(registry)) {
-    if (normalizedModel.startsWith(normalizeModelName(key))) {
-      return val;
+  if (Array.isArray(requestBody.tools)) {
+    chars += JSON.stringify(requestBody.tools).length;
+  }
+
+  return Math.ceil(chars / 4);
+}
+
+function profileRequest(
+  requestBody: any,
+  thinkingEnabled: boolean
+): {
+  profile: 'simple' | 'balanced' | 'complex' | 'agentic';
+  reason: string;
+  estimatedInputTokens: number;
+  toolCount: number;
+  hasTools: boolean;
+  hasImages: boolean;
+} {
+  const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
+  const estimatedInputTokens = estimateInputTokensFromRequest(requestBody);
+  const toolCount = Array.isArray(requestBody?.tools) ? requestBody.tools.length : 0;
+  const hasTools = toolCount > 0;
+  const hasToolChoiceConstraint =
+    requestBody?.tool_choice?.type === 'tool' || requestBody?.tool_choice?.type === 'any';
+  const conversationTurns = messages.length;
+  const maxTokens = Number(requestBody?.max_tokens || 0);
+
+  const hasImages = messages.some((msg: any) => {
+    if (!Array.isArray(msg?.content)) return false;
+    return msg.content.some((block: any) =>
+      block?.type === 'image' ||
+      (block?.type === 'tool_result' &&
+        Array.isArray(block.content) &&
+        block.content.some((nested: any) => nested?.type === 'image'))
+    );
+  });
+
+  let lastUserText = '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') {
+      lastUserText = extractText(messages[i].content).toLowerCase();
+      break;
     }
   }
 
-  // Unknown Claude models
+  let score = 0;
+  const reasons: string[] = [];
+  const reasoningRegex = /\b(analyze|architecture|design|debug|investigate|reason|step[- ]by[- ]step|plan|multi[- ]step)\b/i;
+
+  if (thinkingEnabled) {
+    score += 3;
+    reasons.push('thinking enabled');
+  }
+  if (hasTools) {
+    score += toolCount > 4 ? 3 : 2;
+    reasons.push(`tools=${toolCount}`);
+  }
+  if (hasToolChoiceConstraint) {
+    score += 1;
+    reasons.push('tool_choice constrained');
+  }
+  if (hasImages) {
+    score += 1;
+    reasons.push('contains images');
+  }
+  if (estimatedInputTokens > 16000) {
+    score += 2;
+    reasons.push('large context');
+  }
+  if (estimatedInputTokens > 60000) {
+    score += 2;
+    reasons.push('very large context');
+  }
+  if (maxTokens > 8192) {
+    score += 1;
+    reasons.push('high output budget');
+  }
+  if (conversationTurns > 16) {
+    score += 1;
+    reasons.push('long conversation');
+  }
+  if (reasoningRegex.test(lastUserText)) {
+    score += 2;
+    reasons.push('reasoning-heavy prompt');
+  }
+
+  let profile: 'simple' | 'balanced' | 'complex' | 'agentic' = 'balanced';
+  if (score <= 2) profile = 'simple';
+  else if (score <= 5) profile = 'balanced';
+  else if (score <= 8) profile = 'complex';
+  else profile = 'agentic';
+
+  return {
+    profile,
+    reason: reasons.join(', ') || 'default-balanced',
+    estimatedInputTokens,
+    toolCount,
+    hasTools,
+    hasImages,
+  };
+}
+
+function chooseAdaptiveChain(profile: ReturnType<typeof profileRequest>): string[] {
+  if (profile.estimatedInputTokens > 50000) return CLAUDE_LONG_CONTEXT_CHAIN;
+  if (profile.profile === 'agentic') return CLAUDE_REASONING_CHAIN;
+  if (profile.profile === 'complex') {
+    return profile.hasTools ? CLAUDE_TOOL_CHAIN : CLAUDE_REASONING_CHAIN;
+  }
+  if (profile.hasTools) return CLAUDE_TOOL_CHAIN;
+  if (profile.profile === 'simple' && !profile.hasImages) return CLAUDE_FAST_CHAIN;
+  return CLAUDE_BALANCED_CHAIN;
+}
+
+function resolveGlobalDefaultRoute(): ModelRoute {
+  const fallbackRaw = process.env.FALLBACK_MODEL || 'gemini-2.5-flash';
+  const fallback = fallbackRaw.includes(',')
+    ? fallbackRaw.split(',').map((s) => s.trim()).filter(Boolean)
+    : [fallbackRaw];
+  return {
+    primary: process.env.DEFAULT_MODEL || 'gemini-3.1-flash-lite-preview',
+    fallback,
+  };
+}
+
+async function readRegistry(): Promise<Record<string, ModelRoute>> {
+  const registryStr = await redis.get<string>('models:registry');
+  if (!registryStr) return DEFAULT_MODEL_ROUTING;
+
+  try {
+    const parsed = typeof registryStr === 'string' ? JSON.parse(registryStr) : registryStr;
+    return { ...DEFAULT_MODEL_ROUTING, ...parsed };
+  } catch {
+    return DEFAULT_MODEL_ROUTING;
+  }
+}
+
+function resolveBaseRoute(
+  normalizedModel: string,
+  registry: Record<string, ModelRoute>
+): ModelRoute {
+  if (registry[normalizedModel]) {
+    return {
+      primary: normalizeModelName(registry[normalizedModel].primary),
+      fallback: dedupeChain(registry[normalizedModel].fallback || []),
+    };
+  }
+
+  for (const [key, value] of Object.entries(registry)) {
+    if (normalizedModel.startsWith(normalizeModelName(key))) {
+      return {
+        primary: normalizeModelName(value.primary),
+        fallback: dedupeChain(value.fallback || []),
+      };
+    }
+  }
+
   if (normalizedModel.startsWith('claude-')) {
     return buildClaudeDefaultRoute();
   }
 
-  // Global Default
-  let defaultFallback: string | string[] = process.env.FALLBACK_MODEL || 'gemini-2.5-flash';
-  if (typeof defaultFallback === 'string' && defaultFallback.includes(',')) {
-    defaultFallback = defaultFallback.split(',').map(s => s.trim());
+  return resolveGlobalDefaultRoute();
+}
+
+export async function getModelMapping(
+  anthropicModel: string,
+  optionsOrThinking: boolean | ModelRoutingOptions = false
+): Promise<ModelRoute> {
+  const options: ModelRoutingOptions =
+    typeof optionsOrThinking === 'boolean'
+      ? { thinkingEnabled: optionsOrThinking }
+      : optionsOrThinking;
+
+  const normalizedModel = normalizeModelName(anthropicModel);
+  const thinkingEnabled = Boolean(options.thinkingEnabled);
+  const registry = await readRegistry();
+  const baseRoute = resolveBaseRoute(normalizedModel, registry);
+
+  if (!normalizedModel.startsWith('claude-')) {
+    const chain = dedupeChain([baseRoute.primary, ...baseRoute.fallback]);
+    return {
+      primary: chain[0] || resolveGlobalDefaultRoute().primary,
+      fallback: chain.slice(1),
+    };
   }
 
+  const profile = profileRequest(options.requestBody, thinkingEnabled);
+  const adaptiveChain = thinkingEnabled
+    ? CLAUDE_REASONING_CHAIN
+    : chooseAdaptiveChain(profile);
+
+  let stickyModel = '';
+  if (options.userId) {
+    try {
+      const sticky = await redis.get<string>(`route:last:${options.userId}:${normalizedModel}`);
+      if (typeof sticky === 'string' && sticky.trim()) {
+        stickyModel = normalizeModelName(sticky);
+      }
+    } catch {
+      // Ignore sticky read failures. Routing must remain available.
+    }
+  }
+
+  const finalChain = dedupeChain([
+    stickyModel,
+    ...adaptiveChain,
+    baseRoute.primary,
+    ...baseRoute.fallback,
+    ...CLAUDE_HIGH_CAPABILITY_CHAIN,
+  ]);
+
   return {
-    primary: process.env.DEFAULT_MODEL || 'gemini-3.1-flash-lite-preview',
-    fallback: defaultFallback
+    primary: finalChain[0] || baseRoute.primary,
+    fallback: finalChain.slice(1),
+    profile: profile.profile,
+    reason: profile.reason,
+    estimatedInputTokens: profile.estimatedInputTokens,
   };
 }

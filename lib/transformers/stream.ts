@@ -10,13 +10,16 @@ export interface StreamUsage {
 
 import { transformRequestToGemini } from './request';
 import { executeWithRetry } from '../retry-engine';
+import type { ModelRoute } from '../model-router';
+import { incrementErrorCount } from '../metrics';
 
 export async function* transformStream(
   anthropicBody: any,
   reqModel: string,
   internalModel: string,
   token: string,
-  usageRef?: StreamUsage
+  usageRef?: StreamUsage,
+  routePlan?: ModelRoute
 ) {
   const msgId = 'msg_' + nanoid(24);
   const toolIdMap = new Map<string, string>();
@@ -65,7 +68,7 @@ export async function* transformStream(
     // now averted because we've already sent the headers and initial chunks.
     let geminiReq;
     try {
-      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames);
+      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
     } catch (e: any) {
       console.error("Request transformation failed", e);
       yield `event: error\ndata: ${JSON.stringify({
@@ -77,7 +80,7 @@ export async function* transformStream(
 
     let res: Response;
     try {
-      res = await executeWithRetry(reqModel, geminiReq, true, token);
+      res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
       const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
@@ -422,6 +425,7 @@ export async function* transformStream(
 
   } catch (err) {
     console.error("Stream transformation failed", err);
+    await incrementErrorCount({ model: reqModel, userToken: token }).catch(() => {});
     // CRITICAL: Always send message_stop to prevent agent from hanging
     yield `event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream transformation failed"}}\n\n`;
     yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;

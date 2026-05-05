@@ -21,7 +21,14 @@ export async function POST(req: Request) {
   const { name } = await req.json();
   const token = 'ccm_live_' + nanoid(24);
   await redis.hset(`user:key:${token}`, {
-    name: name || 'User Key', status: 'active', usage_count: 0, created_at: Math.floor(Date.now() / 1000), last_used: 0
+    name: name || 'User Key',
+    status: 'active',
+    usage_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    created_at: Math.floor(Date.now() / 1000),
+    last_used: 0
   });
   await redis.sadd('user:key_set', token);
   return NextResponse.json({ success: true, token });

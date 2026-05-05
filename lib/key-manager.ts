@@ -20,22 +20,45 @@ export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string
 
   const now = Math.floor(Date.now() / 1000);
 
-  // --- Auto-Activation Trigger (20% Threshold) ---
-  // If we have many keys but most are on cooldown/failing, trigger a 
-  // background reset to prevent the pool from drying up entirely.
-  const checkPoolHealth = async () => {
-    // Only check occasionally to avoid Redis overhead
-    if (Math.random() > 0.1) return; 
+  // --- Auto-Restoration Logic ---
+  // Periodically check for keys that have completed their cooldown and restore them.
+  const restoreKeys = async () => {
+    // Check frequently (30% of requests)
+    if (Math.random() > 0.3) return;
 
-    const healthyCount = await redis.zcount('gemini:key_pool', 50, 100);
-    const totalCount = keys.length;
+    const cooldownKeys = await redis.zrange('gemini:key_pool', 0, 49); // Low scores
+    if (cooldownKeys.length === 0) return;
+
+    const pipeline = redis.pipeline();
+    const now = Math.floor(Date.now() / 1000);
     
-    if (totalCount > 5 && healthyCount < (totalCount * 0.2)) {
-      console.log(`[Auto-Refill] Pool healthy count (${healthyCount}) below 20% of total (${totalCount}). Triggering reset...`);
-      await resetAllKeys();
+    for (const id of cooldownKeys) {
+      pipeline.hgetall(`gemini:key:${id}`);
+    }
+    
+    const dataList = await pipeline.exec() as (GeminiKey | null)[];
+    const restorePipeline = redis.pipeline();
+    let restoredCount = 0;
+
+    for (let i = 0; i < cooldownKeys.length; i++) {
+      const id = cooldownKeys[i];
+      const data = dataList[i];
+      if (!data || data.status === 'revoked') continue;
+
+      const cooldownUntil = Number(data.cooldown_until || 0);
+      if (data.status === 'cooldown' && (cooldownUntil === 0 || cooldownUntil <= now)) {
+        restorePipeline.hset(`gemini:key:${id}`, { status: 'healthy', failure_count: 0, cooldown_until: 0, rpm_used: 0 });
+        restorePipeline.zadd('gemini:key_pool', { score: 100, member: id });
+        restoredCount++;
+      }
+    }
+    
+    if (restoredCount > 0) {
+      await restorePipeline.exec();
+      console.log(`[Auto-Restore] Restored ${restoredCount} keys from cooldown.`);
     }
   };
-  checkPoolHealth().catch(() => {});
+  restoreKeys().catch(() => {});
   // ------------------------------------------------
 
   // If caching is enabled, try the sticky key first.
@@ -147,20 +170,37 @@ export async function reportKeyFailure(id: string, type: 'ratelimit' | 'server' 
   });
   await redis.hincrby(`gemini:key:${id}`, 'failure_count', 1);
   
-  const data = await redis.hgetall(`gemini:key:${id}`) as unknown as GeminiKey;
-  const failCount = Number(data.failure_count || 1);
-  const rpmUsed = Number(data.rpm_used || 0);
+  const data = await redis.hgetall(`gemini:key:${id}`) as unknown as GeminiKey | null;
+  const failCount = Number(data?.failure_count || 1);
+  const rpmUsed = Number(data?.rpm_used || 0);
   const score = 100 - rpmUsed - (failCount * 10);
   
   await redis.zadd('gemini:key_pool', { score, member: id });
 }
 
 export async function recordKeyUsage(id: string) {
-  await Promise.all([
-    redis.hset(`gemini:key:${id}`, { last_used: Math.floor(Date.now() / 1000) }),
-    // Track in-flight requests to help the load balancer avoid hotspots
-    redis.hincrby(`gemini:key:${id}`, 'rpm_used', 1)
-  ]);
+  const now = Math.floor(Date.now() / 1000);
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const keyMeta = await redis.hgetall(`gemini:key:${id}`) as unknown as GeminiKey & { daily_used_date?: string } | null;
+
+  const usagePipeline = redis.pipeline();
+  usagePipeline.hset(`gemini:key:${id}`, { last_used: now });
+  usagePipeline.hincrby(`gemini:key:${id}`, 'rpm_used', 1);
+  usagePipeline.hincrby(`gemini:key:${id}`, 'total_used', 1);
+  usagePipeline.incrby(`gemini:key:${id}:daily:${today}:requests`, 1);
+
+  if (!keyMeta || (keyMeta as any).daily_used_date !== today) {
+    usagePipeline.hset(`gemini:key:${id}`, { daily_used: 1, daily_used_date: today });
+  } else {
+    usagePipeline.hincrby(`gemini:key:${id}`, 'daily_used', 1);
+  }
+
+  await usagePipeline.exec();
 }
 
 export async function resetAllKeys() {

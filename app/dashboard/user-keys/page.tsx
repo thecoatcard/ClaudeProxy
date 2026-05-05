@@ -1,115 +1,209 @@
 "use client";
-import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useEffect, useMemo, useState } from 'react';
+
+type GatewayKey = {
+  token: string;
+  name?: string;
+  status?: 'active' | 'revoked';
+  usage_count?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  created_at?: number;
+  last_used?: number;
+};
+
+function n(value: number): string {
+  return new Intl.NumberFormat('en-US').format(Math.max(0, Math.floor(value || 0)));
+}
+
+function compact(value: number): string {
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(Math.max(0, value || 0));
+}
+
+function fmtUnix(ts?: number): string {
+  if (!ts || ts <= 0) return '-';
+  return new Date(Number(ts) * 1000).toLocaleString();
+}
 
 export default function UserKeysPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userKeys, setUserKeys] = useState<any[]>([]);
-  const [newUKeyName, setNewUKeyName] = useState("");
-  const [editingUKey, setEditingUKey] = useState<string | null>(null);
-  const [editUKeyName, setEditUKeyName] = useState("");
-
-  useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
-    const res = await fetch('/api/auth/me');
-    if (res.ok) {
-      setIsAuthenticated(true);
-      fetchKeys();
-    }
-  };
+  const [keys, setKeys] = useState<GatewayKey[]>([]);
+  const [newName, setNewName] = useState('');
+  const [editingToken, setEditingToken] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
+  const [loading, setLoading] = useState(true);
 
   const fetchKeys = async () => {
     const res = await fetch('/api/admin/user-keys', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      // Filter out revoked keys here so they don't appear in the list
-      const activeKeys = (data.userKeys || []).filter((k: any) => k.status !== 'revoked');
-      setUserKeys(activeKeys);
+      setKeys((data.userKeys || []).filter((k: GatewayKey) => k.status !== 'revoked'));
     }
   };
 
-  const addUserKey = async () => {
-    await fetch('/api/admin/user-keys', { method: 'POST', body: JSON.stringify({ name: newUKeyName }), headers: { 'Content-Type': 'application/json' } });
-    setNewUKeyName("");
-    fetchKeys();
-  };
+  useEffect(() => {
+    const load = async () => {
+      const authRes = await fetch('/api/auth/me');
+      if (!authRes.ok) {
+        setLoading(false);
+        return;
+      }
+      setIsAuthenticated(true);
+      await fetchKeys();
+      setLoading(false);
+    };
+    load();
+  }, []);
 
-  const deleteUKey = async (id: string) => {
-    if (confirm("Are you sure you want to revoke this user key? It will be removed from this list.")) {
-      await fetch(`/api/admin/user-keys?id=${id}`, { method: 'DELETE' });
-      fetchKeys();
-    }
-  };
-
-  const saveUKeyName = async (id: string) => {
-    await fetch('/api/admin/user-keys', { 
-      method: 'PUT', 
-      body: JSON.stringify({ id, name: editUKeyName }), 
-      headers: { 'Content-Type': 'application/json' } 
+  const createKey = async () => {
+    const res = await fetch('/api/admin/user-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName.trim() || 'Gateway Key' }),
     });
-    setEditingUKey(null);
-    fetchKeys();
+    if (!res.ok) {
+      alert('Failed to create key');
+      return;
+    }
+    setNewName('');
+    await fetchKeys();
   };
+
+  const revokeKey = async (token: string) => {
+    if (!confirm('Revoke this gateway key?')) return;
+    await fetch(`/api/admin/user-keys?id=${token}`, { method: 'DELETE' });
+    await fetchKeys();
+  };
+
+  const saveName = async (token: string) => {
+    const trimmed = editingName.trim();
+    if (!trimmed) return;
+    const res = await fetch('/api/admin/user-keys', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: token, name: trimmed }),
+    });
+    if (!res.ok) {
+      alert('Failed to update name');
+      return;
+    }
+    setEditingToken(null);
+    await fetchKeys();
+  };
+
+  const totals = useMemo(() => {
+    return keys.reduce(
+      (acc, row) => {
+        acc.requests += Number(row.usage_count || 0);
+        acc.tokens += Number(row.total_tokens || 0);
+        return acc;
+      },
+      { requests: 0, tokens: 0 }
+    );
+  }, [keys]);
+
+  if (loading) return <div className="panel">Loading...</div>;
 
   if (!isAuthenticated) {
     return (
-      <div style={{ maxWidth: '400px', margin: '4rem auto', textAlign: 'center' }}>
-        <p>You must be logged in to view this page.</p>
-        <Link href="/dashboard/keys"><button className="btn" style={{ marginTop: '1rem' }}>Go to Login</button></Link>
+      <div className="panel">
+        <h2 className="section-title">Admin Login Required</h2>
+        <p className="muted-text">Please sign in from Provider Keys.</p>
+        <div className="toolbar-row">
+          <Link href="/dashboard/keys" className="btn btn-primary">Go to Login</Link>
+        </div>
       </div>
     );
   }
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-        <h1>User Gateway Keys</h1>
-      </div>
-
-      <div className="card">
-        <h2 className="card-title">Manage Access Tokens</h2>
-        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-          <input type="text" placeholder="User Name / Identifier" className="input" value={newUKeyName} onChange={e => setNewUKeyName(e.target.value)} />
-          <button className="btn" onClick={addUserKey}>Create User Key</button>
+    <div className="dashboard-page">
+      <header className="page-header">
+        <div>
+          <h1 className="page-title">Gateway User Keys</h1>
+          <p className="muted-text">Issue, rename, revoke, and monitor per-key token usage.</p>
         </div>
-        <table>
-          <thead><tr><th>Token</th><th>Name</th><th>Status</th><th>Usage</th><th>Actions</th></tr></thead>
+        <div className="toolbar-row">
+          <button className="btn" onClick={fetchKeys}>Refresh</button>
+        </div>
+      </header>
+
+      <section className="kpi-grid kpi-grid-3">
+        <article className="kpi-card">
+          <p className="kpi-label">Active Keys</p>
+          <p className="kpi-value">{n(keys.length)}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Total Requests</p>
+          <p className="kpi-value">{n(totals.requests)}</p>
+        </article>
+        <article className="kpi-card">
+          <p className="kpi-label">Total Tokens</p>
+          <p className="kpi-value">{compact(totals.tokens)}</p>
+        </article>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2 className="section-title">Create Key</h2>
+        </div>
+        <div className="toolbar-row">
+          <input className="input" type="text" placeholder="Name / Owner / Team" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <button className="btn btn-primary" onClick={createKey}>Create Key</button>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2 className="section-title">Active Gateway Keys</h2>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Requests</th>
+              <th>Input</th>
+              <th>Output</th>
+              <th>Total Tokens</th>
+              <th>Last Used</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
           <tbody>
-            {userKeys.map(k => (
-              <tr key={k.token}>
-                <td style={{ fontFamily: 'monospace' }}>{k.token}</td>
+            {keys.length === 0 && <tr><td colSpan={9}>No active gateway keys.</td></tr>}
+            {keys.map((row) => (
+              <tr key={row.token}>
+                <td><code>{row.token}</code></td>
                 <td>
-                  {editingUKey === k.token ? (
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      <input type="text" className="input" value={editUKeyName} onChange={e => setEditUKeyName(e.target.value)} style={{ padding: '0.2rem', minWidth: '100px' }} />
-                      <button className="btn" onClick={() => saveUKeyName(k.token)} style={{ padding: '0.2rem 0.5rem' }}>Save</button>
-                      <button className="btn btn-danger" onClick={() => setEditingUKey(null)} style={{ padding: '0.2rem 0.5rem' }}>Cancel</button>
+                  {editingToken === row.token ? (
+                    <div className="inline-edit">
+                      <input className="input" type="text" value={editingName} onChange={(e) => setEditingName(e.target.value)} />
+                      <button className="btn btn-primary" onClick={() => saveName(row.token)}>Save</button>
+                      <button className="btn" onClick={() => setEditingToken(null)}>Cancel</button>
                     </div>
                   ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      {k.name}
-                      <button className="btn" style={{ padding: '0.1rem 0.4rem', fontSize: '0.8rem', background: 'rgba(255,255,255,0.1)', color: '#fff', boxShadow: 'none' }} onClick={() => { setEditingUKey(k.token); setEditUKeyName(k.name); }}>Edit</button>
+                    <div className="inline-edit">
+                      <span>{row.name || 'Gateway Key'}</span>
+                      <button className="btn" onClick={() => { setEditingToken(row.token); setEditingName(row.name || 'Gateway Key'); }}>Rename</button>
                     </div>
                   )}
                 </td>
-                <td><span className={`badge badge-${k.status}`}>{k.status}</span></td>
-                <td>{k.usage_count || 0}</td>
-                <td>
-                  <button className="btn btn-danger" onClick={() => deleteUKey(k.token)}>Revoke</button>
-                </td>
+                <td><span className={`pill pill-${row.status || 'active'}`}>{row.status || 'active'}</span></td>
+                <td>{n(Number(row.usage_count || 0))}</td>
+                <td>{compact(Number(row.input_tokens || 0))}</td>
+                <td>{compact(Number(row.output_tokens || 0))}</td>
+                <td>{compact(Number(row.total_tokens || 0))}</td>
+                <td>{fmtUnix(Number(row.last_used || 0))}</td>
+                <td><button className="btn btn-danger" onClick={() => revokeKey(row.token)}>Revoke</button></td>
               </tr>
             ))}
-            {userKeys.length === 0 && (
-              <tr>
-                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>No active user keys found.</td>
-              </tr>
-            )}
           </tbody>
         </table>
-      </div>
+      </section>
     </div>
   );
 }

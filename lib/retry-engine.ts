@@ -1,6 +1,8 @@
 import { getHealthiestKeyObj, reportKeyFailure, recordKeyUsage } from './key-manager';
 import { getModelMapping } from './model-router';
+import type { ModelRoute } from './model-router';
 import { callGemini } from './gemini-adapter';
+import { redis } from './redis';
 import {
   splitForCache,
   prefixHash,
@@ -67,6 +69,25 @@ function stripThoughtSignatures(body: any): any {
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function computeBackoffMs(attempt: number): number {
+  const base = Math.min(1500, 120 * Math.pow(2, Math.max(0, attempt - 1)));
+  const jitter = Math.floor(Math.random() * 120);
+  return base + jitter;
+}
+
+async function rememberLastWorkingModel(userId: string | undefined, anthropicModel: string, internalModel: string) {
+  if (!userId) return;
+  try {
+    await redis.set(`route:last:${userId}:${anthropicModel.toLowerCase()}`, internalModel, { ex: 1800 });
+  } catch {
+    // Best-effort only.
+  }
+}
+
 /**
  * Replace the body's prefix with a cachedContent reference when we have a hit.
  * Falls back to creating a new cache on miss. Returns the body to send, or the
@@ -118,9 +139,11 @@ export async function executeWithRetry(
   anthropicModel: string,
   geminiBody: any,
   stream: boolean,
-  userId?: string
+  userId?: string,
+  routePlan?: ModelRoute
 ) {
-  const modelMap = await getModelMapping(anthropicModel);
+  const isThinkingRequested = !!geminiBody.generationConfig?.thinkingConfig;
+  const modelMap = routePlan || await getModelMapping(anthropicModel, { thinkingEnabled: isThinkingRequested, userId });
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
   const configuredRetries = Number(process.env.MAX_RETRIES || 3);
   const maxRetries = Math.max(configuredRetries, (fallbacks.length * 2) + 2);
@@ -201,12 +224,14 @@ export async function executeWithRetry(
         // Invalid or revoked key — mark as revoked and move to next key immediately
         await reportKeyFailure(keyObj.id, 'auth');
         lastError = { status: 403 };
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, 'ratelimit');
         lastError = { status: 429 };
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
 
@@ -219,6 +244,7 @@ export async function executeWithRetry(
           fallbackIndex++;
         }
         lastError = { status: res.status };
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
 
@@ -239,6 +265,7 @@ export async function executeWithRetry(
             fallbackIndex++;
           }
           lastError = { status: res.status, message: msg };
+          await sleep(computeBackoffMs(attempt));
           continue;
         }
 
@@ -258,6 +285,7 @@ export async function executeWithRetry(
           lastCacheHash = null;
           skipCache = true;
           lastError = { status: 400 };
+          await sleep(computeBackoffMs(attempt));
           continue;
         }
 
@@ -280,6 +308,7 @@ export async function executeWithRetry(
           
           await reportKeyFailure(keyObj.id, 'server');
           lastError = { status: 400, message: msg };
+          await sleep(computeBackoffMs(attempt));
           continue;
         }
 
@@ -288,6 +317,7 @@ export async function executeWithRetry(
 
       // Success
       await recordKeyUsage(keyObj.id);
+      await rememberLastWorkingModel(userId, anthropicModel, currentInternalModel);
       return res;
     } catch (err: any) {
       if (err.message === 'overloaded_error') throw err;
@@ -297,12 +327,14 @@ export async function executeWithRetry(
         currentInternalModel = fallbacks[fallbackIndex];
         fallbackIndex++;
         lastError = err;
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
 
       if (err.name === 'AbortError' || err.message?.includes('timeout')) {
         await reportKeyFailure(keyObj.id, 'server');
         lastError = err;
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
       throw err;
