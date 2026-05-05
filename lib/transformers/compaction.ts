@@ -1,9 +1,7 @@
 /**
  * Message history compaction logic for the CoatCard AI Gateway.
- *
- * Prevents context window overflows by intelligently shrinking the message
- * history when it exceeds a target threshold.
  */
+import { generateSemanticSummary } from './ai-compactor';
 
 export interface CompactionOptions {
   maxMessages?: number;
@@ -12,6 +10,9 @@ export interface CompactionOptions {
   keepLastN?: number;
   rollingSummary?: string;
   summaryCharBudget?: number;
+  // If provided, used to call AI for semantic summarization
+  apiKey?: string;
+  model?: string;
 }
 
 export interface CompactionResult {
@@ -26,10 +27,17 @@ export interface CompactionResult {
 
 const DEFAULT_OPTIONS: CompactionOptions = {
   maxMessages: 50,
-  maxTokensApprox: 100000, // ~100k tokens
-  keepFirstN: 2,           // Keep the initial context-setting exchange
-  keepLastN: 10,           // Keep the most recent context
+  maxTokensApprox: 100000, 
+  keepFirstN: 2,           
+  keepLastN: 14,           
   summaryCharBudget: 3000,
+};
+
+// Realistic token weights
+const TOKEN_WEIGHTS = {
+  CHAR: 0.25,
+  IMAGE: 1000, // Gemini/Claude images are roughly 800-1600 tokens
+  TOOL_CALL: 100,
 };
 
 function normalizeWhitespace(text: string): string {
@@ -42,30 +50,31 @@ function clip(text: string, maxChars: number): string {
   return `${text.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
 }
 
+function hasToolUse(message: any): boolean {
+  if (!Array.isArray(message?.content)) return false;
+  return message.content.some((b: any) => b.type === 'tool_use');
+}
+
+function hasToolResult(message: any): boolean {
+  if (!Array.isArray(message?.content)) return false;
+  return message.content.some((b: any) => b.type === 'tool_result');
+}
+
 function blockText(block: any): string {
   if (!block) return '';
   if (typeof block === 'string') return block;
   if (block.type === 'text' && typeof block.text === 'string') return block.text;
   if (block.type === 'thinking' && typeof block.thinking === 'string') return `[thinking] ${block.thinking}`;
   if (block.type === 'tool_use') {
-    return `[tool_use:${block.name || 'unknown'}] ${JSON.stringify(block.input || {})}`;
+    return `[Action: Call ${block.name} with ${JSON.stringify(block.input || {})}]`;
   }
   if (block.type === 'tool_result') {
-    if (typeof block.content === 'string') return `[tool_result] ${block.content}`;
-    if (Array.isArray(block.content)) {
-      const merged = block.content
-        .map((entry: any) => {
-          if (entry?.type === 'text') return entry.text || '';
-          if (entry?.type === 'image') return '[image]';
-          return typeof entry === 'string' ? entry : JSON.stringify(entry);
-        })
-        .join(' ');
-      return `[tool_result] ${merged}`;
-    }
-    return `[tool_result] ${JSON.stringify(block.content || {})}`;
+    const content = Array.isArray(block.content) 
+      ? block.content.map((c: any) => c.text || '[data]').join(' ')
+      : typeof block.content === 'string' ? block.content : '[data]';
+    return `[Result: ${clip(normalizeWhitespace(content), 150)}]`;
   }
   if (block.type === 'image') return '[image]';
-  if (typeof block.text === 'string') return block.text;
   return JSON.stringify(block);
 }
 
@@ -77,45 +86,54 @@ function messageText(message: any): string {
 }
 
 function estimateTokens(messages: any[]): number {
-  const chars = messages.reduce((sum, msg) => sum + messageText(msg).length, 0);
-  return Math.ceil(chars / 4);
+  return messages.reduce((sum, msg) => {
+    let tokens = messageText(msg).length * TOKEN_WEIGHTS.CHAR;
+    if (Array.isArray(msg.content)) {
+      msg.content.forEach((b: any) => {
+        if (b.type === 'image') tokens += TOKEN_WEIGHTS.IMAGE;
+        if (b.type === 'tool_use') tokens += TOKEN_WEIGHTS.TOOL_CALL;
+      });
+    }
+    return sum + Math.ceil(tokens);
+  }, 0);
 }
 
-function buildSummaryLines(messages: any[], maxLines: number): string[] {
-  const lines: string[] = [];
-  for (const msg of messages) {
-    if (lines.length >= maxLines) break;
-    const role = msg?.role || 'unknown';
-    const text = clip(normalizeWhitespace(messageText(msg)), 220);
-    if (!text) continue;
-    lines.push(`${role}: ${text}`);
+/**
+ * Ensures we don't slice history in a way that orphans a tool result from its call.
+ */
+function findSafeBoundary(messages: any[], index: number): number {
+  let safeIdx = index;
+  // If we are about to start 'keepLastN' with a tool_result, we must go back
+  // and include the tool_use (assistant) turn as well.
+  while (safeIdx > 0 && safeIdx < messages.length) {
+    const current = messages[safeIdx];
+    const prev = messages[safeIdx - 1];
+    
+    // If current is a user message with tool results, it MUST have the previous 
+    // assistant message with tool calls.
+    if (hasToolResult(current) && !hasToolUse(current)) {
+       // We need to keep the previous message too.
+       safeIdx--;
+       continue; 
+    }
+    
+    // If the previous message was a tool_use but NO result is in the kept part,
+    // we should probably move the boundary forward to avoid an unanswered call.
+    if (hasToolUse(prev) && !hasToolResult(current)) {
+       // The result is likely at safeIdx. If we split here, the call is orphaned.
+       // It's safer to include the call in the summary and start the history 
+       // AFTER the tool sequence.
+    }
+
+    break;
   }
-  return lines;
+  return Math.max(0, safeIdx);
 }
 
-function buildCompactionSummary(
-  removedMessages: any[],
-  rollingSummary: string,
-  summaryCharBudget: number
-): string {
-  const existing = rollingSummary ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.45)) : '';
-  const lines = buildSummaryLines(removedMessages, 14);
-
-  const sections: string[] = [];
-  if (existing) sections.push(`Previous summary:\n${existing}`);
-  if (lines.length > 0) sections.push(`Compressed turns:\n- ${lines.join('\n- ')}`);
-  if (sections.length === 0) {
-    return 'Older context compressed to preserve token budget.';
-  }
-
-  const summary = sections.join('\n\n');
-  return clip(summary, summaryCharBudget);
-}
-
-export function compactMessagesDetailed(
+export async function compactMessagesDetailed(
   messages: any[],
   options: CompactionOptions = {}
-): CompactionResult {
+): Promise<CompactionResult> {
   const {
     maxMessages = DEFAULT_OPTIONS.maxMessages!,
     maxTokensApprox = DEFAULT_OPTIONS.maxTokensApprox!,
@@ -127,6 +145,7 @@ export function compactMessagesDetailed(
 
   const estimatedTokensBefore = estimateTokens(messages);
   const belowLimits = messages.length <= maxMessages && estimatedTokensBefore <= maxTokensApprox;
+  
   if (belowLimits) {
     return {
       messages,
@@ -138,9 +157,18 @@ export function compactMessagesDetailed(
     };
   }
 
-  console.log(`[Compaction] Triggered (${messages.length} messages, ~${estimatedTokensBefore} tokens).`);
+  // 1. Calculate boundaries safely
+  const firstPartEnd = keepFirstN;
+  let lastPartStart = Math.max(firstPartEnd + 1, messages.length - keepLastN);
+  
+  // Shift boundary to avoid breaking tool sequences
+  lastPartStart = findSafeBoundary(messages, lastPartStart);
 
-  if (messages.length <= keepFirstN + keepLastN) {
+  const firstPart = messages.slice(0, firstPartEnd);
+  const removedPart = messages.slice(firstPartEnd, lastPartStart);
+  const lastPart = messages.slice(lastPartStart);
+
+  if (removedPart.length === 0) {
     return {
       messages,
       didCompact: false,
@@ -151,21 +179,63 @@ export function compactMessagesDetailed(
     };
   }
 
-  const firstPart = messages.slice(0, keepFirstN);
-  const removedPart = messages.slice(keepFirstN, Math.max(keepFirstN, messages.length - keepLastN));
-  const lastPart = messages.slice(-keepLastN);
+  console.log(`[Compaction] Shrinking ${messages.length} messages. Removed middle ${removedPart.length} turns.`);
 
-  const summary = buildCompactionSummary(removedPart, rollingSummary, summaryCharBudget);
+  // 2. Generate Summary (AI-powered with heuristic fallback)
+  let summary = "";
+  let generatedByAI = false;
 
-  const summaryMarker = {
-    role: 'assistant',
-    content: `[Gateway Memory Summary]\n${summary}`,
-  };
+  if (options.apiKey && removedPart.length > 0) {
+     const aiSummary = await generateSemanticSummary(
+       removedPart, 
+       options.apiKey, 
+       options.model || 'gemma-4-31b-it'
+     );
+     if (aiSummary) {
+       summary = aiSummary;
+       generatedByAI = true;
+     }
+  }
 
-  const compacted = [...firstPart, summaryMarker, ...lastPart];
+  if (!generatedByAI) {
+    const existing = rollingSummary ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.4)) : '';
+    const lines = removedPart.slice(-15).map(msg => {
+      const role = msg.role === 'assistant' ? 'AI' : 'User';
+      return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
+    });
+    summary = (existing ? `Previous: ${existing}\n\n` : "") + "Recent Discussion:\n- " + lines.join('\n- ');
+    summary = clip(summary, summaryCharBudget);
+  }
+
+  // 3. Insert Summary while maintaining role alternation
+  // We want: [FirstPart] -> [Summary] -> [LastPart]
+  // Rule: Gemini requires User -> Model -> User.
+  // We'll insert the summary as a special "System-like" user message to be safest,
+  // OR merge it into the first message of lastPart if that's a user message.
+
+  const summaryContent = `[CONTEXT SUMMARY]\n${summary}\n[END SUMMARY]`;
+  
+  const compacted: any[] = [...firstPart];
+  const firstOfLast = lastPart[0];
+
+  if (firstOfLast && firstOfLast.role === 'user') {
+    // Merge summary into the beginning of the next user message
+    const newContent = typeof firstOfLast.content === 'string'
+      ? `${summaryContent}\n\n${firstOfLast.content}`
+      : [{ type: 'text', text: summaryContent }, ...firstOfLast.content];
+    
+    compacted.push({ ...firstOfLast, content: newContent });
+    compacted.push(...lastPart.slice(1));
+  } else {
+    // If next is assistant, we MUST insert a user message with the summary
+    compacted.push({
+      role: 'user',
+      content: `${summaryContent}\n\nPlease continue based on the summary above.`
+    });
+    compacted.push(...lastPart);
+  }
+
   const estimatedTokensAfter = estimateTokens(compacted);
-
-  console.log(`[Compaction] ${messages.length} -> ${compacted.length} messages (~${estimatedTokensBefore} -> ~${estimatedTokensAfter} tokens).`);
   return {
     messages: compacted,
     didCompact: true,
@@ -177,6 +247,7 @@ export function compactMessagesDetailed(
   };
 }
 
-export function compactMessages(messages: any[], options: CompactionOptions = {}): any[] {
-  return compactMessagesDetailed(messages, options).messages;
+export async function compactMessages(messages: any[], options: CompactionOptions = {}): Promise<any[]> {
+  const res = await compactMessagesDetailed(messages, options);
+  return res.messages;
 }

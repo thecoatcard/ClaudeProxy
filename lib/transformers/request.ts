@@ -109,12 +109,19 @@ export async function transformRequestToGemini(
   if (Array.isArray(anthropicReq.messages)) {
     const summaryKey = deriveSummaryKey(anthropicReq, userId);
     const rollingSummary = await redis.get<string>(summaryKey).catch(() => '');
-    const compaction = compactMessagesDetailed(anthropicReq.messages, {
+    
+    // Get a key for the background summarization task
+    const { getHealthiestKeyObj } = await import('../key-manager');
+    const systemKey = await getHealthiestKeyObj(userId);
+
+    const compaction = await compactMessagesDetailed(anthropicReq.messages, {
       maxTokensApprox: getCompactionTargetTokens(internalModel),
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
       keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
       keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 14),
       rollingSummary: typeof rollingSummary === 'string' ? rollingSummary : '',
+      apiKey: systemKey?.key,
+      model: 'gemma-4-31b-it',
     });
     anthropicReq.messages = compaction.messages;
 
