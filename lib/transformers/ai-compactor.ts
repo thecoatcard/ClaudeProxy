@@ -20,25 +20,27 @@ export async function generateSemanticSummary(
       content = msg.content.map((b: any) => {
         if (b.type === 'text') return b.text;
         if (b.type === 'tool_use') return `[Action: ${b.name}]`;
-        if (b.type === 'tool_result') return `[Result: ${JSON.stringify(b.content).slice(0, 200)}...]`;
+        if (b.type === 'tool_result') {
+          const resultStr = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
+          // Allow up to 15,000 characters for Gemma 4 to analyze (approx 4k tokens)
+          return `[Tool Output: ${resultStr.length > 15000 ? resultStr.slice(0, 15000) + '... (truncated for summary)' : resultStr}]`;
+        }
         return `[${b.type}]`;
       }).join(' ');
     }
     return `${role}: ${content}`;
   }).join('\n\n');
 
-  const prompt = `You are a conversation memory optimizer. Below is a middle section of a long technical conversation between a User and an AI Assistant.
-The conversation includes tool calls and technical decisions.
+  const prompt = `You are a conversation memory optimizer. Below is a middle section of a technical conversation.
+It contains large data outputs from tools (logs, file contents, command results).
 
 TASK:
-Summarize these turns into a highly concise "Memory Block" (max 250 words).
-Focus on:
-1. What the user asked for.
-2. What technical decisions were made.
-3. Key results from tool executions (success/failure, important data).
-4. Any state that changed (files edited, variables set).
+Summarize these turns into a concise "Memory Block" (max 300 words).
 
-DO NOT include greetings or filler. Use bullet points for key facts.
+CRITICAL INSTRUCTIONS:
+1. For LARGE tool outputs, do not just say "tool returned data". Analyze the data and explain what it means (e.g., "The logs show a null pointer at line 42" or "The search returned 5 files, only index.ts was relevant").
+2. Preserve all technical decisions, file paths, and specific constants mentioned.
+3. If a tool failed, explain why based on the output.
 
 CONVERSATION TO SUMMARIZE:
 ${historyText}
@@ -63,7 +65,10 @@ SUMMARY:`;
       return null;
     }
     const data = await res.json();
-    const summary = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    // Find the first text part, as reasoning models might return 'thought' parts first
+    const textPart = parts.find((p: any) => p && typeof p.text === 'string' && p.text.trim());
+    const summary = textPart?.text;
     return summary ? summary.trim() : null;
   } catch (error) {
     console.error('[AI-Compactor] Error during summarization:', error);

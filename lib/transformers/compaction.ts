@@ -78,16 +78,23 @@ function blockText(block: any): string {
   return JSON.stringify(block);
 }
 
-function messageText(message: any): string {
+function messageText(message: any, raw: boolean = false): string {
   if (!message) return '';
   if (typeof message.content === 'string') return message.content;
   if (!Array.isArray(message.content)) return JSON.stringify(message.content || {});
-  return message.content.map((block: any) => blockText(block)).join('\n');
+  
+  return message.content.map((block: any) => {
+    if (raw && block.type === 'tool_result') {
+      return typeof block.content === 'string' ? block.content : JSON.stringify(block.content || {});
+    }
+    return blockText(block);
+  }).join('\n');
 }
 
 function estimateTokens(messages: any[]): number {
   return messages.reduce((sum, msg) => {
-    let tokens = messageText(msg).length * TOKEN_WEIGHTS.CHAR;
+    // For estimation, we MUST use the raw text length, not the clipped summary text
+    let tokens = messageText(msg, true).length * TOKEN_WEIGHTS.CHAR;
     if (Array.isArray(msg.content)) {
       msg.content.forEach((b: any) => {
         if (b.type === 'image') tokens += TOKEN_WEIGHTS.IMAGE;
@@ -103,28 +110,23 @@ function estimateTokens(messages: any[]): number {
  */
 function findSafeBoundary(messages: any[], index: number): number {
   let safeIdx = index;
-  // If we are about to start 'keepLastN' with a tool_result, we must go back
-  // and include the tool_use (assistant) turn as well.
+  
   while (safeIdx > 0 && safeIdx < messages.length) {
     const current = messages[safeIdx];
     const prev = messages[safeIdx - 1];
     
     // If current is a user message with tool results, it MUST have the previous 
-    // assistant message with tool calls.
+    // assistant message with tool calls in the same part of history.
     if (hasToolResult(current) && !hasToolUse(current)) {
-       // We need to keep the previous message too.
        safeIdx--;
        continue; 
     }
     
-    // If the previous message was a tool_use but NO result is in the kept part,
-    // we should probably move the boundary forward to avoid an unanswered call.
-    if (hasToolUse(prev) && !hasToolResult(current)) {
-       // The result is likely at safeIdx. If we split here, the call is orphaned.
-       // It's safer to include the call in the summary and start the history 
-       // AFTER the tool sequence.
-    }
-
+    // If the assistant just made a call (current), and we are about to START 
+    // the kept history here, we must make sure we didn't just cut off its result.
+    // However, since we are moving BACKWARDS from the end, if 'current' is an 
+    // assistant tool_use, it's safer to include it in the kept history so the 
+    // model sees its own pending call.
     break;
   }
   return Math.max(0, safeIdx);
@@ -208,11 +210,6 @@ export async function compactMessagesDetailed(
   }
 
   // 3. Insert Summary while maintaining role alternation
-  // We want: [FirstPart] -> [Summary] -> [LastPart]
-  // Rule: Gemini requires User -> Model -> User.
-  // We'll insert the summary as a special "System-like" user message to be safest,
-  // OR merge it into the first message of lastPart if that's a user message.
-
   const summaryContent = `[CONTEXT SUMMARY]\n${summary}\n[END SUMMARY]`;
   
   const compacted: any[] = [...firstPart];

@@ -11,15 +11,26 @@ export function transformError(err: any): AnthropicErrorResponse {
   const data = err.data?.error || {};
   const message = err.message || data.message || "An unexpected error occurred.";
 
-  // Gemini Safety Blocks
-  if (status === 400 && (message.includes('SAFETY') || message.includes('blocked'))) {
-    return {
-      type: 'error',
-      error: {
-        type: 'invalid_request_error',
-        message: `Gemini Safety Block: ${message}`
-      }
-    };
+  // Gemini Safety Blocks or Context Full
+  if (status === 400) {
+    if (message.includes('SAFETY') || message.includes('blocked')) {
+      return {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: `Gemini Safety Block: ${message}`
+        }
+      };
+    }
+    if (message.includes('context window') || message.includes('too many tokens') || message.includes('400')) {
+       return {
+         type: 'error',
+         error: {
+           type: 'invalid_request_error',
+           message: `Context Overflow: History may be too large. Gateway Compaction Status: Active. Error: ${message}`
+         }
+       };
+    }
   }
 
   // Rate Limits

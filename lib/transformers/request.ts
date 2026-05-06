@@ -1,6 +1,7 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
 import { compactMessagesDetailed } from './compaction';
+import { getHealthiestKeyObj } from '../key-manager';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
@@ -111,7 +112,6 @@ export async function transformRequestToGemini(
     const rollingSummary = await redis.get<string>(summaryKey).catch(() => '');
     
     // Get a key for the background summarization task
-    const { getHealthiestKeyObj } = await import('../key-manager');
     const systemKey = await getHealthiestKeyObj(userId);
 
     const compaction = await compactMessagesDetailed(anthropicReq.messages, {
