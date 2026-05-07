@@ -83,6 +83,16 @@ function computeBackoffMs(attempt: number): number {
   return base + jitter;
 }
 
+// Separate, longer backoff specifically for 429 rate-limit errors.
+// Rate limits typically last 30-60s. The generic 1.5s backoff is useless here
+// — we need to actually wait for the rate limit window to expire.
+function computeRateLimitBackoffMs(consecutiveRateLimitAttempts: number): number {
+  // Starts at 2s, doubles each hit, caps at 15s. Adds small jitter.
+  const base = Math.min(15000, 2000 * Math.pow(2, consecutiveRateLimitAttempts - 1));
+  const jitter = Math.floor(Math.random() * 500);
+  return base + jitter;
+}
+
 async function rememberLastWorkingModel(userId: string | undefined, anthropicModel: string, internalModel: string) {
   if (!userId) return;
   try {
@@ -178,6 +188,11 @@ export async function executeWithRetry(
   // patchy (primary down, but fallback 2 still works). 3 is a better balance
   // of latency vs resilience. Increase via OVERLOAD_FAST_FAIL_AFTER env var.
   const OVERLOAD_FAST_FAIL_AFTER = Number(process.env.OVERLOAD_FAST_FAIL_AFTER || 3);
+  // Tracks consecutive 429 responses across different keys.
+  // If 3+ different keys all return 429, it’s a pool-wide rate limit — cycling
+  // 7 more keys won’t help. We break early and return a proper rate_limit_error.
+  let rateLimitedAttempts = 0;
+  const RATE_LIMIT_FAST_FAIL_AFTER = 3;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const keyObj = await getHealthiestKeyObj(userId);
@@ -256,8 +271,22 @@ export async function executeWithRetry(
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, 'ratelimit');
+        rateLimitedAttempts++;
         lastError = { status: 429 };
-        await sleep(computeBackoffMs(attempt));
+
+        // After N consecutive 429s on different keys, the entire pool is rate-limited.
+        // Cycling more keys won't help. Break immediately and return rate_limit_error.
+        if (rateLimitedAttempts >= RATE_LIMIT_FAST_FAIL_AFTER) {
+          console.warn(
+            `[retry] ${rateLimitedAttempts} consecutive 429s on different keys — pool-wide rate limit detected.` +
+            ` Failing fast after ${attempt} attempt(s).`
+          );
+          break;
+        }
+
+        // Use a much longer backoff for 429 than for other errors.
+        // Rate limits last 30-60s; the generic 1.5s cap is useless.
+        await sleep(computeRateLimitBackoffMs(rateLimitedAttempts));
         continue;
       }
 
@@ -432,9 +461,21 @@ export async function executeWithRetry(
   const approxTokens = Math.round(
     JSON.stringify(geminiBody?.contents ?? []).length / 4
   );
+  const lastStatus = (lastError as any)?.status ?? 'unknown';
   console.error(
     `[retry] overloaded_error after ${maxRetries} attempts | model=${anthropicModel}` +
-    ` | turns=${msgCount} | ~${approxTokens} tokens in payload | overloadedModels=[${[...overloadedModels].join(',')}]`
+    ` | turns=${msgCount} | ~${approxTokens} tokens in payload` +
+    ` | overloadedModels=[${[...overloadedModels].join(',')}]` +
+    ` | rateLimitedAttempts=${rateLimitedAttempts} | lastErrorStatus=${lastStatus}`
   );
+
+  // If most failures were rate-limits (not overload), return a proper rate_limit_error
+  // so Claude Code knows to back off on quota, not just retry blindly.
+  if (rateLimitedAttempts >= RATE_LIMIT_FAST_FAIL_AFTER) {
+    const rateLimitErr: any = new Error('rate_limit_error');
+    rateLimitErr.status = 429;
+    throw rateLimitErr;
+  }
+
   throw new Error('overloaded_error');
 }

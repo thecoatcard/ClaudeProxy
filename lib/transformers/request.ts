@@ -18,9 +18,9 @@ import {
 // edge-case rejections from token-counting differences between client and server.
 const MAX_OUTPUT_TOKEN_SAFETY_MARGIN = 512;
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  'gemini-2.5-flash':               65536 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 65024
+  'gemini-2.5-flash':               64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (64k confirmed by API error)
   'gemini-2.5-flash-lite':          32768 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 32256
-  'gemini-3.1-flash-lite-preview':  65536 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 65024 (131k is output+thinking combined)
+  'gemini-3.1-flash-lite-preview':  64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (64k limit; 131k is combined output+thinking budget)
   'gemini-3-flash-preview':         64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (error-confirmed 64k limit)
   'gemini-flash-latest':            8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
   'gemini-flash-lite-latest':       8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
