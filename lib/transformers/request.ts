@@ -5,13 +5,9 @@ import { getHealthiestKeyObj } from '../key-manager';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  'gemini-2.0-flash-exp':           65536,
-  'gemini-2.0-flash-lite-preview':  32768,
-  'gemini-2.0-pro-exp-02-05':       65536,
   'gemini-2.5-flash':               65536,
   'gemini-2.5-flash-lite':          32768,
   'gemini-3.1-flash-lite-preview':  131072, 
-  'gemini-3.1-pro-preview':         131072,
   'gemini-3-flash-preview':         65536,
   'gemini-flash-latest':            8192,
   'gemini-flash-lite-latest':       8192,
@@ -109,10 +105,12 @@ export async function transformRequestToGemini(
 ) {
   if (Array.isArray(anthropicReq.messages)) {
     const summaryKey = deriveSummaryKey(anthropicReq, userId);
-    const rollingSummary = await redis.get<string>(summaryKey).catch(() => '');
     
-    // Get a key for the background summarization task
-    const systemKey = await getHealthiestKeyObj(userId);
+    // Pipeline initial metadata lookups to save RTT
+    const [rollingSummary, systemKey] = await Promise.all([
+      redis.get<string>(summaryKey).catch(() => ''),
+      getHealthiestKeyObj(userId)
+    ]);
 
     const compaction = await compactMessagesDetailed(anthropicReq.messages, {
       maxTokensApprox: getCompactionTargetTokens(internalModel),

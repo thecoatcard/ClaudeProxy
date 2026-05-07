@@ -304,7 +304,15 @@ export async function getModelMapping(
 
   const normalizedModel = normalizeModelName(anthropicModel);
   const thinkingEnabled = Boolean(options.thinkingEnabled);
-  const registry = await readRegistry();
+  
+  // Parallelize Registry and Sticky model lookups to save 1 RTT (approx 20-50ms)
+  const [registry, stickyRaw] = await Promise.all([
+    readRegistry(),
+    options.userId 
+      ? redis.get<string>(`route:last:${options.userId}:${normalizedModel}`).catch(() => null)
+      : Promise.resolve(null)
+  ]);
+
   const baseRoute = resolveBaseRoute(normalizedModel, registry);
 
   if (!normalizedModel.startsWith('claude-')) {
@@ -321,15 +329,8 @@ export async function getModelMapping(
     : chooseAdaptiveChain(profile);
 
   let stickyModel = '';
-  if (options.userId) {
-    try {
-      const sticky = await redis.get<string>(`route:last:${options.userId}:${normalizedModel}`);
-      if (typeof sticky === 'string' && sticky.trim()) {
-        stickyModel = normalizeModelName(sticky);
-      }
-    } catch {
-      // Ignore sticky read failures. Routing must remain available.
-    }
+  if (typeof stickyRaw === 'string' && stickyRaw.trim()) {
+    stickyModel = normalizeModelName(stickyRaw);
   }
 
   const finalChain = dedupeChain([

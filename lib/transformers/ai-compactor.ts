@@ -151,15 +151,19 @@ export async function generateChunkedSummary(
     `[AI-Compactor] Chunked mode: ${messages.length} messages → ${chunks.length} chunk(s) of ≤${chunkSize}`
   );
 
-  // ── 2. Summarize each chunk sequentially ─────────────────────────────────
-  const chunkSummaries: string[] = [];
-  for (let idx = 0; idx < chunks.length; idx++) {
-    const summary = await generateSemanticSummary(chunks[idx], apiKey, model);
-    if (summary) {
-      chunkSummaries.push(summary);
-    } else {
-      console.warn(`[AI-Compactor] Chunk ${idx + 1}/${chunks.length} summarization returned null — skipping chunk.`);
-    }
+  // ── 2. Summarize each chunk in PARALLEL ─────────────────────────────────
+  const summaryPromises = chunks.map((chunk, idx) => 
+    generateSemanticSummary(chunk, apiKey, model).then(summary => ({ summary, idx }))
+  );
+  
+  const results = await Promise.all(summaryPromises);
+  const chunkSummaries: string[] = results
+    .sort((a, b) => a.idx - b.idx)
+    .map(r => r.summary)
+    .filter((s): s is string => !!s);
+
+  if (chunkSummaries.length < chunks.length) {
+    console.warn(`[AI-Compactor] ${chunks.length - chunkSummaries.length} chunk(s) failed summarization.`);
   }
 
   if (chunkSummaries.length === 0) return null;
