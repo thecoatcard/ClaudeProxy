@@ -10,8 +10,11 @@ import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens
 import { tryOptimizations } from '@/lib/transformers/optimizations';
 import { transformError } from '@/lib/transformers/errors';
 
-export const runtime = 'edge';
-export const maxDuration = 300; // Increase timeout to 5 minutes
+// Do NOT use `runtime = 'edge'` here.
+// Edge Runtime has a hard 25s CPU limit and silently IGNORES maxDuration.
+// Node.js serverless runtime (the default) respects maxDuration and supports
+// long-running requests needed for compaction, streaming, and retry logic.
+export const maxDuration = 300; // 5 minutes — applies on Vercel Pro/Enterprise Node.js runtime
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
  *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
