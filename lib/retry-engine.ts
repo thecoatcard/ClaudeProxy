@@ -172,6 +172,10 @@ export async function executeWithRetry(
   // When Gemini returns 400 "max tokens exceeded", we reduce maxOutputTokens
   // for all subsequent attempts. Null = use the value already in geminiBody.
   let maxOutputTokensOverride: number | null = null;
+  // Break after this many DISTINCT models return 503. Keeping it at 2 means:
+  // primary + 1 fallback both overloaded → it’s a Gemini-wide outage, give up fast.
+  // Increase via env var if you want to try more fallbacks before conceding.
+  const OVERLOAD_FAST_FAIL_AFTER = Number(process.env.OVERLOAD_FAST_FAIL_AFTER || 2);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const keyObj = await getHealthiestKeyObj(userId);
@@ -256,20 +260,27 @@ export async function executeWithRetry(
       }
 
       if (res.status === 503 || res.status >= 500) {
-        await reportKeyFailure(keyObj.id, 'server');
+        // Only penalize the API key if this is the FIRST overload we've seen.
+        // If a second model is also returning 503, it's a Gemini-wide model outage
+        // (not a key issue). Don't put healthy keys into 20s cooldown just because
+        // Gemini's servers are struggling — that depletes the pool for the next request.
+        if (overloadedModels.size === 0) {
+          await reportKeyFailure(keyObj.id, 'server'); // 1st failure: might be key-specific
+        } else {
+          // Global outage mode: reduce score slightly so scheduler prefers other keys,
+          // but keep the key IN THE POOL and available (it's not actually broken).
+          redis.zadd('gemini:key_pool', { score: 75, member: keyObj.id }).catch(() => {});
+        }
         overloadedModels.add(currentInternalModel);
 
-        // Rotate immediately to the next model — there's no point retrying the
-        // same overloaded model a second time on a different key; it's the model
-        // tier that's under load, not the key.
+        // Rotate immediately to the next model.
         if (fallbackIndex < fallbacks.length) {
           currentInternalModel = fallbacks[fallbackIndex++];
         }
 
-        // Fast-exit: every model in the chain has now returned 503 at least once.
-        // It's a regional model-side outage — burning more retries won't help.
-        if (overloadedModels.size === 1 + fallbacks.length) {
-          console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded — failing fast after ${attempt} attempt(s).`);
+        // Fast-exit: enough distinct models have failed to confirm a Gemini-wide outage.
+        if (overloadedModels.size >= OVERLOAD_FAST_FAIL_AFTER) {
+          console.warn(`[retry] ${overloadedModels.size} distinct models overloaded — Gemini outage detected. Failing fast after ${attempt} attempt(s).`);
           break;
         }
 
@@ -287,15 +298,19 @@ export async function executeWithRetry(
         const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error|service is currently unavailable/i.test(msg));
         
         if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
-          await reportKeyFailure(keyObj.id, 'server');
+          if (overloadedModels.size === 0) {
+            await reportKeyFailure(keyObj.id, 'server');
+          } else {
+            redis.zadd('gemini:key_pool', { score: 75, member: keyObj.id }).catch(() => {});
+          }
           overloadedModels.add(currentInternalModel);
 
           if (fallbackIndex < fallbacks.length) {
             currentInternalModel = fallbacks[fallbackIndex++];
           }
 
-          if (overloadedModels.size === 1 + fallbacks.length) {
-            console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded (body parse) — failing fast.`);
+          if (overloadedModels.size >= OVERLOAD_FAST_FAIL_AFTER) {
+            console.warn(`[retry] ${overloadedModels.size} distinct models overloaded (body parse) — failing fast.`);
             break;
           }
 
