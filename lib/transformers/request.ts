@@ -2,6 +2,12 @@ import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
 import { compactMessagesDetailed } from './compaction';
 import { getHealthiestKeyObj } from '../key-manager';
+import {
+  archiveToolOutput,
+  countLargeToolResults,
+  ARCHIVE_THRESHOLD_CHARS,
+  ARCHIVE_KEEP_RECENT,
+} from '../tool-archive';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
@@ -109,9 +115,10 @@ export async function transformRequestToGemini(
   originalToolNames?: Map<string, string>,
   userId?: string
 ) {
+  // Derive session key once — used by compaction, rolling summary AND tool archive.
+  const summaryKey = deriveSummaryKey(anthropicReq, userId);
+
   if (Array.isArray(anthropicReq.messages)) {
-    const summaryKey = deriveSummaryKey(anthropicReq, userId);
-    
     // Pipeline initial metadata lookups to save RTT
     const [rollingSummary, systemKey] = await Promise.all([
       redis.get<string>(summaryKey).catch(() => ''),
@@ -192,6 +199,16 @@ export async function transformRequestToGemini(
     if (names[i]) nameMap.set(id, names[i]);
   });
   // ------------------------------------------------
+
+  // ── Tool Archive: pre-count large results (post-compaction) ──────────────
+  // We keep the most recent ARCHIVE_KEEP_RECENT large results in full and
+  // archive everything older. Count runs on the already-compacted messages
+  // so we only count from the live context, not removed/summarized turns.
+  const totalLargeResults = userId
+    ? countLargeToolResults(anthropicReq.messages || [])
+    : 0;
+  let largeResultSeen = 0; // incremented per large result in the loop below
+  // ─────────────────────────────────────────────────────────────────────────
 
   for (const msg of anthropicReq.messages || []) {
     const role = msg.role === 'assistant' ? 'model' : 'user';
@@ -289,6 +306,26 @@ export async function transformRequestToGemini(
               return JSON.stringify(c);
             }).join("\n");
           }
+
+          // ── Tool Output Archive ──────────────────────────────────────────
+          // For large results from older turns: replace with a compact reference
+          // and store the bytes in Redis. This keeps the live context small.
+          // The most recent ARCHIVE_KEEP_RECENT large results are always shown in full
+          // so the model can immediately act on its latest tool call outputs.
+          if (resultText.length > ARCHIVE_THRESHOLD_CHARS) {
+            largeResultSeen++;
+            const isOldResult = largeResultSeen <= totalLargeResults - ARCHIVE_KEEP_RECENT;
+            if (isOldResult && userId) {
+              const originalToolName = toolIdMap.get(block.tool_use_id) || fnName || 'tool';
+              const ref = await archiveToolOutput(summaryKey, originalToolName, resultText);
+              if (ref) {
+                // Successfully archived — swap the full content for the reference tag.
+                resultText = ref;
+              }
+              // If archiving failed, fall through to truncation below.
+            }
+          }
+          // ────────────────────────────────────────────────────────────────
 
           // Cap large tool outputs (e.g. Read returning a 500KB file, Bash with huge output).
           // We keep the head AND tail so both the start and end of files remain visible
