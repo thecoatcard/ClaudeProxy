@@ -1,11 +1,14 @@
 import { redis } from './redis';
 
-// HIGH_CAPABILITY: strongest non-lite model first — Opus-class requests need best results.
-// gemini-3-flash-preview is the newest/most capable in our allowed set.
+// HIGH_CAPABILITY: Opus-class requests — always use the highest-capacity PRODUCTION
+// model first. gemini-2.5-flash is proven, high-throughput, and rarely overloaded.
+// gemini-3-flash-preview is a fallback: newer but preview-tier = lower capacity.
+// gemini-flash-latest is the 4th emergency anchor — stable alias, different pool.
 const CLAUDE_HIGH_CAPABILITY_CHAIN = [
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
+  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
+  'gemini-flash-latest',
 ];
 
 // BALANCED: gemini-2.5-flash is the most stable workhorse for Sonnet-class.
@@ -22,11 +25,14 @@ const CLAUDE_FAST_CHAIN = [
   'gemini-flash-latest',
 ];
 
-// REASONING: best reasoning first — thinking-enabled or analysis-heavy prompts.
+// REASONING: same production-first ordering as HIGH_CAPABILITY.
+// gemini-2.5-flash and gemini-3-flash-preview both support thinkingConfig;
+// 3.1-flash-lite-preview has 131k output budget which helps long reasoning chains.
 const CLAUDE_REASONING_CHAIN = [
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
+  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
+  'gemini-flash-latest',
 ];
 
 // TOOL: gemini-2.5-flash has the most reliable structured JSON / function-call output.

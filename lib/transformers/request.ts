@@ -10,15 +10,22 @@ import {
 } from '../tool-archive';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
+// Per-model max output token ceilings (Gemini rejects values above these).
+// NOTE: The *actual* API limits differ slightly from Google's documentation:
+//   - gemini-3-flash-preview API limit = 64,000 (error message confirms this)
+//   - gemini-2.5-flash API limit = 65,536 but we use 64,000 for safety margin
+// We apply a 512-token safety margin on top of the API limit to avoid
+// edge-case rejections from token-counting differences between client and server.
+const MAX_OUTPUT_TOKEN_SAFETY_MARGIN = 512;
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  'gemini-2.5-flash':               65536,
-  'gemini-2.5-flash-lite':          32768,
-  'gemini-3.1-flash-lite-preview':  131072, 
-  'gemini-3-flash-preview':         65536,
-  'gemini-flash-latest':            8192,
-  'gemini-flash-lite-latest':       8192,
-  'gemma-4-31b-it':                 16384,
-  'gemma-4-26b-a4b-it':             16384,
+  'gemini-2.5-flash':               65536 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 65024
+  'gemini-2.5-flash-lite':          32768 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 32256
+  'gemini-3.1-flash-lite-preview':  65536 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 65024 (131k is output+thinking combined)
+  'gemini-3-flash-preview':         64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (error-confirmed 64k limit)
+  'gemini-flash-latest':            8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
+  'gemini-flash-lite-latest':       8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
+  'gemma-4-31b-it':                 8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
+  'gemma-4-26b-a4b-it':             8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
 };
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h

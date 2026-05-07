@@ -161,6 +161,13 @@ export async function executeWithRetry(
   let stripThinking = false;
   let skipCache = false;
   let lastCacheHash: string | null = null;
+  // Tracks distinct models that returned 503 — when all chain models are
+  // exhausted we break early instead of burning remaining retries on models
+  // that are confirmed overloaded. This cuts worst-case latency from ~25s to ~8s.
+  const overloadedModels = new Set<string>();
+  // When Gemini returns 400 "max tokens exceeded", we reduce maxOutputTokens
+  // for all subsequent attempts. Null = use the value already in geminiBody.
+  let maxOutputTokensOverride: number | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const keyObj = await getHealthiestKeyObj(userId);
@@ -190,6 +197,18 @@ export async function executeWithRetry(
     // pay a round-trip 400 just to discover the model can't read them.
     if (isTextOnly(currentInternalModel)) {
       bodyForThisAttempt = stripImagesFromBody(bodyForThisAttempt);
+    }
+
+    // Apply maxOutputTokens override if a previous attempt detected a token-limit 400.
+    // This handles cases where our ceiling constant is higher than the model's true API limit.
+    if (maxOutputTokensOverride !== null && bodyForThisAttempt.generationConfig) {
+      bodyForThisAttempt = {
+        ...bodyForThisAttempt,
+        generationConfig: {
+          ...bodyForThisAttempt.generationConfig,
+          maxOutputTokens: maxOutputTokensOverride,
+        },
+      };
     }
 
     // Swap the prefix for a cachedContent reference when the payload is large.
@@ -234,12 +253,22 @@ export async function executeWithRetry(
 
       if (res.status === 503 || res.status >= 500) {
         await reportKeyFailure(keyObj.id, 'server');
+        overloadedModels.add(currentInternalModel);
 
-        // Improve fallback: Try at least 2 keys on the current model before degrading
-        if (attempt % 2 === 0 && fallbackIndex < fallbacks.length) {
-          currentInternalModel = fallbacks[fallbackIndex];
-          fallbackIndex++;
+        // Rotate immediately to the next model — there's no point retrying the
+        // same overloaded model a second time on a different key; it's the model
+        // tier that's under load, not the key.
+        if (fallbackIndex < fallbacks.length) {
+          currentInternalModel = fallbacks[fallbackIndex++];
         }
+
+        // Fast-exit: every model in the chain has now returned 503 at least once.
+        // It's a regional model-side outage — burning more retries won't help.
+        if (overloadedModels.size === 1 + fallbacks.length) {
+          console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded — failing fast after ${attempt} attempt(s).`);
+          break;
+        }
+
         lastError = { status: res.status };
         await sleep(computeBackoffMs(attempt));
         continue;
@@ -255,12 +284,17 @@ export async function executeWithRetry(
         
         if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
           await reportKeyFailure(keyObj.id, 'server');
+          overloadedModels.add(currentInternalModel);
 
-          // Improve fallback: Try at least 2 keys on the current model before degrading
-          if (attempt % 2 === 0 && fallbackIndex < fallbacks.length) {
-            currentInternalModel = fallbacks[fallbackIndex];
-            fallbackIndex++;
+          if (fallbackIndex < fallbacks.length) {
+            currentInternalModel = fallbacks[fallbackIndex++];
           }
+
+          if (overloadedModels.size === 1 + fallbacks.length) {
+            console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded (body parse) — failing fast.`);
+            break;
+          }
+
           lastError = { status: res.status, message: msg };
           await sleep(computeBackoffMs(attempt));
           continue;
@@ -287,10 +321,25 @@ export async function executeWithRetry(
         }
 
         // If we hit a 400, try degrading the request in sequence:
-        // 1. Strip thoughtSignatures (common for model mismatches)
-        // 2. Strip thinkingConfig (budget/unsupported issues)
-        // 3. Move to fallback model
+        // 1. "max tokens exceeded" — reduce maxOutputTokens immediately and retry
+        //    (strip-sigs / strip-thinking won't fix a token-limit error, so skip them)
+        // 2. Strip thoughtSignatures (common for model mismatches)
+        // 3. Strip thinkingConfig (budget/unsupported issues)
+        // 4. Move to fallback model
         if (res.status === 400) {
+          const isTokenLimitErr = /max.?token|token.?limit|exceed.*token/i.test(msg);
+          if (isTokenLimitErr) {
+            // Try to extract the model's actual limit from the error message (e.g. "(64000)").
+            const limitMatch = msg.match(/(\d{4,6})/);
+            const modelActualLimit = limitMatch ? Number(limitMatch[1]) : 32000;
+            // Apply a 10% haircut on top of the reported limit to be safe.
+            maxOutputTokensOverride = Math.floor(modelActualLimit * 0.9);
+            console.warn(`[retry] Max token 400 on ${currentInternalModel}: reported limit=${modelActualLimit}, retrying with ${maxOutputTokensOverride}`);
+            lastError = { status: 400, message: msg };
+            await sleep(computeBackoffMs(attempt));
+            continue;
+          }
+
           const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
           const hasThinking = JSON.stringify(bodyForThisAttempt).includes('thinkingConfig');
 
