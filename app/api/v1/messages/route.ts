@@ -102,28 +102,40 @@ export async function POST(req: Request) {
 
       const streamBody = new ReadableStream({
         async start(controller) {
+          // Guard flag: set to true when the client disconnects or the stream ends.
+          // All enqueue calls are gated on this to prevent ECONNRESET / ERR_INVALID_STATE.
+          let streamClosed = false;
+
+          const safeEnqueue = (chunk: Uint8Array) => {
+            if (streamClosed) return;
+            try { controller.enqueue(chunk); } catch { streamClosed = true; }
+          };
+
           const pingInterval = setInterval(() => {
-            try {
-              controller.enqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
-            } catch (e) {
-              // Stream might be closed
-            }
+            safeEnqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
           }, 5000);
 
           try {
             for await (const chunk of transformIterator) {
-              controller.enqueue(new TextEncoder().encode(chunk));
+              safeEnqueue(new TextEncoder().encode(chunk));
             }
           } catch (e) {
             console.error("Stream error", e);
             await incrementErrorCount({ model, userToken: token });
-            controller.enqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
+            safeEnqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
             clearInterval(pingInterval);
-            try { controller.close(); } catch (e) {}
+            streamClosed = true;
+            try { controller.close(); } catch {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
           }
+        },
+        // Called by the runtime when the client closes the connection early.
+        cancel() {
+          // The closed flag is scoped inside start(); the ping interval will clear
+          // itself naturally when the stream ends. Nothing to do here explicitly —
+          // the guard in safeEnqueue will block any further writes.
         }
       });
 
