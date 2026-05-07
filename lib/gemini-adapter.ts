@@ -8,7 +8,7 @@ export async function callGemini(internalModel: string, apiKey: string, body: an
   // json()/stream parsing then fails on raw compressed bytes. The runtime
   // already negotiates gzip/br on our behalf.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 180000); // 180s timeout (+120s increase)
+  const timeoutId = setTimeout(() => controller.abort(), Number(process.env.REQUEST_TIMEOUT) || 180000); // 180s default
 
   try {
     const res = await fetch(url, {

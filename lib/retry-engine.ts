@@ -172,10 +172,12 @@ export async function executeWithRetry(
   // When Gemini returns 400 "max tokens exceeded", we reduce maxOutputTokens
   // for all subsequent attempts. Null = use the value already in geminiBody.
   let maxOutputTokensOverride: number | null = null;
-  // Break after this many DISTINCT models return 503. Keeping it at 2 means:
-  // primary + 1 fallback both overloaded → it’s a Gemini-wide outage, give up fast.
-  // Increase via env var if you want to try more fallbacks before conceding.
-  const OVERLOAD_FAST_FAIL_AFTER = Number(process.env.OVERLOAD_FAST_FAIL_AFTER || 2);
+  // Break after this many DISTINCT models return 503. Default 3 means:
+  // primary + 2 fallbacks all overloaded → it’s a Gemini outage, give up fast.
+  // At 2 we were failing too aggressively on long sessions where capacity is
+  // patchy (primary down, but fallback 2 still works). 3 is a better balance
+  // of latency vs resilience. Increase via OVERLOAD_FAST_FAIL_AFTER env var.
+  const OVERLOAD_FAST_FAIL_AFTER = Number(process.env.OVERLOAD_FAST_FAIL_AFTER || 3);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const keyObj = await getHealthiestKeyObj(userId);
@@ -425,5 +427,14 @@ export async function executeWithRetry(
     }
   }
 
+  // All retries exhausted. Log diagnostic info for long-session debugging.
+  const msgCount = geminiBody?.contents?.length ?? 0;
+  const approxTokens = Math.round(
+    JSON.stringify(geminiBody?.contents ?? []).length / 4
+  );
+  console.error(
+    `[retry] overloaded_error after ${maxRetries} attempts | model=${anthropicModel}` +
+    ` | turns=${msgCount} | ~${approxTokens} tokens in payload | overloadedModels=[${[...overloadedModels].join(',')}]`
+  );
   throw new Error('overloaded_error');
 }

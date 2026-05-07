@@ -176,6 +176,15 @@ export async function POST(req: Request) {
   } catch (err: any) {
     await incrementErrorCount({ model, userToken: token });
     const anthropicErr = transformError(err);
-    return NextResponse.json(anthropicErr, { status: anthropicErr.error.type === 'overloaded_error' ? 529 : (err.status || 500) });
+    const isOverloaded = anthropicErr.error.type === 'overloaded_error';
+    const status = isOverloaded ? 529 : (err.status || 500);
+    const headers: Record<string, string> = {};
+    if (isOverloaded) {
+      // Tells Claude Code (and Anthropic SDKs) to wait before retrying.
+      // Without this, rapid retries hammer already-overloaded Gemini models.
+      // 30s gives the model tier time to shed load before the next attempt.
+      headers['Retry-After'] = '30';
+    }
+    return NextResponse.json(anthropicErr, { status, headers });
   }
 }
