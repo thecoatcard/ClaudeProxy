@@ -14,10 +14,16 @@ const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'gemma-4-31b-it':                 16384,
   'gemma-4-26b-a4b-it':             16384,
 };
-const DEFAULT_MAX_OUTPUT_TOKENS = 16384; // Increased from 8192
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h
 const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 90000);
 const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 65000);
+// Max chars of a single tool result before it is truncated.
+// Claude Code's Read tool can return 500KB+ files. Without a cap these blow
+// the context window in 2-3 turns. Default = ~40k chars ≈ 10k tokens.
+// Tail bytes are preserved so file endings (exports, closing braces) remain visible.
+const TOOL_RESULT_MAX_CHARS = Number(process.env.TOOL_RESULT_MAX_CHARS || 40000);
+const TOOL_RESULT_TAIL_CHARS = Number(process.env.TOOL_RESULT_TAIL_CHARS || 4000);
 
 function stableHash(input: string): string {
   let hash = 2166136261;
@@ -116,7 +122,7 @@ export async function transformRequestToGemini(
       maxTokensApprox: getCompactionTargetTokens(internalModel),
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
       keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
-      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 14),
+      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20),
       rollingSummary: typeof rollingSummary === 'string' ? rollingSummary : '',
       apiKey: systemKey?.key,
       model: 'gemma-4-31b-it',
@@ -221,10 +227,14 @@ export async function transformRequestToGemini(
         } else if (block.type === 'tool_use') {
           toolIdMap.set(block.id, block.name);
           const sig = sigMap.get(block.id);
+          // Gemini's functionCall.name MUST use the sanitized name that matches
+          // the function declaration. MCP tools with hyphens (my-server__my-tool)
+          // become (my_server__my_tool) — using the original name here causes a 400.
+          const geminiToolName = block.name.replace(/[^a-zA-Z0-9_]/g, '_');
           if (sig) {
             parts.push({
               functionCall: {
-                name: block.name,
+                name: geminiToolName,
                 args: block.input && typeof block.input === 'object' ? block.input : {}
               },
               thoughtSignature: sig
@@ -234,7 +244,7 @@ export async function transformRequestToGemini(
             // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
             convertedToolIds.add(block.id);
             parts.push({
-              text: `[Action: I am calling tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
+              text: `[Action: I am calling tool \`${geminiToolName}\` with arguments: ${JSON.stringify(block.input)}]`
             });
           }
         } else if (block.type === 'tool_result') {
@@ -264,7 +274,7 @@ export async function transformRequestToGemini(
           
           let resultText = "";
           const content = block.content;
-          
+
           if (!content || (Array.isArray(content) && content.length === 0)) {
             resultText = "Tool executed (empty result).";
           } else if (typeof content === 'string') {
@@ -278,6 +288,20 @@ export async function transformRequestToGemini(
               if (c.type === 'image') return "[image omitted]";
               return JSON.stringify(c);
             }).join("\n");
+          }
+
+          // Cap large tool outputs (e.g. Read returning a 500KB file, Bash with huge output).
+          // We keep the head AND tail so both the start and end of files remain visible
+          // (critical for seeing imports at top and exports/closing braces at bottom).
+          if (resultText.length > TOOL_RESULT_MAX_CHARS) {
+            const headChars = TOOL_RESULT_MAX_CHARS - TOOL_RESULT_TAIL_CHARS;
+            const head = resultText.slice(0, headChars);
+            const tail = resultText.slice(-TOOL_RESULT_TAIL_CHARS);
+            resultText = (
+              head +
+              `\n\n... [GATEWAY: truncated ${resultText.length - TOOL_RESULT_MAX_CHARS} chars] ...\n\n` +
+              tail
+            );
           }
 
           parts.push({
@@ -385,13 +409,17 @@ export async function transformRequestToGemini(
       // Invalid/missing budget → dynamic
       thinkingConfig.thinkingBudget = -1;
     }
-    const supportsThinking = internalModel && (
-      internalModel.includes('2.0') || 
-      internalModel.includes('2.5') || 
-      internalModel.includes('3.1') || 
-      internalModel.includes('3.5') ||
-      internalModel.includes('thinking')
-    );
+    // Explicit set of models known to support thinkingConfig.
+    // gemini-3-flash-preview is our primary reasoning/high-capability model
+    // and MUST be included — substring checks like '3.1' or '3.5' would miss it.
+    const THINKING_CAPABLE_MODELS = new Set([
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-3.1-flash-lite-preview',
+      'gemini-3-flash-preview',
+      'gemini-flash-latest',      // alias — tracks stable flash which supports thinking
+    ]);
+    const supportsThinking = !!internalModel && THINKING_CAPABLE_MODELS.has(internalModel);
 
     if (supportsThinking) {
       generationConfig.thinkingConfig = thinkingConfig;

@@ -151,11 +151,18 @@ export async function generateChunkedSummary(
     `[AI-Compactor] Chunked mode: ${messages.length} messages → ${chunks.length} chunk(s) of ≤${chunkSize}`
   );
 
-  // ── 2. Summarize each chunk in PARALLEL ─────────────────────────────────
-  const summaryPromises = chunks.map((chunk, idx) => 
-    generateSemanticSummary(chunk, apiKey, model).then(summary => ({ summary, idx }))
+  // ── 2. Summarize each chunk in PARALLEL with a per-chunk timeout ─────────
+  // A slow or rate-limited Gemma call can hang for up to 60s (adapter timeout).
+  // Racing with a 15s timer ensures the heuristic fallback kicks in quickly.
+  const CHUNK_TIMEOUT_MS = Number(process.env.COMPACTION_CHUNK_TIMEOUT_MS || 15000);
+
+  const summaryPromises = chunks.map((chunk, idx) =>
+    Promise.race([
+      generateSemanticSummary(chunk, apiKey, model),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), CHUNK_TIMEOUT_MS))
+    ]).then(summary => ({ summary, idx }))
   );
-  
+
   const results = await Promise.all(summaryPromises);
   const chunkSummaries: string[] = results
     .sort((a, b) => a.idx - b.idx)
@@ -163,11 +170,16 @@ export async function generateChunkedSummary(
     .filter((s): s is string => !!s);
 
   if (chunkSummaries.length < chunks.length) {
-    console.warn(`[AI-Compactor] ${chunks.length - chunkSummaries.length} chunk(s) failed summarization.`);
+    console.warn(`[AI-Compactor] ${chunks.length - chunkSummaries.length} chunk(s) timed out or failed — using heuristic for those.`);
   }
 
   if (chunkSummaries.length === 0) return null;
-  if (chunkSummaries.length === 1) return chunkSummaries[0];
+
+  // Skip the merge pass for 1–2 chunks — concatenation is equivalent quality
+  // and saves an entire extra LLM round-trip (~2–5s).
+  if (chunkSummaries.length <= 2) {
+    return chunkSummaries.join('\n\n---\n\n');
+  }
 
   // ── 3. Merge multiple chunk summaries into one Memory Block ───────────────
   const merged = await mergeSummaries(chunkSummaries, apiKey, model);

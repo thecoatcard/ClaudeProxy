@@ -22,7 +22,7 @@ export function transformError(err: any): AnthropicErrorResponse {
         }
       };
     }
-    if (message.includes('context window') || message.includes('too many tokens') || message.includes('400')) {
+    if (message.includes('context window') || message.includes('too many tokens') || message.includes('RESOURCE_EXHAUSTED')) {
        return {
          type: 'error',
          error: {

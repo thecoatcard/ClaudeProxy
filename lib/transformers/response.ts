@@ -16,6 +16,9 @@ export async function transformGeminiToAnthropic(
   }
 
   const contentBlocks: any[] = [];
+  // Collect all Redis persistence tasks; flush as one parallel batch at the end
+  // so we don't add N sequential RTTs before returning the response.
+  const redisTasks: Promise<any>[] = [];
 
   for (const part of candidate.content?.parts || []) {
     // Gemini returns reasoning as parts with `thought: true` when
@@ -44,7 +47,7 @@ export async function transformGeminiToAnthropic(
           cleanedText = cleanedText.replace(match[0], '').trim();
           contentBlocks.push({ type: 'tool_use', id: toolId, name: originalName, input: repairedInput });
           toolIdMap.set(toolId, originalName);
-          await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
+          redisTasks.push(redis.setex(`gemini:toolname:${toolId}`, 3600, originalName));
         } catch (e) { console.warn('[recovery] failed to parse hallucinated tool args', e); }
       }
       if (cleanedText) {
@@ -55,26 +58,35 @@ export async function transformGeminiToAnthropic(
       }
     } else if (part.functionCall) {
       const toolId = 'toolu_' + nanoid(24);
-      const originalName = originalToolNames?.get(part.functionCall.name) || part.functionCall.name;
+      const geminiName = part.functionCall.name; // sanitized — matches Gemini declaration
+      const originalName = originalToolNames?.get(geminiName) || geminiName; // original Anthropic name
       toolIdMap.set(toolId, originalName);
-      
-      await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
+
+      // Store the GEMINI (sanitized) name so request.ts can send the correct
+      // functionResponse.name on the next turn. Using originalName here would
+      // cause a 400 for any MCP tool whose name contains hyphens or dots.
+      redisTasks.push(redis.setex(`gemini:toolname:${toolId}`, 3600, geminiName));
       if (part.thoughtSignature) {
-        await redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature);
+        redisTasks.push(redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature));
       }
 
       const repairedInput = repairToolInput(
         part.functionCall.args,
-        toolSchemas?.get(part.functionCall.name)
+        toolSchemas?.get(geminiName)
       );
 
       contentBlocks.push({
         type: 'tool_use',
         id: toolId,
-        name: originalName,
+        name: originalName, // Claude Code sees the original Anthropic tool name
         input: repairedInput
       });
     }
+  }
+
+  // Flush all Redis writes in parallel — a single batch instead of N serial RTTs.
+  if (redisTasks.length > 0) {
+    await Promise.all(redisTasks).catch(() => {});
   }
 
   const usage = geminiRes.usageMetadata || {};

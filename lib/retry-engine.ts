@@ -93,16 +93,18 @@ async function rememberLastWorkingModel(userId: string | undefined, anthropicMod
  * Falls back to creating a new cache on miss. Returns the body to send, or the
  * original body if caching isn't beneficial.
  */
+// Returns { body: transformed body, hash: cache key used } so the caller can
+// store the hash for later invalidation without recomputing it.
 async function applyCache(
   internalModel: string,
   keyId: string,
   apiKey: string,
   body: any
-): Promise<any> {
-  if (!isCacheSupported(internalModel)) return body;
+): Promise<{ body: any; hash: string | null }> {
+  if (!isCacheSupported(internalModel)) return { body, hash: null };
 
   const split = splitForCache(body);
-  if (!split) return body;
+  if (!split) return { body, hash: null };
 
   // Strip signatures from the prefix before hashing/caching — sigs are keyed
   // to a specific response and would pollute the hash.
@@ -116,7 +118,7 @@ async function applyCache(
     if (cacheName) {
       await saveCache(hash, cacheName);
     } else {
-      return body;
+      return { body, hash };
     }
   }
 
@@ -129,9 +131,12 @@ async function applyCache(
   const cleanTail = stripThoughtSignatures({ contents: split.tail }).contents;
 
   return {
-    ...rest,
-    contents: cleanTail,
-    cachedContent: cacheName,
+    body: {
+      ...rest,
+      contents: cleanTail,
+      cachedContent: cacheName,
+    },
+    hash,
   };
 }
 
@@ -192,23 +197,15 @@ export async function executeWithRetry(
     // rebuild the same broken reference on Google's side.
     if (!skipCache) {
       try {
-        bodyForThisAttempt = await applyCache(
+        const cacheResult = await applyCache(
           currentInternalModel,
           keyObj.id,
           keyObj.key,
           bodyForThisAttempt
         );
-        // Remember the hash so we can invalidate on a cache-caused 400.
-        const split = splitForCache(geminiBody);
-        if (split && isCacheSupported(currentInternalModel)) {
-          lastCacheHash = await prefixHash(
-            currentInternalModel,
-            keyObj.id,
-            stripThoughtSignatures(split.prefix)
-          );
-        } else {
-          lastCacheHash = null;
-        }
+        bodyForThisAttempt = cacheResult.body;
+        // Reuse the hash applyCache already computed — no second SHA-256 needed.
+        lastCacheHash = cacheResult.hash;
       } catch (e) {
         // Caching is a best-effort optimization — never fail the request over it.
         console.warn('[retry] cache apply failed, proceeding without', e);

@@ -282,8 +282,8 @@ export async function* transformStream(
               // 4. Update outputTextLength to skip the recovered action
               outputTextLength = (match.index || 0) + match[0].length;
               
-              // Persist for history turns
-              await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
+              // Persist for history turns — fire-and-forget so stream is not blocked.
+              redis.setex(`gemini:toolname:${toolId}`, 3600, originalName).catch(() => {});
             } catch (e) {
               // Fail silently and let it stream as text if parsing fails
             }
@@ -357,21 +357,15 @@ export async function* transformStream(
             content_block: { type: 'tool_use', id: currentToolId, name: originalName, input: {} }
           })}\n\n`;
 
-          // Persistence for next turn (non-blocking best effort)
-          try {
-            const redisPromises = [
-              redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
-            ];
-            if (part.thoughtSignature) {
-              redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
-            }
-            await Promise.race([
-              Promise.all(redisPromises),
-              new Promise(r => setTimeout(r, 500))
-            ]);
-          } catch (e) {
-            console.error("Redis sync error in stream", e);
+          // Persistence for next turn — truly fire-and-forget.
+          // DO NOT await this: every await here stalls SSE delivery to the client.
+          const redisPromises = [
+            redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
+          ];
+          if (part.thoughtSignature) {
+            redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
           }
+          Promise.all(redisPromises).catch(e => console.error('Redis persist error in stream', e));
 
           const repairedArgs = repairToolInput(
             part.functionCall.args,

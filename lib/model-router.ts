@@ -1,39 +1,48 @@
 import { redis } from './redis';
 
+// HIGH_CAPABILITY: strongest non-lite model first — Opus-class requests need best results.
+// gemini-3-flash-preview is the newest/most capable in our allowed set.
 const CLAUDE_HIGH_CAPABILITY_CHAIN = [
-  'gemini-3.1-flash-lite-preview',
   'gemini-3-flash-preview',
   'gemini-2.5-flash',
+  'gemini-3.1-flash-lite-preview',
 ];
 
+// BALANCED: gemini-2.5-flash is the most stable workhorse for Sonnet-class.
 const CLAUDE_BALANCED_CHAIN = [
   'gemini-2.5-flash',
-  'gemini-3.1-flash-lite-preview',
   'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
 ];
 
+// FAST: lightest models first — Haiku-class (quick tool pings, title gen, etc.).
 const CLAUDE_FAST_CHAIN = [
   'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
-  'gemini-2.5-flash',
+  'gemini-flash-latest',
 ];
 
+// REASONING: best reasoning first — thinking-enabled or analysis-heavy prompts.
 const CLAUDE_REASONING_CHAIN = [
   'gemini-3-flash-preview',
   'gemini-2.5-flash',
   'gemini-3.1-flash-lite-preview',
 ];
 
+// TOOL: gemini-2.5-flash has the most reliable structured JSON / function-call output.
+// Critical for long coding sessions with many agentic tool loops.
 const CLAUDE_TOOL_CHAIN = [
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
 
+// LONG_CONTEXT: gemini-3.1-flash-lite-preview supports 131k output tokens —
+// the only model in the set that can write large diffs without truncation.
 const CLAUDE_LONG_CONTEXT_CHAIN = [
   'gemini-3.1-flash-lite-preview',
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
+  'gemini-3-flash-preview',
 ];
 
 export interface ModelRoute {
