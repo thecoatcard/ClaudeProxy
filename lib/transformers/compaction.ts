@@ -1,7 +1,7 @@
 /**
  * Message history compaction logic for the CoatCard AI Gateway.
  */
-import { generateSemanticSummary } from './ai-compactor';
+import { generateSemanticSummary, generateChunkedSummary } from './ai-compactor';
 
 export interface CompactionOptions {
   maxMessages?: number;
@@ -58,6 +58,28 @@ function hasToolUse(message: any): boolean {
 function hasToolResult(message: any): boolean {
   if (!Array.isArray(message?.content)) return false;
   return message.content.some((b: any) => b.type === 'tool_result');
+}
+
+/**
+ * Sentinel embedded in every summary message we generate.
+ * Future compaction passes detect this to skip re-summarizing the same content.
+ */
+export const SUMMARY_SENTINEL = '<!-- compacted:v1 -->';
+
+/**
+ * Returns true if a message was already produced by a compaction pass
+ * (i.e., it carries the SUMMARY_SENTINEL string in its content).
+ */
+function isCompactedSummary(message: any): boolean {
+  if (typeof message?.content === 'string') {
+    return message.content.includes(SUMMARY_SENTINEL);
+  }
+  if (Array.isArray(message?.content)) {
+    return message.content.some(
+      (b: any) => b?.type === 'text' && typeof b.text === 'string' && b.text.includes(SUMMARY_SENTINEL)
+    );
+  }
+  return false;
 }
 
 function blockText(block: any): string {
@@ -181,27 +203,38 @@ export async function compactMessagesDetailed(
     };
   }
 
-  console.log(`[Compaction] Shrinking ${messages.length} messages. Removed middle ${removedPart.length} turns.`);
+  // 2. Separate already-compacted summaries from fresh turns to avoid re-processing.
+  const alreadyCompacted = removedPart.filter(isCompactedSummary);
+  const freshTurns       = removedPart.filter(m => !isCompactedSummary(m));
 
-  // 2. Generate Summary (AI-powered with heuristic fallback)
+  if (alreadyCompacted.length > 0) {
+    console.log(`[Compaction] Skipping ${alreadyCompacted.length} already-compacted message(s); processing ${freshTurns.length} fresh turn(s).`);
+  } else {
+    console.log(`[Compaction] Shrinking ${messages.length} messages. Removed middle ${removedPart.length} turns.`);
+  }
+
+  // 3. Generate Summary (AI-powered with heuristic fallback)
   let summary = "";
   let generatedByAI = false;
 
-  if (options.apiKey && removedPart.length > 0) {
-     const aiSummary = await generateSemanticSummary(
-       removedPart, 
-       options.apiKey, 
-       options.model || 'gemma-4-31b-it'
-     );
-     if (aiSummary) {
-       summary = aiSummary;
-       generatedByAI = true;
-     }
+  const CHUNK_SIZE = Number(process.env.COMPACTION_CHUNK_SIZE || 20);
+
+  if (options.apiKey && freshTurns.length > 0) {
+    const aiSummary = await generateChunkedSummary(
+      freshTurns,
+      options.apiKey,
+      options.model || 'gemma-4-31b-it',
+      CHUNK_SIZE
+    );
+    if (aiSummary) {
+      summary = aiSummary;
+      generatedByAI = true;
+    }
   }
 
-  if (!generatedByAI) {
+  if (!generatedByAI && freshTurns.length > 0) {
     const existing = rollingSummary ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.4)) : '';
-    const lines = removedPart.slice(-15).map(msg => {
+    const lines = freshTurns.slice(-15).map(msg => {
       const role = msg.role === 'assistant' ? 'AI' : 'User';
       return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
     });
@@ -209,10 +242,13 @@ export async function compactMessagesDetailed(
     summary = clip(summary, summaryCharBudget);
   }
 
-  // 3. Insert Summary while maintaining role alternation
-  const summaryContent = `[CONTEXT SUMMARY]\n${summary}\n[END SUMMARY]`;
+  // 4. Insert Summary while maintaining role alternation.
+  // Stamp the sentinel so future passes can identify and skip this message.
+  const summaryContent = `${SUMMARY_SENTINEL}\n[CONTEXT SUMMARY]\n${summary}\n[END SUMMARY]`;
   
-  const compacted: any[] = [...firstPart];
+  // Already-compacted summaries are promoted into firstPart so they survive
+  // every subsequent compaction cycle without ever being re-summarized.
+  const compacted: any[] = [...firstPart, ...alreadyCompacted];
   const firstOfLast = lastPart[0];
 
   if (firstOfLast && firstOfLast.role === 'user') {
