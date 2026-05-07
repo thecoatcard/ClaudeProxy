@@ -58,7 +58,11 @@ function stripThoughtSignatures(body: any): any {
       ...c,
       parts: Array.isArray(c.parts)
         ? c.parts.map((p: any) => {
-            if (p && 'thoughtSignature' in p) {
+            // ONLY strip thoughtSignature from thought TEXT parts (parts with thought:true or text only).
+            // functionCall parts MUST keep their thoughtSignature — removing it while
+            // thinkingConfig is active causes a 400 "missing thought_signature" error.
+            // Non-thinking models silently ignore the extra field, so keeping it is safe.
+            if (p && 'thoughtSignature' in p && !p.functionCall) {
               const { thoughtSignature, ...rest } = p;
               return rest;
             }
@@ -321,18 +325,35 @@ export async function executeWithRetry(
         }
 
         // If we hit a 400, try degrading the request in sequence:
-        // 1. "max tokens exceeded" — reduce maxOutputTokens immediately and retry
-        //    (strip-sigs / strip-thinking won't fix a token-limit error, so skip them)
-        // 2. Strip thoughtSignatures (common for model mismatches)
-        // 3. Strip thinkingConfig (budget/unsupported issues)
-        // 4. Move to fallback model
+        // 1. "thought_signature" error — set BOTH stripSigs + stripThinking at once.
+        //    Setting only stripSigs while keeping thinking active creates bare functionCalls
+        //    which is exactly what Gemini just rejected. Never set one without the other.
+        // 2. "max tokens exceeded" — reduce maxOutputTokens immediately (handled above)
+        // 3. Strip thoughtSignatures from thought-text parts (common for model mismatches)
+        //    Always strip thinking at the same time to avoid the invalid intermediate state.
+        // 4. Strip thinkingConfig alone (budget/unsupported issues on non-thinking fallbacks)
+        // 5. Move to fallback model
+        //
+        // IMPORTANT: 400 = request format error. Do NOT call reportKeyFailure — the key
+        // is valid, our payload is wrong. Marking keys bad here depletes the pool and
+        // causes a cascade into overloaded_error / 529.
         if (res.status === 400) {
+          // Fast path: explicit thought_signature error — strip both flags at once.
+          const isThoughtSigErr = /thought.?signature|missing.*signature/i.test(msg);
+          if (isThoughtSigErr) {
+            stripSigs    = true;
+            stripThinking = true;
+            console.warn(`[retry] thought_signature 400 on ${currentInternalModel} — disabling thinking for next attempt.`);
+            lastError = { status: 400, message: msg };
+            await sleep(computeBackoffMs(attempt));
+            continue;
+          }
+
+          // Max output tokens exceeded — extract model's actual limit and retry.
           const isTokenLimitErr = /max.?token|token.?limit|exceed.*token/i.test(msg);
           if (isTokenLimitErr) {
-            // Try to extract the model's actual limit from the error message (e.g. "(64000)").
             const limitMatch = msg.match(/(\d{4,6})/);
             const modelActualLimit = limitMatch ? Number(limitMatch[1]) : 32000;
-            // Apply a 10% haircut on top of the reported limit to be safe.
             maxOutputTokensOverride = Math.floor(modelActualLimit * 0.9);
             console.warn(`[retry] Max token 400 on ${currentInternalModel}: reported limit=${modelActualLimit}, retrying with ${maxOutputTokensOverride}`);
             lastError = { status: 400, message: msg };
@@ -340,19 +361,21 @@ export async function executeWithRetry(
             continue;
           }
 
-          const hasSigs = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
+          const hasSigs    = JSON.stringify(bodyForThisAttempt).includes('thoughtSignature');
           const hasThinking = JSON.stringify(bodyForThisAttempt).includes('thinkingConfig');
 
           if (hasSigs && !stripSigs) {
-            stripSigs = true;
+            // Always pair stripSigs with stripThinking: a body without sigs but
+            // WITH thinkingConfig still causes "missing thought_signature" on functionCalls.
+            stripSigs    = true;
+            stripThinking = true;
           } else if (hasThinking && !stripThinking) {
             stripThinking = true;
           } else if (fallbackIndex < fallbacks.length) {
             currentInternalModel = fallbacks[fallbackIndex];
             fallbackIndex++;
           }
-          
-          await reportKeyFailure(keyObj.id, 'server');
+
           lastError = { status: 400, message: msg };
           await sleep(computeBackoffMs(attempt));
           continue;
