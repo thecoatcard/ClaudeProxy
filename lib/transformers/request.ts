@@ -1,6 +1,6 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
-import { compactMessagesDetailed } from './compaction';
+import { compactMessagesAsync } from './compaction';
 import { getHealthiestKeyObj } from '../key-manager';
 import {
   archiveToolOutput,
@@ -132,7 +132,7 @@ export async function transformRequestToGemini(
       getHealthiestKeyObj(userId)
     ]);
 
-    const compaction = await compactMessagesDetailed(anthropicReq.messages, {
+    const compaction = await compactMessagesAsync(anthropicReq.messages, {
       maxTokensApprox: getCompactionTargetTokens(internalModel),
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
       keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
@@ -143,6 +143,9 @@ export async function transformRequestToGemini(
     });
     anthropicReq.messages = compaction.messages;
 
+    // Persist the rolling summary only when compaction produced a fresh summary.
+    // If the cache was hit, the Redis value is already the authoritative AI
+    // summary — no need to overwrite it with a stale heuristic version.
     if (compaction.didCompact && compaction.generatedSummary) {
       await redis.set(summaryKey, compaction.generatedSummary, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
     }

@@ -2,6 +2,7 @@
  * Message history compaction logic for the CoatCard AI Gateway.
  */
 import { generateSemanticSummary, generateChunkedSummary } from './ai-compactor';
+import { redis } from '../redis';
 
 export interface CompactionOptions {
   maxMessages?: number;
@@ -283,4 +284,217 @@ export async function compactMessagesDetailed(
 export async function compactMessages(messages: any[], options: CompactionOptions = {}): Promise<any[]> {
   const res = await compactMessagesDetailed(messages, options);
   return res.messages;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Async-First Compaction (recommended for production)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COMPACT_CACHE_TTL_S = 3600;  // 1 hour — reuse AI summary across requests
+const COMPACT_LOCK_TTL_S  = 600;   // 10 min  — background job lock (prevents dups)
+
+/**
+ * Fast fingerprint of the messages being compacted.
+ * Uses FNV-1a on role + first 120 chars of each message to avoid hashing
+ * huge payloads while still being unique enough for caching purposes.
+ */
+function hashMessages(messages: any[]): string {
+  const fingerprint = messages
+    .map(m => `${m.role}:${messageText(m, false).slice(0, 120)}`)
+    .join('|');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < fingerprint.length; i++) {
+    h ^= fingerprint.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/**
+ * Background worker: generates an AI summary for `removedMessages` and stores
+ * it in Redis so the NEXT request can use it instantly.
+ *
+ * Uses a Redis lock to ensure only one worker runs per unique message set.
+ * Fire-and-forget — never awaited by the caller.
+ */
+async function runBackgroundCompaction(
+  removedMessages: any[],
+  cacheKey: string,
+  lockKey: string,
+  options: CompactionOptions
+): Promise<void> {
+  // Acquire lock — prevents parallel workers for the same hash
+  const locked = await redis.set(lockKey, '1', { ex: COMPACT_LOCK_TTL_S, nx: true }).catch(() => null);
+  if (!locked) return; // Another worker is already running
+
+  try {
+    const CHUNK_SIZE = Number(process.env.COMPACTION_CHUNK_SIZE || 20);
+    const summary = await generateChunkedSummary(
+      removedMessages,
+      options.apiKey!,
+      options.model || 'gemma-4-31b-it',
+      CHUNK_SIZE
+    );
+
+    if (summary) {
+      await redis.set(cacheKey, summary, { ex: COMPACT_CACHE_TTL_S });
+      console.log(`[AsyncCompact] Background job complete — cached ${summary.length} chars for next request.`);
+    }
+  } catch (e) {
+    console.warn('[AsyncCompact] Background job failed:', e);
+  } finally {
+    await redis.del(lockKey).catch(() => {});
+  }
+}
+
+/**
+ * Async-first compaction — responds instantly, compacts in the background.
+ *
+ * Flow:
+ *   1. Compute compaction boundaries (sync, instant)
+ *   2. Hash the removable messages (sync, instant)
+ *   3. Check Redis for a pre-computed AI summary (async, ~10ms)
+ *      - Cache HIT  → use cached summary immediately (fast path)
+ *      - Cache MISS → use heuristic summary (instant) +
+ *                     fire background AI compaction (no blocking wait)
+ *   4. Return compacted messages immediately
+ *
+ * The first request for a given context uses heuristic compaction.
+ * All subsequent requests for the same context get the AI-quality summary
+ * with zero latency — it was pre-computed in the background.
+ */
+export async function compactMessagesAsync(
+  messages: any[],
+  options: CompactionOptions = {}
+): Promise<CompactionResult> {
+  const {
+    maxMessages = DEFAULT_OPTIONS.maxMessages!,
+    maxTokensApprox = DEFAULT_OPTIONS.maxTokensApprox!,
+    keepFirstN = DEFAULT_OPTIONS.keepFirstN!,
+    keepLastN = DEFAULT_OPTIONS.keepLastN!,
+    rollingSummary = '',
+    summaryCharBudget = DEFAULT_OPTIONS.summaryCharBudget!,
+  } = options;
+
+  const estimatedTokensBefore = estimateTokens(messages);
+  const belowLimits = messages.length <= maxMessages && estimatedTokensBefore <= maxTokensApprox;
+
+  if (belowLimits) {
+    return {
+      messages,
+      didCompact: false,
+      originalMessageCount: messages.length,
+      compactedMessageCount: messages.length,
+      estimatedTokensBefore,
+      estimatedTokensAfter: estimatedTokensBefore,
+    };
+  }
+
+  // ── 1. Boundaries (synchronous, instant) ──────────────────────────────────
+  const firstPartEnd = keepFirstN;
+  let lastPartStart = Math.max(firstPartEnd + 1, messages.length - keepLastN);
+  lastPartStart = findSafeBoundary(messages, lastPartStart);
+
+  const firstPart  = messages.slice(0, firstPartEnd);
+  const removedPart = messages.slice(firstPartEnd, lastPartStart);
+  const lastPart   = messages.slice(lastPartStart);
+
+  if (removedPart.length === 0) {
+    return {
+      messages,
+      didCompact: false,
+      originalMessageCount: messages.length,
+      compactedMessageCount: messages.length,
+      estimatedTokensBefore,
+      estimatedTokensAfter: estimatedTokensBefore,
+    };
+  }
+
+  const alreadyCompacted = removedPart.filter(isCompactedSummary);
+  const freshTurns       = removedPart.filter(m => !isCompactedSummary(m));
+
+  // ── 2. Cache lookup (async, ~10ms) ────────────────────────────────────────
+  const hash     = hashMessages(freshTurns);
+  const cacheKey = `compact:cache:v1:${hash}`;
+  const lockKey  = `compact:running:v1:${hash}`;
+
+  let summary = '';
+  let fromCache = false;
+
+  if (freshTurns.length > 0 && options.apiKey) {
+    const cached = await redis.get<string>(cacheKey).catch(() => null);
+    if (cached) {
+      summary = cached;
+      fromCache = true;
+      console.log(`[AsyncCompact] Cache HIT — using pre-computed summary (${summary.length} chars) for ${freshTurns.length} turns.`);
+    } else {
+      // ── Cache MISS: use heuristic NOW, queue background AI compaction ──────
+      console.log(`[AsyncCompact] Cache MISS — heuristic used now, background AI compaction queued for ${freshTurns.length} turns.`);
+
+      // Heuristic summary (instant, no API call)
+      const existing = rollingSummary
+        ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.4))
+        : '';
+      const lines = freshTurns.slice(-15).map(msg => {
+        const role = msg.role === 'assistant' ? 'AI' : 'User';
+        return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
+      });
+      summary = (existing ? `Previous: ${existing}\n\n` : '') +
+                'Recent Discussion:\n- ' + lines.join('\n- ');
+      summary = clip(summary, summaryCharBudget);
+
+      // Fire-and-forget background compaction — does NOT block the response
+      runBackgroundCompaction(freshTurns, cacheKey, lockKey, options)
+        .catch(e => console.warn('[AsyncCompact] runBackgroundCompaction error:', e));
+    }
+  } else if (freshTurns.length > 0) {
+    // No API key provided — heuristic only
+    const existing = rollingSummary
+      ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.4))
+      : '';
+    const lines = freshTurns.slice(-15).map(msg => {
+      const role = msg.role === 'assistant' ? 'AI' : 'User';
+      return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
+    });
+    summary = (existing ? `Previous: ${existing}\n\n` : '') +
+              'Recent Discussion:\n- ' + lines.join('\n- ');
+    summary = clip(summary, summaryCharBudget);
+  }
+
+  // ── 3. Assemble compacted messages ────────────────────────────────────────
+  const summaryContent = `${SUMMARY_SENTINEL}\n[CONTEXT SUMMARY${fromCache ? ' (AI)' : ' (heuristic)'}]\n${summary}\n[END SUMMARY]`;
+
+  const compacted: any[] = [...firstPart, ...alreadyCompacted];
+  const firstOfLast = lastPart[0];
+
+  if (firstOfLast && firstOfLast.role === 'user') {
+    const newContent = typeof firstOfLast.content === 'string'
+      ? `${summaryContent}\n\n${firstOfLast.content}`
+      : [{ type: 'text', text: summaryContent }, ...firstOfLast.content];
+    compacted.push({ ...firstOfLast, content: newContent });
+    compacted.push(...lastPart.slice(1));
+  } else {
+    compacted.push({
+      role: 'user',
+      content: `${summaryContent}\n\nPlease continue based on the summary above.`
+    });
+    compacted.push(...lastPart);
+  }
+
+  const estimatedTokensAfter = estimateTokens(compacted);
+  console.log(
+    `[AsyncCompact] ${messages.length} → ${compacted.length} messages` +
+    ` | tokens: ${estimatedTokensBefore} → ${estimatedTokensAfter}` +
+    ` | summary: ${fromCache ? 'AI-cached' : 'heuristic'}`
+  );
+
+  return {
+    messages: compacted,
+    didCompact: true,
+    originalMessageCount: messages.length,
+    compactedMessageCount: compacted.length,
+    estimatedTokensBefore,
+    estimatedTokensAfter,
+    generatedSummary: summary,
+  };
 }

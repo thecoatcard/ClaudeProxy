@@ -231,11 +231,13 @@ export async function* transformStream(
           fullText += part.text;
           // Filter out <think> tags if they appear in text (cross-model compatibility)
           cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
-          
-          // catch it here and convert to a real tool_use block.
+
+          // Recover embedded [Action: ...] patterns from non-function-calling models.
+          // Only process matches at or after outputTextLength to prevent re-firing
+          // on the same pattern across cumulative chunks.
           const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+({[\s\S]*})\s*\]/i;
           const match = cleanedText.match(actionRegex);
-          if (match) {
+          if (match && match.index !== undefined && match.index >= outputTextLength) {
             const toolName = match[1];
             const argsStr = match[2];
             const originalName = originalToolNames.get(toolName) || toolName;
@@ -243,8 +245,8 @@ export async function* transformStream(
             try {
               const args = JSON.parse(argsStr);
               const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
-              
-              // 1. Emit the text delta for anything BEFORE the action
+
+              // 1. Emit text delta for anything BEFORE the action
               const beforeAction = cleanedText.slice(outputTextLength, match.index);
               if (beforeAction.length > 0) {
                 yield `event: content_block_delta\ndata: ${JSON.stringify({
@@ -253,42 +255,44 @@ export async function* transformStream(
                   delta: { type: 'text_delta', text: beforeAction }
                 })}\n\n`;
               }
-              
-              // 2. Stop the current text block
+
+              // 2. Close the current text block
               yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
               contentBlockIndex++;
               inContentBlock = false;
-              
-              // 3. Start and emit the recovered tool call
+
+              // 3. Open, populate, and close the recovered tool call block
               const toolId = 'toolu_' + nanoid(24);
               toolIdMap.set(toolId, originalName);
               sawToolUse = true;
-              
+
               yield `event: content_block_start\ndata: ${JSON.stringify({
                 type: 'content_block_start',
                 index: contentBlockIndex,
                 content_block: { type: 'tool_use', id: toolId, name: originalName, input: {} }
               })}\n\n`;
-              
+
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
                 delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedInput) }
               })}\n\n`;
-              
+
               yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
               contentBlockIndex++;
-              
-              // 4. Update outputTextLength to skip the recovered action
-              outputTextLength = (match.index || 0) + match[0].length;
-              
-              // Persist for history turns — fire-and-forget so stream is not blocked.
+              // inContentBlock stays false — any trailing text opens a NEW block below
+
+              // Advance past the consumed action pattern
+              outputTextLength = match.index + match[0].length;
+
               redis.setex(`gemini:toolname:${toolId}`, 3600, originalName).catch(() => {});
             } catch (e) {
-              // Fail silently and let it stream as text if parsing fails
+              // JSON.parse failed — treat entire action as plain text, no state change
             }
           }
 
+          // Stream any safe text that hasn't been emitted yet.
+          // "Safe" means we hold back the last 10 chars to avoid splitting <think> or [Action tags.
           let safeLength = cleanedText.length;
           for (let i = cleanedText.length - 1; i >= Math.max(0, cleanedText.length - 10); i--) {
             const suffix = cleanedText.slice(i).toLowerCase();
@@ -301,11 +305,26 @@ export async function* transformStream(
           if (safeLength > outputTextLength) {
             const newText = cleanedText.slice(outputTextLength, safeLength);
             outputTextLength = safeLength;
-            yield `event: content_block_delta\ndata: ${JSON.stringify({
-              type: 'content_block_delta',
-              index: contentBlockIndex,
-              delta: { type: 'text_delta', text: newText }
-            })}\n\n`;
+
+            if (newText.length > 0) {
+              // Guard: if the action-regex path closed the text block, reopen it.
+              // Without this guard, the delta would reference an unopened block index
+              // and Claude Code would throw "Content block not found".
+              if (!inContentBlock) {
+                yield `event: content_block_start\ndata: ${JSON.stringify({
+                  type: 'content_block_start',
+                  index: contentBlockIndex,
+                  content_block: { type: 'text', text: '' }
+                })}\n\n`;
+                inContentBlock = true;
+              }
+
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: contentBlockIndex,
+                delta: { type: 'text_delta', text: newText }
+              })}\n\n`;
+            }
           }
         }
 
