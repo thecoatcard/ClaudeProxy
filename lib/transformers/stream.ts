@@ -198,14 +198,13 @@ export async function* transformStream(
         // 2. Text Blocks
         if (part?.text) {
           if (inThinking) {
-            if (pendingThinkingSignature) {
-              yield `event: content_block_delta\ndata: ${JSON.stringify({
-                type: 'content_block_delta',
-                index: contentBlockIndex,
-                delta: { type: 'signature_delta', signature: pendingThinkingSignature }
-              })}\n\n`;
-              pendingThinkingSignature = null;
-            }
+            // Always emit signature_delta - Anthropic spec requires one per thinking block.
+            yield `event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: contentBlockIndex,
+              delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
+            })}\n\n`;
+            pendingThinkingSignature = null;
             yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
             contentBlockIndex++;
             inThinking = false;
@@ -344,14 +343,13 @@ export async function* transformStream(
           }
 
           if (inThinking) {
-            if (pendingThinkingSignature) {
-              yield `event: content_block_delta\ndata: ${JSON.stringify({
-                type: 'content_block_delta',
-                index: contentBlockIndex,
-                delta: { type: 'signature_delta', signature: pendingThinkingSignature }
-              })}\n\n`;
-              pendingThinkingSignature = null;
-            }
+            // Always emit signature_delta - Anthropic spec requires one per thinking block.
+            yield `event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: contentBlockIndex,
+              delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
+            })}\n\n`;
+            pendingThinkingSignature = null;
             yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
             contentBlockIndex++;
             inThinking = false;
@@ -415,11 +413,15 @@ export async function* transformStream(
         delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
       })}\n\n`;
     }
-    if (inThinking && pendingThinkingSignature) {
+    if (inThinking) {
+      // Always emit a signature_delta before closing a thinking block.
+      // The Anthropic extended-thinking spec requires a signature for every
+      // thinking block. Without it Claude Code marks the block as invalid.
+      // Use the real signature if Gemini provided one, otherwise empty string.
       yield `event: content_block_delta\ndata: ${JSON.stringify({
         type: 'content_block_delta',
         index: contentBlockIndex,
-        delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+        delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
       })}\n\n`;
       pendingThinkingSignature = null;
     }

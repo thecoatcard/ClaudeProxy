@@ -464,7 +464,10 @@ export async function transformRequestToGemini(
       'gemini-2.5-flash-lite',
       'gemini-3.1-flash-lite-preview',
       'gemini-3-flash-preview',
-      'gemini-flash-latest',      // alias — tracks stable flash which supports thinking
+      // NOTE: gemini-flash-latest is intentionally excluded — it tracks the
+      // stable channel which may or may not support thinking depending on what
+      // Google currently promotes. Sending thinkingConfig to a non-thinking
+      // model causes a 400 INVALID_ARGUMENT.
     ]);
     const supportsThinking = !!internalModel && THINKING_CAPABLE_MODELS.has(internalModel);
 
@@ -497,11 +500,12 @@ export async function transformRequestToGemini(
   
   // Add permissive safety settings to avoid blocking technical/coding content.
   result.safetySettings = [
-    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
     { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
     { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
+    // HARM_CATEGORY_CIVIC_INTEGRITY intentionally omitted — not supported by
+    // Gemma models and some older Flash variants (causes 400 INVALID_ARGUMENT).
   ];
 
   return result;

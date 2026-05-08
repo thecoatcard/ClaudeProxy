@@ -171,7 +171,9 @@ export async function POST(req: Request) {
         status: 200
       });
 
-      return NextResponse.json(anthropicRes);
+      return NextResponse.json(anthropicRes, {
+        headers: { 'Anthropic-Version': '2023-06-01' }
+      });
     }
   } catch (err: any) {
     await incrementErrorCount({ model, userToken: token });
