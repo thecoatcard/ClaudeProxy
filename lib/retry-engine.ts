@@ -83,14 +83,16 @@ function computeBackoffMs(attempt: number): number {
   return base + jitter;
 }
 
-// Separate, longer backoff specifically for 429 rate-limit errors.
-// Rate limits typically last 30-60s. The generic 1.5s backoff is useless here
-// — we need to actually wait for the rate limit window to expire.
+// Backoff specifically for 429 rate-limit errors.
+// Key insight: with a large key pool (100+ keys), a single key being rate-limited
+// should cause ZERO wait — just rotate to the next key immediately.
+// Only add delay if multiple consecutive keys are rate-limited (pool pressure).
 function computeRateLimitBackoffMs(consecutiveRateLimitAttempts: number): number {
-  // Starts at 2s, doubles each hit, caps at 15s. Adds small jitter.
-  const base = Math.min(15000, 2000 * Math.pow(2, consecutiveRateLimitAttempts - 1));
-  const jitter = Math.floor(Math.random() * 500);
-  return base + jitter;
+  // 1st 429 → 0ms  (just rotate key, no wait needed with large pool)
+  // 2nd 429 → 500ms (pool is under pressure, short pause)
+  // 3rd 429 → break (pool-wide rate limit, give up and return rate_limit_error)
+  if (consecutiveRateLimitAttempts <= 1) return 0;
+  return 500 + Math.floor(Math.random() * 200); // ~500-700ms
 }
 
 async function rememberLastWorkingModel(userId: string | undefined, anthropicModel: string, internalModel: string) {

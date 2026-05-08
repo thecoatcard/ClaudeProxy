@@ -11,9 +11,10 @@ const COMPACTION_TOOL_OUTPUT_MAX_CHARS = Number(
   process.env.COMPACTION_TOOL_OUTPUT_MAX_CHARS || 4000
 );
 
-// Per-chunk timeout for the AI summarization call. 140s (+120s increase) gives Gemma
-// plenty of time for large chunks without falling back to heuristics.
-const CHUNK_TIMEOUT_MS = Number(process.env.COMPACTION_CHUNK_TIMEOUT_MS || 140000);
+// Per-chunk timeout for the AI summarization call. 20s is sufficient with
+// key-rotation fixed and 4k char/msg cap (chunks complete in 5-10s typically).
+// Override via COMPACTION_CHUNK_TIMEOUT_MS env var if chunks still time out.
+const CHUNK_TIMEOUT_MS = Number(process.env.COMPACTION_CHUNK_TIMEOUT_MS || 20000);
 
 // ── Key-rotating Gemini caller for compaction ─────────────────────────────────
 
