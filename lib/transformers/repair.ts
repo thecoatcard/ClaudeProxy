@@ -56,20 +56,11 @@ function coerce(value: any, schema: JsonSchema): any {
       if (typeof obj !== 'object' || Array.isArray(obj)) return defaultFor('object');
 
       const props = schema?.properties || {};
-      const strict = schema?.additionalProperties === false;
       const result: Record<string, any> = {};
 
-      // Recurse on known props.
-      // If schema is strict (additionalProperties: false), only emit known props
-      // so Claude Code's JSON-schema validator doesn't reject the tool_use block.
-      // If schema is permissive, preserve unknown props as-is.
+      // Recurse on known props, preserve unknown props as-is (permissive).
       for (const [k, v] of Object.entries(obj)) {
-        if (props[k]) {
-          result[k] = coerce(v, props[k]);
-        } else if (!strict) {
-          result[k] = v; // keep unknown fields only when schema allows it
-        }
-        // strict && !props[k] → silently drop the field
+        result[k] = props[k] ? coerce(v, props[k]) : v;
       }
 
       // Fill missing required fields with type-appropriate defaults so Claude

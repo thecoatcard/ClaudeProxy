@@ -1,42 +1,27 @@
 import { transformToolsToGemini } from './tools';
 import { redis } from '../redis';
-import { compactMessagesAsync } from './compaction';
+import { compactMessagesDetailed } from './compaction';
 import { getHealthiestKeyObj } from '../key-manager';
-import {
-  archiveToolOutput,
-  countLargeToolResults,
-  ARCHIVE_THRESHOLD_CHARS,
-  ARCHIVE_KEEP_RECENT,
-} from '../tool-archive';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
-// Per-model max output token ceilings (Gemini rejects values above these).
-// NOTE: The *actual* API limits differ slightly from Google's documentation:
-//   - gemini-3-flash-preview API limit = 64,000 (error message confirms this)
-//   - gemini-2.5-flash API limit = 65,536 but we use 64,000 for safety margin
-// We apply a 512-token safety margin on top of the API limit to avoid
-// edge-case rejections from token-counting differences between client and server.
-const MAX_OUTPUT_TOKEN_SAFETY_MARGIN = 512;
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  'gemini-2.5-flash':               64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (64k confirmed by API error)
-  'gemini-2.5-flash-lite':          32768 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 32256
-  'gemini-3.1-flash-lite-preview':  64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (64k limit; 131k is combined output+thinking budget)
-  'gemini-3-flash-preview':         64000 - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 63488 (error-confirmed 64k limit)
-  'gemini-flash-latest':            8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
-  'gemini-flash-lite-latest':       8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
-  'gemma-4-31b-it':                 8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
-  'gemma-4-26b-a4b-it':             8192  - MAX_OUTPUT_TOKEN_SAFETY_MARGIN, // = 7680
+  'gemini-2.0-flash-exp':           65536,
+  'gemini-2.0-flash-lite-preview':  32768,
+  'gemini-2.0-pro-exp-02-05':       65536,
+  'gemini-2.5-flash':               65536,
+  'gemini-2.5-flash-lite':          32768,
+  'gemini-3.1-flash-lite-preview':  131072, 
+  'gemini-3.1-pro-preview':         131072,
+  'gemini-3-flash-preview':         65536,
+  'gemini-flash-latest':            8192,
+  'gemini-flash-lite-latest':       8192,
+  'gemma-4-31b-it':                 16384,
+  'gemma-4-26b-a4b-it':             16384,
 };
-const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384; // Increased from 8192
 const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h
 const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 90000);
 const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 65000);
-// Max chars of a single tool result before it is truncated.
-// Claude Code's Read tool can return 500KB+ files. Without a cap these blow
-// the context window in 2-3 turns. Default = ~40k chars ≈ 10k tokens.
-// Tail bytes are preserved so file endings (exports, closing braces) remain visible.
-const TOOL_RESULT_MAX_CHARS = Number(process.env.TOOL_RESULT_MAX_CHARS || 40000);
-const TOOL_RESULT_TAIL_CHARS = Number(process.env.TOOL_RESULT_TAIL_CHARS || 4000);
 
 function stableHash(input: string): string {
   let hash = 2166136261;
@@ -122,30 +107,24 @@ export async function transformRequestToGemini(
   originalToolNames?: Map<string, string>,
   userId?: string
 ) {
-  // Derive session key once — used by compaction, rolling summary AND tool archive.
-  const summaryKey = deriveSummaryKey(anthropicReq, userId);
-
   if (Array.isArray(anthropicReq.messages)) {
-    // Pipeline initial metadata lookups to save RTT
-    const [rollingSummary, systemKey] = await Promise.all([
-      redis.get<string>(summaryKey).catch(() => ''),
-      getHealthiestKeyObj(userId)
-    ]);
+    const summaryKey = deriveSummaryKey(anthropicReq, userId);
+    const rollingSummary = await redis.get<string>(summaryKey).catch(() => '');
+    
+    // Get a key for the background summarization task
+    const systemKey = await getHealthiestKeyObj(userId);
 
-    const compaction = await compactMessagesAsync(anthropicReq.messages, {
+    const compaction = await compactMessagesDetailed(anthropicReq.messages, {
       maxTokensApprox: getCompactionTargetTokens(internalModel),
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
       keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
-      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20),
+      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 14),
       rollingSummary: typeof rollingSummary === 'string' ? rollingSummary : '',
       apiKey: systemKey?.key,
       model: 'gemma-4-31b-it',
     });
     anthropicReq.messages = compaction.messages;
 
-    // Persist the rolling summary only when compaction produced a fresh summary.
-    // If the cache was hit, the Redis value is already the authoritative AI
-    // summary — no need to overwrite it with a stale heuristic version.
     if (compaction.didCompact && compaction.generatedSummary) {
       await redis.set(summaryKey, compaction.generatedSummary, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
     }
@@ -162,8 +141,7 @@ export async function transformRequestToGemini(
     }
   }
 
-  // Build system text from the Anthropic request (string or structured array)
-  let systemText = '';
+  let systemText = "";
   if (typeof anthropicReq.system === 'string') {
     systemText = anthropicReq.system;
   } else if (Array.isArray(anthropicReq.system)) {
@@ -177,38 +155,6 @@ export async function transformRequestToGemini(
       .filter(Boolean)
       .join('\n');
   }
-
-  // ── Orchestrator Directive ────────────────────────────────────────────────
-  // When Claude Code provides the `Task` tool, it supports spawning subagents.
-  // Inject a directive telling Gemini to act as an orchestrator — breaking
-  // work into parallel subtasks and delegating via Task instead of doing
-  // everything serially inline. Only injected when Task tool is present so
-  // Gemini never tries to call a tool that doesn't exist.
-  // Disable via DISABLE_ORCHESTRATOR_DIRECTIVE=true if needed.
-  const hasTaskTool = Array.isArray(anthropicReq.tools) &&
-    anthropicReq.tools.some((t: any) => t?.name === 'Task');
-
-  if (hasTaskTool && process.env.DISABLE_ORCHESTRATOR_DIRECTIVE !== 'true') {
-    const orchestratorDirective = `
-
-━━━ ORCHESTRATION MODE ━━━
-You are operating as an ORCHESTRATOR. Your primary role is to DELEGATE work to specialized subagents using the Task tool, not to perform work directly.
-
-RULES:
-1. For ANY non-trivial task (coding, file operations, analysis, research, multi-step work) — spawn subagents via the Task tool.
-2. Break the request into focused, parallel subtasks. Launch them simultaneously when independent.
-3. Give each subagent a precise, self-contained prompt with all context it needs.
-4. Do NOT write code, read files, or run commands yourself — delegate those to subagents.
-5. After subagents complete, synthesize their results into a final response.
-6. Only respond directly (without Task) for: simple factual questions, clarifications, or when explicitly asked not to use agents.
-
-EXAMPLE PATTERN:
-User: "Add dark mode to my app"
-You: Launch Task("Analyze current CSS and identify all color variables"), Task("Implement dark mode CSS variables and toggle logic"), Task("Add dark mode toggle button to the UI") — in parallel.
-━━━━━━━━━━━━━━━━━━━━━━━━━`;
-    systemText = systemText + orchestratorDirective;
-  }
-  // ─────────────────────────────────────────────────────────────────────────
 
   const systemInstruction = systemText ? {
     parts: [{ text: systemText }]
@@ -242,16 +188,6 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
     if (names[i]) nameMap.set(id, names[i]);
   });
   // ------------------------------------------------
-
-  // ── Tool Archive: pre-count large results (post-compaction) ──────────────
-  // We keep the most recent ARCHIVE_KEEP_RECENT large results in full and
-  // archive everything older. Count runs on the already-compacted messages
-  // so we only count from the live context, not removed/summarized turns.
-  const totalLargeResults = userId
-    ? countLargeToolResults(anthropicReq.messages || [])
-    : 0;
-  let largeResultSeen = 0; // incremented per large result in the loop below
-  // ─────────────────────────────────────────────────────────────────────────
 
   for (const msg of anthropicReq.messages || []) {
     const role = msg.role === 'assistant' ? 'model' : 'user';
@@ -287,14 +223,10 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
         } else if (block.type === 'tool_use') {
           toolIdMap.set(block.id, block.name);
           const sig = sigMap.get(block.id);
-          // Gemini's functionCall.name MUST use the sanitized name that matches
-          // the function declaration. MCP tools with hyphens (my-server__my-tool)
-          // become (my_server__my_tool) — using the original name here causes a 400.
-          const geminiToolName = block.name.replace(/[^a-zA-Z0-9_]/g, '_');
           if (sig) {
             parts.push({
               functionCall: {
-                name: geminiToolName,
+                name: block.name,
                 args: block.input && typeof block.input === 'object' ? block.input : {}
               },
               thoughtSignature: sig
@@ -304,7 +236,7 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
             // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
             convertedToolIds.add(block.id);
             parts.push({
-              text: `[Action: I am calling tool \`${geminiToolName}\` with arguments: ${JSON.stringify(block.input)}]`
+              text: `[Action: I am calling tool \`${block.name}\` with arguments: ${JSON.stringify(block.input)}]`
             });
           }
         } else if (block.type === 'tool_result') {
@@ -334,7 +266,7 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
           
           let resultText = "";
           const content = block.content;
-
+          
           if (!content || (Array.isArray(content) && content.length === 0)) {
             resultText = "Tool executed (empty result).";
           } else if (typeof content === 'string') {
@@ -348,40 +280,6 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
               if (c.type === 'image') return "[image omitted]";
               return JSON.stringify(c);
             }).join("\n");
-          }
-
-          // ── Tool Output Archive ──────────────────────────────────────────
-          // For large results from older turns: replace with a compact reference
-          // and store the bytes in Redis. This keeps the live context small.
-          // The most recent ARCHIVE_KEEP_RECENT large results are always shown in full
-          // so the model can immediately act on its latest tool call outputs.
-          if (resultText.length > ARCHIVE_THRESHOLD_CHARS) {
-            largeResultSeen++;
-            const isOldResult = largeResultSeen <= totalLargeResults - ARCHIVE_KEEP_RECENT;
-            if (isOldResult && userId) {
-              const originalToolName = toolIdMap.get(block.tool_use_id) || fnName || 'tool';
-              const ref = await archiveToolOutput(summaryKey, originalToolName, resultText);
-              if (ref) {
-                // Successfully archived — swap the full content for the reference tag.
-                resultText = ref;
-              }
-              // If archiving failed, fall through to truncation below.
-            }
-          }
-          // ────────────────────────────────────────────────────────────────
-
-          // Cap large tool outputs (e.g. Read returning a 500KB file, Bash with huge output).
-          // We keep the head AND tail so both the start and end of files remain visible
-          // (critical for seeing imports at top and exports/closing braces at bottom).
-          if (resultText.length > TOOL_RESULT_MAX_CHARS) {
-            const headChars = TOOL_RESULT_MAX_CHARS - TOOL_RESULT_TAIL_CHARS;
-            const head = resultText.slice(0, headChars);
-            const tail = resultText.slice(-TOOL_RESULT_TAIL_CHARS);
-            resultText = (
-              head +
-              `\n\n... [GATEWAY: truncated ${resultText.length - TOOL_RESULT_MAX_CHARS} chars] ...\n\n` +
-              tail
-            );
           }
 
           parts.push({
@@ -489,20 +387,13 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
       // Invalid/missing budget → dynamic
       thinkingConfig.thinkingBudget = -1;
     }
-    // Explicit set of models known to support thinkingConfig.
-    // gemini-3-flash-preview is our primary reasoning/high-capability model
-    // and MUST be included — substring checks like '3.1' or '3.5' would miss it.
-    const THINKING_CAPABLE_MODELS = new Set([
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3.1-flash-lite-preview',
-      'gemini-3-flash-preview',
-      // NOTE: gemini-flash-latest is intentionally excluded — it tracks the
-      // stable channel which may or may not support thinking depending on what
-      // Google currently promotes. Sending thinkingConfig to a non-thinking
-      // model causes a 400 INVALID_ARGUMENT.
-    ]);
-    const supportsThinking = !!internalModel && THINKING_CAPABLE_MODELS.has(internalModel);
+    const supportsThinking = internalModel && (
+      internalModel.includes('2.0') || 
+      internalModel.includes('2.5') || 
+      internalModel.includes('3.1') || 
+      internalModel.includes('3.5') ||
+      internalModel.includes('thinking')
+    );
 
     if (supportsThinking) {
       generationConfig.thinkingConfig = thinkingConfig;
@@ -533,12 +424,11 @@ You: Launch Task("Analyze current CSS and identify all color variables"), Task("
   
   // Add permissive safety settings to avoid blocking technical/coding content.
   result.safetySettings = [
-    { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
     { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
     { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-    // HARM_CATEGORY_CIVIC_INTEGRITY intentionally omitted — not supported by
-    // Gemma models and some older Flash variants (causes 400 INVALID_ARGUMENT).
+    { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
   ];
 
   return result;

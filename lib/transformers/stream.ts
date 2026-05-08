@@ -47,15 +47,25 @@ export async function* transformStream(
   ];
 
   try {
-    // Send ping IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel).
-    // message_start is intentionally delayed until AFTER Gemini accepts the request so that
-    // if the request is rejected (rate-limit, quota), Claude Code gets a clean error event
-    // rather than an orphaned message with no message_stop.
+    // 1. Send initial events IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel)
+    yield `event: message_start\ndata: ${JSON.stringify({
+      type: 'message_start',
+      message: {
+        id: msgId,
+        type: 'message',
+        role: 'assistant',
+        model: reqModel,
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 0, output_tokens: 0 }
+      }
+    })}\n\n`;
+
     yield `event: ping\ndata: {"type":"ping"}\n\n`;
 
     // 2. Perform the heavy work (Transformation + Execution) INSIDE the stream
-    // This work can take >25s on long histories, but the platform timeout is
-    // now averted because we've already sent the ping above.
+    // This work can take >25s on long histories, but the platform timeout is 
+    // now averted because we've already sent the headers and initial chunks.
     let geminiReq;
     try {
       geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
@@ -72,34 +82,14 @@ export async function* transformStream(
     try {
       res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan);
     } catch (e: any) {
-      // Map known retry-engine error types to proper Anthropic error types.
-      const errMsg = e.message || '';
-      let errType = 'api_error';
-      if (errMsg === 'rate_limit_error')  errType = 'rate_limit_error';
-      if (errMsg === 'overloaded_error')  errType = 'overloaded_error';
-
-      console.error(`Gemini request failed before stream start [${errType}]`, e.status ?? e);
-      // Clean error event — no orphaned message_start because we haven't sent it yet.
+      console.error("Gemini request failed before stream start", e);
+      const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
       yield `event: error\ndata: ${JSON.stringify({
-        type: 'error',
-        error: { type: errType, message: errMsg || 'Failed to connect to Gemini' }
+        type: "error",
+        error: { type: "api_error", message: msg }
       })}\n\n`;
       return;
     }
-
-    // Gemini accepted the request — now it is safe to open the Anthropic message.
-    yield `event: message_start\ndata: ${JSON.stringify({
-      type: 'message_start',
-      message: {
-        id: msgId,
-        type: 'message',
-        role: 'assistant',
-        model: reqModel,
-        content: [],
-        stop_reason: null,
-        usage: { input_tokens: 0, output_tokens: 0 }
-      }
-    })}\n\n`;
 
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
@@ -208,13 +198,14 @@ export async function* transformStream(
         // 2. Text Blocks
         if (part?.text) {
           if (inThinking) {
-            // Always emit signature_delta - Anthropic spec requires one per thinking block.
-            yield `event: content_block_delta\ndata: ${JSON.stringify({
-              type: 'content_block_delta',
-              index: contentBlockIndex,
-              delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
-            })}\n\n`;
-            pendingThinkingSignature = null;
+            if (pendingThinkingSignature) {
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: contentBlockIndex,
+                delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+              })}\n\n`;
+              pendingThinkingSignature = null;
+            }
             yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
             contentBlockIndex++;
             inThinking = false;
@@ -240,13 +231,11 @@ export async function* transformStream(
           fullText += part.text;
           // Filter out <think> tags if they appear in text (cross-model compatibility)
           cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
-
-          // Recover embedded [Action: ...] patterns from non-function-calling models.
-          // Only process matches at or after outputTextLength to prevent re-firing
-          // on the same pattern across cumulative chunks.
+          
+          // catch it here and convert to a real tool_use block.
           const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+({[\s\S]*})\s*\]/i;
           const match = cleanedText.match(actionRegex);
-          if (match && match.index !== undefined && match.index >= outputTextLength) {
+          if (match) {
             const toolName = match[1];
             const argsStr = match[2];
             const originalName = originalToolNames.get(toolName) || toolName;
@@ -254,8 +243,8 @@ export async function* transformStream(
             try {
               const args = JSON.parse(argsStr);
               const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
-
-              // 1. Emit text delta for anything BEFORE the action
+              
+              // 1. Emit the text delta for anything BEFORE the action
               const beforeAction = cleanedText.slice(outputTextLength, match.index);
               if (beforeAction.length > 0) {
                 yield `event: content_block_delta\ndata: ${JSON.stringify({
@@ -264,50 +253,43 @@ export async function* transformStream(
                   delta: { type: 'text_delta', text: beforeAction }
                 })}\n\n`;
               }
-
-              // 2. Close the current text block
+              
+              // 2. Stop the current text block
               yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
               contentBlockIndex++;
               inContentBlock = false;
-
-              // 3. Open, populate, and close the recovered tool call block
+              
+              // 3. Start and emit the recovered tool call
               const toolId = 'toolu_' + nanoid(24);
               toolIdMap.set(toolId, originalName);
               sawToolUse = true;
-
+              
               yield `event: content_block_start\ndata: ${JSON.stringify({
                 type: 'content_block_start',
                 index: contentBlockIndex,
                 content_block: { type: 'tool_use', id: toolId, name: originalName, input: {} }
               })}\n\n`;
-
+              
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
                 delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedInput) }
               })}\n\n`;
-
+              
               yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
               contentBlockIndex++;
-              // inContentBlock stays false — any trailing text opens a NEW block below
-
-              // Advance past the consumed action pattern
-              outputTextLength = match.index + match[0].length;
-
-              redis.setex(`gemini:toolname:${toolId}`, 3600, originalName).catch(() => {});
+              
+              // 4. Update outputTextLength to skip the recovered action
+              outputTextLength = (match.index || 0) + match[0].length;
+              
+              // Persist for history turns
+              await redis.setex(`gemini:toolname:${toolId}`, 3600, originalName);
             } catch (e) {
-              // JSON.parse failed — treat entire action as plain text, no state change
+              // Fail silently and let it stream as text if parsing fails
             }
           }
 
-          // Stream any safe text that hasn't been emitted yet.
-          // "Safe" = we must NOT emit text that is part of an in-progress
-          // [Action: ...] pattern, otherwise the pattern spans chunks in a way
-          // that makes match.index < outputTextLength and the regex check skips it.
           let safeLength = cleanedText.length;
-
-          // ① Hold back trailing partial <think>/<thought> or [Action prefix
-          //    (the original 10-char lookback for short tags).
           for (let i = cleanedText.length - 1; i >= Math.max(0, cleanedText.length - 10); i--) {
             const suffix = cleanedText.slice(i).toLowerCase();
             if (prefixes.includes(suffix)) {
@@ -316,53 +298,14 @@ export async function* transformStream(
             }
           }
 
-          // ② Hold back from any [Action: ... ] pattern that hasn't closed yet.
-          //    Without this, the first chunk emits "[Action: I am calling tool Bash"
-          //    advancing outputTextLength past the pattern start so the regex can
-          //    never fire when the closing ] arrives on a later chunk.
-          const unemmitted = cleanedText.slice(outputTextLength, safeLength);
-          const actionOpenIdx = unemmitted.search(/\[Action:/i);
-          if (actionOpenIdx !== -1) {
-            const actionClose = unemmitted.indexOf(']', actionOpenIdx);
-            if (actionClose === -1) {
-              // [Action: is open but ] hasn't arrived yet — hold back from here.
-              safeLength = Math.min(safeLength, outputTextLength + actionOpenIdx);
-            }
-            // If ] has arrived, the regex above already handled/skipped it.
-          }
-
-          // ③ Hold back a trailing partial [Action prefix at the very end of the buffer
-          //    (e.g. the buffer ends with "[" or "[Act") in case the next chunk
-          //    completes it into a full [Action: pattern.
-          const afterOutput = cleanedText.slice(outputTextLength, safeLength);
-          const trailingPartial = afterOutput.search(/\[(?:[Aa](?:[Cc](?:[Tt](?:[Ii](?:[Oo](?:[Nn])?)?)?)?)?)?$/);
-          if (trailingPartial !== -1) {
-            safeLength = Math.min(safeLength, outputTextLength + trailingPartial);
-          }
-
           if (safeLength > outputTextLength) {
             const newText = cleanedText.slice(outputTextLength, safeLength);
             outputTextLength = safeLength;
-
-            if (newText.length > 0) {
-              // Guard: if the action-regex path closed the text block, reopen it.
-              // Without this guard, the delta would reference an unopened block index
-              // and Claude Code would throw "Content block not found".
-              if (!inContentBlock) {
-                yield `event: content_block_start\ndata: ${JSON.stringify({
-                  type: 'content_block_start',
-                  index: contentBlockIndex,
-                  content_block: { type: 'text', text: '' }
-                })}\n\n`;
-                inContentBlock = true;
-              }
-
-              yield `event: content_block_delta\ndata: ${JSON.stringify({
-                type: 'content_block_delta',
-                index: contentBlockIndex,
-                delta: { type: 'text_delta', text: newText }
-              })}\n\n`;
-            }
+            yield `event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: contentBlockIndex,
+              delta: { type: 'text_delta', text: newText }
+            })}\n\n`;
           }
         }
 
@@ -382,13 +325,14 @@ export async function* transformStream(
           }
 
           if (inThinking) {
-            // Always emit signature_delta - Anthropic spec requires one per thinking block.
-            yield `event: content_block_delta\ndata: ${JSON.stringify({
-              type: 'content_block_delta',
-              index: contentBlockIndex,
-              delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
-            })}\n\n`;
-            pendingThinkingSignature = null;
+            if (pendingThinkingSignature) {
+              yield `event: content_block_delta\ndata: ${JSON.stringify({
+                type: 'content_block_delta',
+                index: contentBlockIndex,
+                delta: { type: 'signature_delta', signature: pendingThinkingSignature }
+              })}\n\n`;
+              pendingThinkingSignature = null;
+            }
             yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
             contentBlockIndex++;
             inThinking = false;
@@ -413,21 +357,25 @@ export async function* transformStream(
             content_block: { type: 'tool_use', id: currentToolId, name: originalName, input: {} }
           })}\n\n`;
 
-          // Persistence for next turn — truly fire-and-forget.
-          // DO NOT await this: every await here stalls SSE delivery to the client.
-          const redisPromises = [
-            redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
-          ];
-          if (part.thoughtSignature) {
-            redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
+          // Persistence for next turn (non-blocking best effort)
+          try {
+            const redisPromises = [
+              redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
+            ];
+            if (part.thoughtSignature) {
+              redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
+            }
+            await Promise.race([
+              Promise.all(redisPromises),
+              new Promise(r => setTimeout(r, 500))
+            ]);
+          } catch (e) {
+            console.error("Redis sync error in stream", e);
           }
-          Promise.all(redisPromises).catch(e => console.error('Redis persist error in stream', e));
 
           const repairedArgs = repairToolInput(
             part.functionCall.args,
-            // Use originalName (Anthropic name) — toolSchemas is keyed by original names,
-            // not by Gemini's sanitized function call name.
-            toolSchemas?.get(originalName) ?? toolSchemas?.get(part.functionCall.name)
+            toolSchemas?.get(part.functionCall.name)
           );
 
           yield `event: content_block_delta\ndata: ${JSON.stringify({
@@ -454,15 +402,11 @@ export async function* transformStream(
         delta: { type: 'text_delta', text: cleanedText.slice(outputTextLength) }
       })}\n\n`;
     }
-    if (inThinking) {
-      // Always emit a signature_delta before closing a thinking block.
-      // The Anthropic extended-thinking spec requires a signature for every
-      // thinking block. Without it Claude Code marks the block as invalid.
-      // Use the real signature if Gemini provided one, otherwise empty string.
+    if (inThinking && pendingThinkingSignature) {
       yield `event: content_block_delta\ndata: ${JSON.stringify({
         type: 'content_block_delta',
         index: contentBlockIndex,
-        delta: { type: 'signature_delta', signature: pendingThinkingSignature ?? '' }
+        delta: { type: 'signature_delta', signature: pendingThinkingSignature }
       })}\n\n`;
       pendingThinkingSignature = null;
     }

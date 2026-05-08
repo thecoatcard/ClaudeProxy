@@ -158,24 +158,23 @@ export async function reportKeyFailure(id: string, type: 'ratelimit' | 'server' 
     return;
   }
 
-  const cooldownSecs = type === 'ratelimit'
-    ? Number(process.env.KEY_COOLDOWN_429 || 60)
+  const cooldownSecs = type === 'ratelimit' 
+    ? Number(process.env.KEY_COOLDOWN_429 || 60) 
     : Number(process.env.KEY_COOLDOWN_503 || 20);
-
+    
   const until = Math.floor(Date.now() / 1000) + cooldownSecs;
-
-  // Pipeline hset + hincrby + hget(rpm_used) in ONE round-trip.
-  // hincrby returns the new failure_count directly — no follow-up hgetall needed.
-  const pipe = redis.pipeline();
-  pipe.hset(`gemini:key:${id}`, { status: 'cooldown', cooldown_until: until });
-  pipe.hincrby(`gemini:key:${id}`, 'failure_count', 1);
-  pipe.hget(`gemini:key:${id}`, 'rpm_used');
-  const [, newFailCount, rpmUsedRaw] = await pipe.exec() as [unknown, number, string | null];
-
-  const failCount = Number(newFailCount || 1);
-  const rpmUsed  = Number(rpmUsedRaw  || 0);
-  const score    = Math.max(0, 100 - rpmUsed - failCount * 10);
-
+  
+  await redis.hset(`gemini:key:${id}`, {
+    status: 'cooldown',
+    cooldown_until: until
+  });
+  await redis.hincrby(`gemini:key:${id}`, 'failure_count', 1);
+  
+  const data = await redis.hgetall(`gemini:key:${id}`) as unknown as GeminiKey | null;
+  const failCount = Number(data?.failure_count || 1);
+  const rpmUsed = Number(data?.rpm_used || 0);
+  const score = 100 - rpmUsed - (failCount * 10);
+  
   await redis.zadd('gemini:key_pool', { score, member: id });
 }
 
@@ -187,25 +186,21 @@ export async function recordKeyUsage(id: string) {
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
+  const keyMeta = await redis.hgetall(`gemini:key:${id}`) as unknown as GeminiKey & { daily_used_date?: string } | null;
 
-  // Pipeline everything — read daily_used_date + write all counters in one RTT.
-  // We use hget for just the date field instead of a full hgetall.
-  const pipe = redis.pipeline();
-  pipe.hget(`gemini:key:${id}`, 'daily_used_date');
-  pipe.hset(`gemini:key:${id}`, { last_used: now });
-  pipe.hincrby(`gemini:key:${id}`, 'rpm_used', 1);
-  pipe.hincrby(`gemini:key:${id}`, 'total_used', 1);
-  pipe.incrby(`gemini:key:${id}:daily:${today}:requests`, 1);
-  const [dailyUsedDate] = await pipe.exec() as [string | null, ...unknown[]];
+  const usagePipeline = redis.pipeline();
+  usagePipeline.hset(`gemini:key:${id}`, { last_used: now });
+  usagePipeline.hincrby(`gemini:key:${id}`, 'rpm_used', 1);
+  usagePipeline.hincrby(`gemini:key:${id}`, 'total_used', 1);
+  usagePipeline.incrby(`gemini:key:${id}:daily:${today}:requests`, 1);
 
-  // Reset daily counter if date changed — fire-and-forget, non-blocking.
-  const resetPipe = redis.pipeline();
-  if (dailyUsedDate !== today) {
-    resetPipe.hset(`gemini:key:${id}`, { daily_used: 1, daily_used_date: today });
+  if (!keyMeta || (keyMeta as any).daily_used_date !== today) {
+    usagePipeline.hset(`gemini:key:${id}`, { daily_used: 1, daily_used_date: today });
   } else {
-    resetPipe.hincrby(`gemini:key:${id}`, 'daily_used', 1);
+    usagePipeline.hincrby(`gemini:key:${id}`, 'daily_used', 1);
   }
-  resetPipe.exec().catch(() => {});
+
+  await usagePipeline.exec();
 }
 
 export async function resetAllKeys() {

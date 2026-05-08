@@ -1,54 +1,39 @@
 import { redis } from './redis';
 
-// HIGH_CAPABILITY: Opus-class requests — always use the highest-capacity PRODUCTION
-// model first. gemini-2.5-flash is proven, high-throughput, and rarely overloaded.
-// gemini-3-flash-preview is a fallback: newer but preview-tier = lower capacity.
-// gemini-flash-latest is the 4th emergency anchor — stable alias, different pool.
 const CLAUDE_HIGH_CAPABILITY_CHAIN = [
-  'gemini-2.5-flash',
-  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
-  'gemini-flash-latest',
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
 ];
 
-// BALANCED: gemini-2.5-flash is the most stable workhorse for Sonnet-class.
 const CLAUDE_BALANCED_CHAIN = [
   'gemini-2.5-flash',
-  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
+  'gemini-3-flash-preview',
 ];
 
-// FAST: lightest models first — Haiku-class (quick tool pings, title gen, etc.).
 const CLAUDE_FAST_CHAIN = [
   'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
-  'gemini-flash-latest',
-];
-
-// REASONING: same production-first ordering as HIGH_CAPABILITY.
-// gemini-2.5-flash and gemini-3-flash-preview both support thinkingConfig;
-// 3.1-flash-lite-preview has 131k output budget which helps long reasoning chains.
-const CLAUDE_REASONING_CHAIN = [
   'gemini-2.5-flash',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite-preview',
-  'gemini-flash-latest',
 ];
 
-// TOOL: gemini-2.5-flash has the most reliable structured JSON / function-call output.
-// Critical for long coding sessions with many agentic tool loops.
+const CLAUDE_REASONING_CHAIN = [
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite-preview',
+];
+
 const CLAUDE_TOOL_CHAIN = [
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
 
-// LONG_CONTEXT: gemini-3.1-flash-lite-preview supports 131k output tokens —
-// the only model in the set that can write large diffs without truncation.
 const CLAUDE_LONG_CONTEXT_CHAIN = [
   'gemini-3.1-flash-lite-preview',
-  'gemini-2.5-flash',
   'gemini-3-flash-preview',
+  'gemini-2.5-flash',
 ];
 
 export interface ModelRoute {
@@ -319,15 +304,7 @@ export async function getModelMapping(
 
   const normalizedModel = normalizeModelName(anthropicModel);
   const thinkingEnabled = Boolean(options.thinkingEnabled);
-  
-  // Parallelize Registry and Sticky model lookups to save 1 RTT (approx 20-50ms)
-  const [registry, stickyRaw] = await Promise.all([
-    readRegistry(),
-    options.userId 
-      ? redis.get<string>(`route:last:${options.userId}:${normalizedModel}`).catch(() => null)
-      : Promise.resolve(null)
-  ]);
-
+  const registry = await readRegistry();
   const baseRoute = resolveBaseRoute(normalizedModel, registry);
 
   if (!normalizedModel.startsWith('claude-')) {
@@ -344,8 +321,15 @@ export async function getModelMapping(
     : chooseAdaptiveChain(profile);
 
   let stickyModel = '';
-  if (typeof stickyRaw === 'string' && stickyRaw.trim()) {
-    stickyModel = normalizeModelName(stickyRaw);
+  if (options.userId) {
+    try {
+      const sticky = await redis.get<string>(`route:last:${options.userId}:${normalizedModel}`);
+      if (typeof sticky === 'string' && sticky.trim()) {
+        stickyModel = normalizeModelName(sticky);
+      }
+    } catch {
+      // Ignore sticky read failures. Routing must remain available.
+    }
   }
 
   const finalChain = dedupeChain([

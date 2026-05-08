@@ -13,12 +13,8 @@ export async function validateUserKey(token: string): Promise<boolean> {
   if (!keyObj || keyObj.status !== 'active') {
     return false;
   }
-  // Usage tracking is non-blocking — fire-and-forget so the auth check
-  // doesn't add 2 extra Redis RTTs to every request's critical path.
-  Promise.all([
-    redis.hincrby(`user:key:${token}`, 'usage_count', 1),
-    redis.hset(`user:key:${token}`, { last_used: Math.floor(Date.now() / 1000) }),
-  ]).catch(() => {});
+  await redis.hincrby(`user:key:${token}`, 'usage_count', 1);
+  await redis.hset(`user:key:${token}`, { last_used: Math.floor(Date.now() / 1000) });
   return true;
 }
 

@@ -117,7 +117,7 @@ function extractValue(text: string, keys: string[]): string | null {
 async function performWebSearch(query: string): Promise<string> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 125000); // 125s (+120s increase)
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return "Search failed.";
@@ -142,7 +142,7 @@ async function performWebSearch(query: string): Promise<string> {
 async function performWebFetch(url: string): Promise<string> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 130000); // 130s (+120s increase)
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s for full page
     const res = await fetch(url, { 
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClaudeBot/1.0)' },
       signal: controller.signal

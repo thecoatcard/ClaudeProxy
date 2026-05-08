@@ -10,11 +10,8 @@ import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens
 import { tryOptimizations } from '@/lib/transformers/optimizations';
 import { transformError } from '@/lib/transformers/errors';
 
-// Do NOT use `runtime = 'edge'` here.
-// Edge Runtime has a hard 25s CPU limit and silently IGNORES maxDuration.
-// Node.js serverless runtime (the default) respects maxDuration and supports
-// long-running requests needed for compaction, streaming, and retry logic.
-export const maxDuration = 300; // 5 minutes — applies on Vercel Pro/Enterprise Node.js runtime
+export const runtime = 'edge';
+export const maxDuration = 300; // Increase timeout to 5 minutes
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
  *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
@@ -105,40 +102,28 @@ export async function POST(req: Request) {
 
       const streamBody = new ReadableStream({
         async start(controller) {
-          // Guard flag: set to true when the client disconnects or the stream ends.
-          // All enqueue calls are gated on this to prevent ECONNRESET / ERR_INVALID_STATE.
-          let streamClosed = false;
-
-          const safeEnqueue = (chunk: Uint8Array) => {
-            if (streamClosed) return;
-            try { controller.enqueue(chunk); } catch { streamClosed = true; }
-          };
-
           const pingInterval = setInterval(() => {
-            safeEnqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
+            try {
+              controller.enqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
+            } catch (e) {
+              // Stream might be closed
+            }
           }, 5000);
 
           try {
             for await (const chunk of transformIterator) {
-              safeEnqueue(new TextEncoder().encode(chunk));
+              controller.enqueue(new TextEncoder().encode(chunk));
             }
           } catch (e) {
             console.error("Stream error", e);
             await incrementErrorCount({ model, userToken: token });
-            safeEnqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
+            controller.enqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
             clearInterval(pingInterval);
-            streamClosed = true;
-            try { controller.close(); } catch {}
+            try { controller.close(); } catch (e) {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
           }
-        },
-        // Called by the runtime when the client closes the connection early.
-        cancel() {
-          // The closed flag is scoped inside start(); the ping interval will clear
-          // itself naturally when the stream ends. Nothing to do here explicitly —
-          // the guard in safeEnqueue will block any further writes.
         }
       });
 
@@ -171,27 +156,11 @@ export async function POST(req: Request) {
         status: 200
       });
 
-      return NextResponse.json(anthropicRes, {
-        headers: { 'Anthropic-Version': '2023-06-01' }
-      });
+      return NextResponse.json(anthropicRes);
     }
   } catch (err: any) {
     await incrementErrorCount({ model, userToken: token });
     const anthropicErr = transformError(err);
-    const errType = anthropicErr.error.type;
-    const headers: Record<string, string> = {};
-
-    let status: number;
-    if (errType === 'overloaded_error') {
-      status = 529;
-      headers['Retry-After'] = '30'; // Let Gemini shed load
-    } else if (errType === 'rate_limit_error') {
-      status = 429;
-      headers['Retry-After'] = '60'; // Pool-wide rate limit — back off a full minute
-    } else {
-      status = err.status || 500;
-    }
-
-    return NextResponse.json(anthropicErr, { status, headers });
+    return NextResponse.json(anthropicErr, { status: anthropicErr.error.type === 'overloaded_error' ? 529 : (err.status || 500) });
   }
 }
