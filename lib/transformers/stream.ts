@@ -425,7 +425,9 @@ export async function* transformStream(
 
           const repairedArgs = repairToolInput(
             part.functionCall.args,
-            toolSchemas?.get(part.functionCall.name)
+            // Use originalName (Anthropic name) — toolSchemas is keyed by original names,
+            // not by Gemini's sanitized function call name.
+            toolSchemas?.get(originalName) ?? toolSchemas?.get(part.functionCall.name)
           );
 
           yield `event: content_block_delta\ndata: ${JSON.stringify({
