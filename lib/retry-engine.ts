@@ -195,8 +195,10 @@ export async function executeWithRetry(
   // 7 more keys won’t help. We break early and return a proper rate_limit_error.
   let rateLimitedAttempts = 0;
   const RATE_LIMIT_FAST_FAIL_AFTER = 3;
+  let lastAttempt = 0; // tracks actual attempt count even after loop exits
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    lastAttempt = attempt;
     const keyObj = await getHealthiestKeyObj(userId);
 
     if (!keyObj) {
@@ -276,12 +278,24 @@ export async function executeWithRetry(
         rateLimitedAttempts++;
         lastError = { status: 429 };
 
-        // After N consecutive 429s on different keys, the entire pool is rate-limited.
-        // Cycling more keys won't help. Break immediately and return rate_limit_error.
+        // After N consecutive 429s on different keys, the pool for THIS model
+        // is exhausted. Try switching to a fallback model (different quota pool)
+        // before declaring total failure.
         if (rateLimitedAttempts >= RATE_LIMIT_FAST_FAIL_AFTER) {
+          if (fallbackIndex < fallbacks.length) {
+            const nextModel = fallbacks[fallbackIndex];
+            currentInternalModel = nextModel;
+            fallbackIndex++;
+            rateLimitedAttempts = 0; // reset counter for new model's quota pool
+            console.warn(
+              `[retry] Pool-wide 429 on primary model. Switching to fallback: ${nextModel}`
+            );
+            continue;
+          }
+          // All models exhausted — no more options.
           console.warn(
             `[retry] ${rateLimitedAttempts} consecutive 429s on different keys — pool-wide rate limit detected.` +
-            ` Failing fast after ${attempt} attempt(s).`
+            ` Failing fast after ${lastAttempt} attempt(s).`
           );
           break;
         }
@@ -458,14 +472,16 @@ export async function executeWithRetry(
     }
   }
 
-  // All retries exhausted. Log diagnostic info for long-session debugging.
+  // All retries exhausted (or fast-failed). Log diagnostic info.
   const msgCount = geminiBody?.contents?.length ?? 0;
   const approxTokens = Math.round(
     JSON.stringify(geminiBody?.contents ?? []).length / 4
   );
   const lastStatus = (lastError as any)?.status ?? 'unknown';
+  // Note: 'attempt' reflects the ACTUAL number of Gemini calls made,
+  // which may be less than maxRetries if we fast-failed (e.g. 3 consecutive 429s).
   console.error(
-    `[retry] overloaded_error after ${maxRetries} attempts | model=${anthropicModel}` +
+    `[retry] exhausted after ${lastAttempt} attempt(s) | model=${anthropicModel}` +
     ` | turns=${msgCount} | ~${approxTokens} tokens in payload` +
     ` | overloadedModels=[${[...overloadedModels].join(',')}]` +
     ` | rateLimitedAttempts=${rateLimitedAttempts} | lastErrorStatus=${lastStatus}`

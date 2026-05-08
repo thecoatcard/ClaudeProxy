@@ -47,25 +47,15 @@ export async function* transformStream(
   ];
 
   try {
-    // 1. Send initial events IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel)
-    yield `event: message_start\ndata: ${JSON.stringify({
-      type: 'message_start',
-      message: {
-        id: msgId,
-        type: 'message',
-        role: 'assistant',
-        model: reqModel,
-        content: [],
-        stop_reason: null,
-        usage: { input_tokens: 0, output_tokens: 0 }
-      }
-    })}\n\n`;
-
+    // Send ping IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel).
+    // message_start is intentionally delayed until AFTER Gemini accepts the request so that
+    // if the request is rejected (rate-limit, quota), Claude Code gets a clean error event
+    // rather than an orphaned message with no message_stop.
     yield `event: ping\ndata: {"type":"ping"}\n\n`;
 
     // 2. Perform the heavy work (Transformation + Execution) INSIDE the stream
-    // This work can take >25s on long histories, but the platform timeout is 
-    // now averted because we've already sent the headers and initial chunks.
+    // This work can take >25s on long histories, but the platform timeout is
+    // now averted because we've already sent the ping above.
     let geminiReq;
     try {
       geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
@@ -82,14 +72,34 @@ export async function* transformStream(
     try {
       res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan);
     } catch (e: any) {
-      console.error("Gemini request failed before stream start", e);
-      const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
+      // Map known retry-engine error types to proper Anthropic error types.
+      const errMsg = e.message || '';
+      let errType = 'api_error';
+      if (errMsg === 'rate_limit_error')  errType = 'rate_limit_error';
+      if (errMsg === 'overloaded_error')  errType = 'overloaded_error';
+
+      console.error(`Gemini request failed before stream start [${errType}]`, e.status ?? e);
+      // Clean error event — no orphaned message_start because we haven't sent it yet.
       yield `event: error\ndata: ${JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: msg }
+        type: 'error',
+        error: { type: errType, message: errMsg || 'Failed to connect to Gemini' }
       })}\n\n`;
       return;
     }
+
+    // Gemini accepted the request — now it is safe to open the Anthropic message.
+    yield `event: message_start\ndata: ${JSON.stringify({
+      type: 'message_start',
+      message: {
+        id: msgId,
+        type: 'message',
+        role: 'assistant',
+        model: reqModel,
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 0, output_tokens: 0 }
+      }
+    })}\n\n`;
 
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
