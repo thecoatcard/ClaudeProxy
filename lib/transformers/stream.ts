@@ -301,14 +301,43 @@ export async function* transformStream(
           }
 
           // Stream any safe text that hasn't been emitted yet.
-          // "Safe" means we hold back the last 10 chars to avoid splitting <think> or [Action tags.
+          // "Safe" = we must NOT emit text that is part of an in-progress
+          // [Action: ...] pattern, otherwise the pattern spans chunks in a way
+          // that makes match.index < outputTextLength and the regex check skips it.
           let safeLength = cleanedText.length;
+
+          // ① Hold back trailing partial <think>/<thought> or [Action prefix
+          //    (the original 10-char lookback for short tags).
           for (let i = cleanedText.length - 1; i >= Math.max(0, cleanedText.length - 10); i--) {
             const suffix = cleanedText.slice(i).toLowerCase();
             if (prefixes.includes(suffix)) {
               safeLength = i;
               break;
             }
+          }
+
+          // ② Hold back from any [Action: ... ] pattern that hasn't closed yet.
+          //    Without this, the first chunk emits "[Action: I am calling tool Bash"
+          //    advancing outputTextLength past the pattern start so the regex can
+          //    never fire when the closing ] arrives on a later chunk.
+          const unemmitted = cleanedText.slice(outputTextLength, safeLength);
+          const actionOpenIdx = unemmitted.search(/\[Action:/i);
+          if (actionOpenIdx !== -1) {
+            const actionClose = unemmitted.indexOf(']', actionOpenIdx);
+            if (actionClose === -1) {
+              // [Action: is open but ] hasn't arrived yet — hold back from here.
+              safeLength = Math.min(safeLength, outputTextLength + actionOpenIdx);
+            }
+            // If ] has arrived, the regex above already handled/skipped it.
+          }
+
+          // ③ Hold back a trailing partial [Action prefix at the very end of the buffer
+          //    (e.g. the buffer ends with "[" or "[Act") in case the next chunk
+          //    completes it into a full [Action: pattern.
+          const afterOutput = cleanedText.slice(outputTextLength, safeLength);
+          const trailingPartial = afterOutput.search(/\[(?:[Aa](?:[Cc](?:[Tt](?:[Ii](?:[Oo](?:[Nn])?)?)?)?)?)?$/);
+          if (trailingPartial !== -1) {
+            safeLength = Math.min(safeLength, outputTextLength + trailingPartial);
           }
 
           if (safeLength > outputTextLength) {
