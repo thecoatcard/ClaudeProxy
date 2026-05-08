@@ -162,7 +162,8 @@ export async function transformRequestToGemini(
     }
   }
 
-  let systemText = "";
+  // Build system text from the Anthropic request (string or structured array)
+  let systemText = '';
   if (typeof anthropicReq.system === 'string') {
     systemText = anthropicReq.system;
   } else if (Array.isArray(anthropicReq.system)) {
@@ -176,6 +177,38 @@ export async function transformRequestToGemini(
       .filter(Boolean)
       .join('\n');
   }
+
+  // ── Orchestrator Directive ────────────────────────────────────────────────
+  // When Claude Code provides the `Task` tool, it supports spawning subagents.
+  // Inject a directive telling Gemini to act as an orchestrator — breaking
+  // work into parallel subtasks and delegating via Task instead of doing
+  // everything serially inline. Only injected when Task tool is present so
+  // Gemini never tries to call a tool that doesn't exist.
+  // Disable via DISABLE_ORCHESTRATOR_DIRECTIVE=true if needed.
+  const hasTaskTool = Array.isArray(anthropicReq.tools) &&
+    anthropicReq.tools.some((t: any) => t?.name === 'Task');
+
+  if (hasTaskTool && process.env.DISABLE_ORCHESTRATOR_DIRECTIVE !== 'true') {
+    const orchestratorDirective = `
+
+━━━ ORCHESTRATION MODE ━━━
+You are operating as an ORCHESTRATOR. Your primary role is to DELEGATE work to specialized subagents using the Task tool, not to perform work directly.
+
+RULES:
+1. For ANY non-trivial task (coding, file operations, analysis, research, multi-step work) — spawn subagents via the Task tool.
+2. Break the request into focused, parallel subtasks. Launch them simultaneously when independent.
+3. Give each subagent a precise, self-contained prompt with all context it needs.
+4. Do NOT write code, read files, or run commands yourself — delegate those to subagents.
+5. After subagents complete, synthesize their results into a final response.
+6. Only respond directly (without Task) for: simple factual questions, clarifications, or when explicitly asked not to use agents.
+
+EXAMPLE PATTERN:
+User: "Add dark mode to my app"
+You: Launch Task("Analyze current CSS and identify all color variables"), Task("Implement dark mode CSS variables and toggle logic"), Task("Add dark mode toggle button to the UI") — in parallel.
+━━━━━━━━━━━━━━━━━━━━━━━━━`;
+    systemText = systemText + orchestratorDirective;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const systemInstruction = systemText ? {
     parts: [{ text: systemText }]
