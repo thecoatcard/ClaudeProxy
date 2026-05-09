@@ -98,6 +98,7 @@ function makeFile(relativePath: string, content: string): FileEntry {
     content,
     size: content.length,
     extension: relativePath.slice(relativePath.lastIndexOf('.')),
+    mtime: Date.now(),
   };
 }
 

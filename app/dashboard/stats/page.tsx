@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from 'recharts';
+import { useAuth } from '@/components/auth-provider';
 
 type DayRow = {
   date: string; requests: number; errors: number; avgLatency: number;
@@ -31,7 +32,7 @@ function pct(a: number, b: number) { if (!b) return '0%'; return `${((a / b) * 1
 const TOOLTIP_STYLE = { background: '#1c2230', border: '1px solid #2a3345', borderRadius: 8, fontSize: 12 };
 
 export default function StatsPage() {
-  const [auth, setAuth] = useState<boolean | null>(null);
+  const { isAuthenticated } = useAuth();
   const [stats, setStats] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState<Range>('14d');
@@ -42,14 +43,13 @@ export default function StatsPage() {
   }, []);
 
   useEffect(() => {
+    if (isAuthenticated === null) return;
+    if (!isAuthenticated) { setLoading(false); return; }
     (async () => {
-      const res = await fetch('/api/auth/me');
-      if (!res.ok) { setAuth(false); setLoading(false); return; }
-      setAuth(true);
       await fetchStats();
       setLoading(false);
     })();
-  }, [fetchStats]);
+  }, [fetchStats, isAuthenticated]);
 
   const slicedDaily = useMemo(() => {
     if (!stats) return [];
@@ -80,7 +80,7 @@ export default function StatsPage() {
     );
   }
 
-  if (!auth) {
+  if (!isAuthenticated) {
     return (
       <div className="panel" style={{ maxWidth: 440, margin: '60px auto', textAlign: 'center', padding: 32 }}>
         <h2 className="section-title" style={{ marginBottom: 8 }}>Authentication Required</h2>
@@ -142,7 +142,7 @@ export default function StatsPage() {
             <span className="muted-text" style={{ fontSize: 11 }}>thousands</span>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <LineChart data={slicedDaily} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
                 <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />
@@ -159,7 +159,7 @@ export default function StatsPage() {
             <h2 className="section-title">Requests &amp; Errors ({range})</h2>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <LineChart data={slicedDaily} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
                 <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />
@@ -182,7 +182,7 @@ export default function StatsPage() {
             <span className="muted-text" style={{ fontSize: 11 }}>thousands</span>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <BarChart data={barData} margin={{ top: 4, right: 8, bottom: 40, left: -20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#9dacbf' }} angle={-30} textAnchor="end" interval={0} />

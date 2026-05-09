@@ -96,8 +96,7 @@ export class VectorIndex {
         fs.mkdirSync(dir, { recursive: true });
       }
       const data = Array.from(this.entries.values());
-      const fs2 = require('fs');
-      fs2.writeFileSync(this.indexPath, JSON.stringify(data), 'utf-8');
+      fs.writeFileSync(this.indexPath, JSON.stringify(data), 'utf-8');
     } catch (err) {
       console.warn('[VectorIndex] Failed to save index:', err);
     }

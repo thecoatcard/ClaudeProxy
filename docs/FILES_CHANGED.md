@@ -2,6 +2,84 @@
 
 ---
 
+## Task 13 — Gateway Stabilization
+
+- `app/api/v1/messages/route.ts` — Removed live orchestrator prepare/run/finalize calls; added request-scoped auth, routing, transform, stream, and completion timings.
+- `lib/agent/task-complexity.ts` — Made legacy orchestration opt-in via `ENABLE_GATEWAY_ORCHESTRATOR=true`.
+- `lib/agent/orchestrator-enforcer.ts` — Legacy orchestrator now returns an inert context unless explicitly enabled.
+- `lib/retry-engine.ts` — Key racing defaults to one key; model racing defaults off; added request-scoped model call timing.
+- `lib/transformers/request.ts` — Added behavior audit, retrieval/context lookup, compaction, operational memory, and metadata timing events; raised compaction token thresholds.
+- `lib/transformers/stream.ts` — Threads request IDs through stream transformation and retry execution.
+- `lib/transformers/compaction.ts` — Compaction now triggers from token pressure, not message count alone.
+- `lib/routing/task-router.ts` — Removed generic reasoning keyword routing to Gemma for ordinary user requests.
+- `lib/logging/event-logger.ts` — Added `RETRIEVAL` and `MODEL_CALL` event categories.
+- `lib/logging/timeline-builder.ts` — Added timeline handling for retrieval/model-call events.
+- `app/dashboard/*` — Replaced duplicated per-page auth fetches with shared `useAuth()` context.
+- `tests/*` — Updated orchestration and compaction tests for default-off orchestration and token-pressure-only compaction.
+- `docs/GATEWAY_STABILIZATION_REPORT.md` — Added complete architecture and flow audit.
+
+---
+
+## Task 12 — Build Fix
+
+- `app/dashboard/page.tsx` — Restored missing `<LineChart>` JSX
+- `lib/logging/event-logger.ts` — Added `KEY_RACE`, `MODEL_RACE` to `EventCategory`
+- `app/api/admin/logs/route.ts` — Fixed auth logic, null safety, scan call
+- `lib/redis/client.ts` — Added `scan()` to RedisClient, `lrange()` to RedisPipeline
+- `tests/fallback-overload.test.ts` — Fixed `compactedBody` → `compacted`
+- `tests/incremental-embedding.test.ts` — Added `mtime` to FileEntry mock
+- `tests/memory-integration.test.ts` — Added `mtime` to FileEntry mock
+- `tests/project-memory-location.test.ts` — Fixed NODE_ENV assignment
+
+---
+
+## Session: Embedding Memory Architecture Fix
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `lib/memory/project-memory-path.ts` | Canonical .coatcard path resolution using workspace root |
+| `lib/memory/redis-vector-store.ts` | Redis-backed primary vector storage with workspace isolation |
+| `lib/reasoning/gemma-helper.ts` | Gemma reasoning helper (restored) with Redis caching |
+| `tests/redis-vector-store.test.ts` | 11 tests for Redis vector store |
+| `tests/freshness-ranking.test.ts` | 11 tests for freshness ranking |
+| `tests/adaptive-confidence.test.ts` | 11 tests for adaptive threshold |
+| `tests/rename-detection.test.ts` | 8 tests for rename detection |
+| `tests/filesystem-optional.test.ts` | 7 tests for fs-optional ingestion |
+| `tests/gemma-helper.test.ts` | 9 tests for Gemma reasoning |
+| `tests/project-memory-location.test.ts` | 19 tests for path resolution |
+| `docs/PROJECT_MEMORY_LOCATION_FIX_REPORT.md` | Path fix report |
+| `docs/REDIS_VECTOR_STORE_REPORT.md` | Vector store report |
+| `docs/EMBEDDING_ARCHITECTURE_FIX_REPORT.md` | Full architecture report |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `lib/memory/vector-index.ts` | Canonical paths, optional disk, dynamic fs import |
+| `lib/memory/file-ingestion.ts` | Filesystem-optional, workspace root, `supportsFileIngestion()` |
+| `lib/memory/incremental-embedding.ts` | Rename detection, canonical paths, optional disk |
+| `lib/memory/retrieval-pipeline.ts` | Freshness ranking, adaptive threshold, retrieval caching |
+| `lib/memory/summary-memory.ts` | Canonical paths, optional disk |
+
+---
+
+## Session: Dashboard + Overload Root Cause Fixes
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `lib/recovery/overload-recovery.ts` | Cooldown 30s→10s, `RECOVERY_CHAIN_SIZE` export, double-cooldown fix |
+| `lib/retry-engine.ts` | Fast-exit uses `RECOVERY_CHAIN_SIZE` instead of hardcoded count |
+| `lib/agent/orchestrator-enforcer.ts` | `markOrchestrationRunning()`, performance recording, latency tracking |
+| `app/api/v1/messages/route.ts` | `markOrchestrationRunning` call, latency passed to `finalizeOrchestration` |
+| `app/api/admin/orchestrator/route.ts` | Added new Gemini model IDs |
+| `app/dashboard/orchestrator/page.tsx` | Removed admin key input, cookie-based auth |
+
+---
+
 ## Session: Embedding Memory System + Dead Code Cleanup
 
 ### New Files
@@ -298,3 +376,62 @@
   - Integrated long-running process assessment into behavior auditing pipeline.
   - Injects guidance for background execution + 30-second log monitoring policy.
   - Adds diagnostics fields for long-running process detection and current startup state.
+
+---
+
+## Task 14 � Full Gateway Optimization & Compatibility Refactor (2026-05-10)
+
+### New Files Created
+- __mocks__/nanoid.js � CJS-compatible nanoid mock for Jest (fixes ESM parse error)
+- docs/FULL_CODEBASE_AUDIT.md � Full audit findings
+- docs/ARCHITECTURE_FIXES.md � Architecture fixes applied
+- docs/PERFORMANCE_REPORT.md � Performance analysis and recommendations
+- docs/COMPATIBILITY_REPORT.md � Anthropic API compatibility matrix
+- docs/TEST_RESULTS.md � Updated test results
+
+### Modified Files
+
+#### Configuration
+- jest.config.ts � Added moduleNameMapper for nanoid (ESM) and .js extension resolution
+
+#### Routing & Model Pool
+- lib/routing/task-router.ts
+  - Added ALLOWED_MODEL_POOL Set (exported) � strict 8-model pool
+  - Added REASONING chain: gemma-4-31b-it primary
+  - Fixed LIGHT_CODING chain: gemini-3-flash-preview primary (was gemini-2.5-flash-lite)
+  - Fixed COMPACTION chain: gemma-4-26b-a4b-it primary (was gemma-4-31b-it)
+  - Restored REASONING classification with high-precision keyword patterns
+  - Added ALLOWED_MODEL_POOL inline comments
+- lib/model-router.ts
+  - Added enforceModelPool() � filters chains to allowed pool
+  - Added enforceRoutePool() � validates primary + fallbacks
+  - Applied enforceModelPool() on all resolved chains
+  - Sticky model validation against ALLOWED_MODEL_POOL
+
+#### Context
+- lib/transformers/request.ts � Changed compaction model from gemma-4-31b-it to gemma-4-26b-a4b-it
+
+#### Tests Fixed (22 node:test import removals)
+- 	ests/ai-compactor.test.ts
+- 	ests/auth-redis.test.ts
+- 	ests/context-compaction.test.ts
+- 	ests/contradiction-detector.test.ts
+- 	ests/dashboard-api-keys.test.ts
+- 	ests/dashboard-auth-keys.test.ts
+- 	ests/dashboard-metrics.test.ts
+- 	ests/dashboard-routing.test.ts
+- 	ests/dependency-compatibility.test.ts
+- 	ests/interactive-command-guard.test.ts
+- 	ests/metrics-redis.test.ts
+- 	ests/model-adaptive.test.ts
+- 	ests/model-router-redis.test.ts
+- 	ests/operational-context.test.ts (also: opstate:v2 -> opstate:v3)
+- 	ests/process-supervisor.test.ts
+- 	ests/routing-cache.test.ts
+- 	ests/routing-registry.test.ts
+- 	ests/task-router.test.ts (also: updated COMPACTION + LIGHT_CODING chain expectations)
+- 	ests/tool-structure.test.ts
+- 	ests/web-recovery.test.ts
+- 	ests/web-search.test.ts
+- 	ests/redis-client.test.ts (also: ../lib/redis/client.js -> ../lib/redis/client)
+- 	ests/redis-vector-store.test.ts (also: ./embedding-engine -> @/lib/memory/embedding-engine)

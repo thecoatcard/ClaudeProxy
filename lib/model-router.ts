@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { redis } from './redis';
-import { classifyTaskType, getTaskModelChain, type TaskType } from './routing/task-router';
+import { classifyTaskType, getTaskModelChain, ALLOWED_MODEL_POOL, type TaskType } from './routing/task-router';
 import { normalizeModelName } from './models/capability-profile';
 
 export interface ModelRoute {
@@ -25,6 +25,22 @@ export interface ModelRoutingOptions {
 export const ROUTING_REGISTRY_KEY = 'models:registry';
 export const ROUTING_REGISTRY_VERSION_KEY = 'models:registry:version';
 export const ROUTING_REGISTRY_UPDATED_AT_KEY = 'models:registry:updatedAt';
+
+/**
+ * Enforce the strict model pool. Strip any model not in ALLOWED_MODEL_POOL.
+ * This prevents operator errors (bad Redis config, typos) from routing to
+ * unknown models that would produce API errors.
+ */
+function enforceModelPool(models: string[]): string[] {
+  return models.filter((m) => ALLOWED_MODEL_POOL.has(normalizeModelName(m)));
+}
+
+function enforceRoutePool(route: ModelRoute): ModelRoute {
+  const primary = normalizeModelName(route.primary);
+  const safePrimary = ALLOWED_MODEL_POOL.has(primary) ? primary : 'gemini-2.5-flash';
+  const safeFallback = enforceModelPool(route.fallback);
+  return { ...route, primary: safePrimary, fallback: safeFallback };
+}
 
 // Final emergency fallback if Redis + local JSON are both unavailable.
 export const HARD_DEFAULT_MODEL_ROUTING: Record<string, ModelRoute> = {
@@ -297,10 +313,11 @@ export async function getModelMapping(
   const baseRoute = resolveBaseRoute(normalizedModel, loaded.registry);
 
   if (!normalizedModel.startsWith('claude-')) {
-    const chain = dedupeChain([baseRoute.primary, ...baseRoute.fallback]);
+    const chain = enforceModelPool(dedupeChain([baseRoute.primary, ...baseRoute.fallback]));
+    const safeChain = chain.length > 0 ? chain : ['gemini-2.5-flash'];
     return {
-      primary: chain[0] || resolveGlobalDefaultRoute().primary,
-      fallback: chain.slice(1),
+      primary: safeChain[0],
+      fallback: safeChain.slice(1),
       routingSource: loaded.source,
       routeVersion: loaded.version,
       taskType: 'LIGHT_CODING',
@@ -316,7 +333,9 @@ export async function getModelMapping(
     const stickyKey = buildStickyRouteKey(options.userId, normalizedModel, loaded.version);
     const stickyRaw = await redisClient.get<string>(stickyKey).catch(() => null);
     if (typeof stickyRaw === 'string' && stickyRaw.trim()) {
-      stickyModel = normalizeModelName(stickyRaw);
+      const candidate = normalizeModelName(stickyRaw);
+      // Only respect sticky if it's in the allowed pool
+      if (ALLOWED_MODEL_POOL.has(candidate)) stickyModel = candidate;
     }
   }
 
@@ -325,30 +344,33 @@ export async function getModelMapping(
   // Source-of-truth priority:
   // Redis/local/hardcoded configured route remains first for normal traffic.
   // Reasoning/compaction tasks may prioritize Gemma chain first.
-  const finalChain = taskFirst
-    ? dedupeChain([
-        ...taskChain,
-        baseRoute.primary,
-        ...baseRoute.fallback,
-        stickyModel,
-        ...resolveGlobalDefaultRoute().fallback,
-      ])
-    : dedupeChain([
-        baseRoute.primary,
-        ...baseRoute.fallback,
-        ...taskChain,
-        stickyModel,
-        ...resolveGlobalDefaultRoute().fallback,
-      ]);
+  const finalChain = enforceModelPool(
+    taskFirst
+      ? dedupeChain([
+          ...taskChain,
+          baseRoute.primary,
+          ...baseRoute.fallback,
+          stickyModel,
+          ...resolveGlobalDefaultRoute().fallback,
+        ])
+      : dedupeChain([
+          baseRoute.primary,
+          ...baseRoute.fallback,
+          ...taskChain,
+          stickyModel,
+          ...resolveGlobalDefaultRoute().fallback,
+        ])
+  );
+  const safeChain = finalChain.length > 0 ? finalChain : ['gemini-2.5-flash'];
 
-  return {
-    primary: finalChain[0] || baseRoute.primary,
-    fallback: finalChain.slice(1),
+  return enforceRoutePool({
+    primary: safeChain[0],
+    fallback: safeChain.slice(1),
     routingSource: loaded.source,
     taskType: task.type,
     taskReason: task.reason,
     routeVersion: loaded.version,
-  };
+  });
 }
 
 export async function __setRoutingTestAdapters(adapters: {

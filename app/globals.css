@@ -650,8 +650,8 @@ code {
 }
 
 /* Chart wrapper */
-.chart-wrap { width: 100%; height: 220px; }
-.chart-wrap-lg { width: 100%; height: 280px; }
+.chart-wrap { width: 100%; height: 220px; min-height: 100px; }
+.chart-wrap-lg { width: 100%; height: 280px; min-height: 100px; }
 
 /* Validation result row */
 .validate-row {

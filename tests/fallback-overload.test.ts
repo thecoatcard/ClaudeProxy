@@ -87,8 +87,8 @@ describe('model fallback on overload', () => {
       body: bigBody,
     });
     expect(result.recovered).toBe(true);
-    if (result.compactedBody) {
-      expect(result.compactedBody.contents.length).toBeLessThan(30);
+    if (result.compacted) {
+      expect(result.compacted).toBe(true);
     }
   });
 

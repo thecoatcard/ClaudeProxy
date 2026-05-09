@@ -1,8 +1,10 @@
 /**
  * lib/agent/orchestrator-enforcer.ts
  *
- * Gateway layer that forces coordinator (orchestrator-first) behaviour for
- * every non-trivial Claude Code task.
+ * Legacy gateway orchestrator layer.
+ *
+ * The gateway is an Anthropic-compatible infrastructure layer, not an agent
+ * runtime. This module is inert unless ENABLE_GATEWAY_ORCHESTRATOR=true.
  *
  * Architecture enforced here:
  *
@@ -22,7 +24,8 @@
  *   6. Verify final output
  */
 
-import { classifyComplexity, type ComplexityResult } from './task-complexity';
+import { classifyComplexity, isGatewayOrchestratorEnabled, type ComplexityResult } from './task-complexity';
+import { shouldSkipOrchestrator } from './intent-detector';
 import {
   createSubagentTask,
   saveSubagentTask,
@@ -120,6 +123,37 @@ export async function prepareOrchestration(
   ctx: OrchestratorContext;
 }> {
   const complexity = classifyComplexity(requestBody);
+
+  if (!isGatewayOrchestratorEnabled()) {
+    const ctx: OrchestratorContext = {
+      parentId: '',
+      complexity: { ...complexity, orchestratorRequired: false },
+      subagentTasks: [],
+      orchestratorEnabled: false,
+      systemPromptInjected: false,
+    };
+    return { enrichedBody: requestBody, ctx };
+  }
+
+  // ── Guard: skip orchestrator for trivial chat / questions ──────────────
+  const skipOrchestrator = shouldSkipOrchestrator(requestBody);
+  if (skipOrchestrator && !complexity.explicitOverride) {
+    logOrchestrator('orchestrator-status', {
+      complexityLevel: complexity.level,
+      orchestratorRequired: false,
+      reason: `intent-guard: ${complexity.reason}`,
+      skipped: true,
+      userId,
+    });
+    const ctx: OrchestratorContext = {
+      parentId: '',
+      complexity: { ...complexity, orchestratorRequired: false },
+      subagentTasks: [],
+      orchestratorEnabled: false,
+      systemPromptInjected: false,
+    };
+    return { enrichedBody: requestBody, ctx };
+  }
 
   logOrchestrator('orchestrator-status', {
     complexityLevel: complexity.level,

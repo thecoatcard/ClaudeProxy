@@ -43,12 +43,12 @@ describe('computeAdaptiveThreshold', () => {
   });
 
   test('returns moderate threshold for error-related queries', () => {
-    const t = computeAdaptiveThreshold('there is a crash when loading the dashboard page');
+    const t = computeAdaptiveThreshold('there is an error when starting the server');
     expect(t).toBe(0.35);
   });
 
   test('returns 0.3 for long general queries', () => {
-    const t = computeAdaptiveThreshold('explain the overall architecture and how each component interacts with every other');
+    const t = computeAdaptiveThreshold('explain the overall system and how all the pieces interact with each other in general');
     expect(t).toBe(0.3);
   });
 

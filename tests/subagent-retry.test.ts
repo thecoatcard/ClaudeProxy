@@ -40,7 +40,6 @@ jest.mock('../lib/redis', () => {
 import { callGemini } from '../lib/gemini-adapter';
 import { prepareOrchestration, runOrchestratedExecution } from '../lib/agent/orchestrator-enforcer';
 import { scheduleSubagentTasks } from '../lib/agent/subagent-scheduler';
-import { mergeSubagentOutputs } from '../lib/agent/subagent-merge';
 import { createSubagentTask, saveSubagentTask } from '../lib/agent/subagent-memory';
 
 function mockSuccess(text: string) {
@@ -96,6 +95,7 @@ describe('Retry and rerouting behaviour', () => {
 
 describe('Phase 12 — Integration: Build Todo App', () => {
   beforeEach(() => {
+    process.env.ENABLE_GATEWAY_ORCHESTRATOR = 'true';
     (callGemini as jest.Mock).mockImplementation((model: string, _key: string, body: any) => {
       const text = body?.contents?.[0]?.parts?.[0]?.text ?? '';
       // Simulate model-specific outputs
@@ -113,6 +113,10 @@ describe('Phase 12 — Integration: Build Todo App', () => {
       }
       return Promise.resolve(mockSuccess(output));
     });
+  });
+
+  afterEach(() => {
+    delete process.env.ENABLE_GATEWAY_ORCHESTRATOR;
   });
 
   test('Full Todo App build orchestration: planner → coder → verifier → merger', async () => {

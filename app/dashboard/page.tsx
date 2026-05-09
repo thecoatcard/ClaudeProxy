@@ -5,6 +5,7 @@ import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   Tooltip, CartesianGrid,
 } from 'recharts';
+import { useAuth } from '@/components/auth-provider';
 
 type KeyRow = { id: string; status?: string };
 type UserKeyRow = { token: string; status?: string };
@@ -30,17 +31,16 @@ function errRate(e: number, r: number) { if (!r) return '0%'; return `${((e / r)
 const TOOLTIP_STYLE = { background: '#1c2230', border: '1px solid #2a3345', borderRadius: 8, fontSize: 12 };
 
 export default function DashboardOverviewPage() {
-  const [auth, setAuth] = useState<boolean | null>(null);
+  const { isAuthenticated } = useAuth();
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [providerKeys, setProviderKeys] = useState<KeyRow[]>([]);
   const [userKeys, setUserKeys] = useState<UserKeyRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (isAuthenticated === null) return; // still checking
+    if (!isAuthenticated) { setLoading(false); return; }
     (async () => {
-      const authRes = await fetch('/api/auth/me');
-      if (!authRes.ok) { setAuth(false); setLoading(false); return; }
-      setAuth(true);
       const [sRes, kRes, uRes] = await Promise.all([
         fetch('/api/admin/stats', { cache: 'no-store' }),
         fetch('/api/admin/keys', { cache: 'no-store' }),
@@ -51,7 +51,7 @@ export default function DashboardOverviewPage() {
       if (uRes.ok) setUserKeys(((await uRes.json()).userKeys || []).filter((k: UserKeyRow) => k.status !== 'revoked'));
       setLoading(false);
     })();
-  }, []);
+  }, [isAuthenticated]);
 
   const keyHealth = useMemo(() => ({
     healthy: providerKeys.filter((k) => k.status === 'healthy').length,
@@ -79,7 +79,7 @@ export default function DashboardOverviewPage() {
     );
   }
 
-  if (!auth) {
+  if (!isAuthenticated) {
     return (
       <div className="panel" style={{ maxWidth: 440, margin: '60px auto', textAlign: 'center', padding: 32 }}>
         <h2 className="section-title" style={{ marginBottom: 8 }}>Admin Login Required</h2>
@@ -138,13 +138,13 @@ export default function DashboardOverviewPage() {
               <span className="muted-text" style={{ fontSize: 11 }}>thousands</span>
             </div>
             <div className="chart-wrap">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
                 <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
                   <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />
                   <YAxis tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#9dacbf' }} itemStyle={{ color: '#e9edf7' }} />
-                  <Line type="monotone" dataKey="tokens" stroke="#38bdf8" strokeWidth={2} dot={false} name="Tokens (K)" />
+                  <Line type="monotone" dataKey="tokens" stroke="#6366f1" strokeWidth={2} dot={false} name="Tokens (K)" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -155,7 +155,7 @@ export default function DashboardOverviewPage() {
               <h2 className="section-title">Requests vs Errors (14 days)</h2>
             </div>
             <div className="chart-wrap">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
                 <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
                   <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />

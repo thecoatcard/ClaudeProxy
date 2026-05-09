@@ -85,8 +85,8 @@ export async function retrieveContext(
   }
 
   try {
-    // Check cache first
-    const cached = await getCachedRetrieval(query);
+    // Check cache first — include index size to invalidate when index grows
+    const cached = await getCachedRetrieval(query, vectorIndex.size);
     if (cached) return cached;
 
     // Embed the query
@@ -107,7 +107,7 @@ export async function retrieveContext(
     // If all scores below threshold, skip injection to avoid noise
     if (relevant.length === 0) {
       const result: RetrievalContext = { snippets: [], estimatedTokens: 0, retrieved: true };
-      await cacheRetrieval(query, result);
+      await cacheRetrieval(query, result, vectorIndex.size);
       return result;
     }
 
@@ -134,7 +134,7 @@ export async function retrieveContext(
       retrieved: true,
     };
 
-    await cacheRetrieval(query, ctx);
+    await cacheRetrieval(query, ctx, vectorIndex.size);
     return ctx;
   } catch (err) {
     console.warn('[RetrievalPipeline] Failed to retrieve context:', err);
@@ -252,7 +252,8 @@ export function computeAdaptiveThreshold(query: string): number {
   if (words <= 3) return 0.2;
 
   // Check for code-specific patterns (function names, file paths, identifiers)
-  const hasCodePatterns = /[A-Z][a-z]+[A-Z]|[a-z]+\.[a-z]+\(|\/[a-z]+\/|[a-z]+_[a-z]+/i.test(query);
+  // Note: no `i` flag — camelCase and snake_case must be exact case
+  const hasCodePatterns = /[a-z][A-Z]|[a-z]+\.[a-z]+\(|[a-z]+[A-Z][a-z]+\(|\/[a-z]+\/|[a-z]+_[a-z]+/.test(query);
   if (hasCodePatterns) return 0.4; // High confidence — require strong match
 
   // Check for error patterns
@@ -270,14 +271,14 @@ export function computeAdaptiveThreshold(query: string): number {
 // Retrieval caching
 // ---------------------------------------------------------------------------
 
-function retrievalCacheKey(query: string): string {
+function retrievalCacheKey(query: string, indexSize: number): string {
   const hash = crypto.createHash('sha256').update(query.toLowerCase().trim()).digest('hex').slice(0, 16);
-  return `retrieval:cache:${hash}`;
+  return `retrieval:cache:${hash}:${indexSize}`;
 }
 
-async function getCachedRetrieval(query: string): Promise<RetrievalContext | null> {
+async function getCachedRetrieval(query: string, indexSize: number): Promise<RetrievalContext | null> {
   try {
-    const raw = await (redis as any).get(retrievalCacheKey(query));
+    const raw = await (redis as any).get(retrievalCacheKey(query, indexSize));
     if (!raw) return null;
     return JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw));
   } catch {
@@ -285,8 +286,8 @@ async function getCachedRetrieval(query: string): Promise<RetrievalContext | nul
   }
 }
 
-async function cacheRetrieval(query: string, result: RetrievalContext): Promise<void> {
+async function cacheRetrieval(query: string, result: RetrievalContext, indexSize: number): Promise<void> {
   try {
-    await (redis as any).set(retrievalCacheKey(query), JSON.stringify(result), { ex: RETRIEVAL_CACHE_TTL });
+    await (redis as any).set(retrievalCacheKey(query, indexSize), JSON.stringify(result), { ex: RETRIEVAL_CACHE_TTL });
   } catch { /* best-effort */ }
 }

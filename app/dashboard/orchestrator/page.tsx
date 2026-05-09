@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from 'react';
+import { useAuth } from '@/components/auth-provider';
 
 type SubagentTaskView = {
   id: string;
@@ -52,23 +53,22 @@ function ms(v: number | null) {
 }
 
 export default function OrchestratorPage() {
+  const { isAuthenticated } = useAuth();
   const [data, setData] = useState<OrchestratorData | null>(null);
   const [loading, setLoading] = useState(false);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const [auth, setAuth] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
+    if (!isAuthenticated) return;
     setLoading(true);
     setError('');
     try {
       const res = await fetch('/api/admin/orchestrator', { cache: 'no-store' });
       if (!res.ok) {
-        if (res.status === 401) setAuth(false);
         setError(res.status === 401 ? 'Not authenticated — please sign in from the sidebar' : 'Failed to load');
         return;
       }
-      setAuth(true);
       const json: OrchestratorData = await res.json();
       setData(json);
     } catch {
@@ -76,18 +76,19 @@ export default function OrchestratorPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (isAuthenticated === null || !isAuthenticated) return;
     load();
-  }, [load]);
+  }, [isAuthenticated, load]);
 
-  // Auto-refresh every 10s
+  // Auto-refresh every 30s
   useEffect(() => {
-    if (auth === false) return;
-    const id = setInterval(load, 10_000);
+    if (!isAuthenticated) return;
+    const id = setInterval(load, 30_000);
     return () => clearInterval(id);
-  }, [auth, load]);
+  }, [isAuthenticated, load]);
 
   return (
     <div style={{ padding: '24px', maxWidth: '1100px', margin: '0 auto' }}>
@@ -111,7 +112,7 @@ export default function OrchestratorPage() {
         >
           {loading ? 'Loading…' : '↻ Refresh'}
         </button>
-        {auth === false && (
+        {isAuthenticated === false && (
           <span style={{ color: '#f87171', fontSize: '0.85rem' }}>
             Sign in from the sidebar to view orchestrator data
           </span>
@@ -125,7 +126,7 @@ export default function OrchestratorPage() {
       {data && (
         <>
           <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '20px' }}>
-            Last updated: {new Date(data.generatedAt).toLocaleTimeString()} — auto-refreshes every 10s
+            Last updated: {new Date(data.generatedAt).toLocaleTimeString()} — auto-refreshes every 30s
           </p>
 
           {/* ── Performance table ─────────────────────────────────────────── */}

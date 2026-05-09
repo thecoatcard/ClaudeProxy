@@ -1,5 +1,4 @@
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
 
 import { transformGeminiToAnthropic } from '../lib/transformers/response';
 import { stripThoughtSignatures } from '../lib/retry-engine';

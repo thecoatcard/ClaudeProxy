@@ -1,7 +1,6 @@
 // tests/web-recovery.test.ts
 // Tests for the web recovery error classification engine.
 
-import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyAndRecover,

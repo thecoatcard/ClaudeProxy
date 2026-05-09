@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server';
 import { validateAdminKey } from '@/lib/auth';
 import { getActivity } from '@/lib/activity';
+import { cachedAdminResponse } from '@/lib/admin-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,15 +26,17 @@ export async function GET(req: Request) {
   const statusFilter = searchParams.get('status') ?? '';
   const keyFilter = searchParams.get('key') ?? '';
 
-  let entries = await getActivity(limit * 3); // Over-fetch so filters don't cut too deep
+  const cacheKey = `admin:activity:${limit}:${modelFilter}:${statusFilter}:${keyFilter}`;
+  const data = await cachedAdminResponse(cacheKey, async () => {
+    let entries = await getActivity(limit * 3);
+    if (modelFilter) entries = entries.filter((e) => e.model?.includes(modelFilter));
+    if (statusFilter) entries = entries.filter((e) => e.status === statusFilter);
+    if (keyFilter) entries = entries.filter((e) => e.userKey?.includes(keyFilter));
+    entries = entries.slice(0, limit);
+    return { entries, total: entries.length };
+  }, 5_000); // 5s cache for activity
 
-  if (modelFilter) entries = entries.filter((e) => e.model?.includes(modelFilter));
-  if (statusFilter) entries = entries.filter((e) => e.status === statusFilter);
-  if (keyFilter) entries = entries.filter((e) => e.userKey?.includes(keyFilter));
-
-  entries = entries.slice(0, limit);
-
-  return NextResponse.json({ entries, total: entries.length });
+  return NextResponse.json(data);
 }
 
 export async function DELETE(req: Request) {

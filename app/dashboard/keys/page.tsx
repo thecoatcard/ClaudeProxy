@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useToast } from '@/components/ui/toast';
+import { useAuth } from '@/components/auth-provider';
 
 type ProviderKey = {
   id: string;
@@ -31,7 +32,7 @@ function tsAgo(ts?: number): string {
 
 export default function KeysPage() {
   const { toast, ToastContainer } = useToast();
-  const [auth, setAuth] = useState<boolean | null>(null);
+  const { isAuthenticated } = useAuth();
   const [loading, setLoading] = useState(true);
   const [keys, setKeys] = useState<ProviderKey[]>([]);
   const [tab, setTab] = useState<'pool' | 'add'>('pool');
@@ -56,14 +57,13 @@ export default function KeysPage() {
   }, []);
 
   useEffect(() => {
+    if (isAuthenticated === null) return;
+    if (!isAuthenticated) { setLoading(false); return; }
     (async () => {
-      const res = await fetch('/api/auth/me');
-      if (!res.ok) { setAuth(false); setLoading(false); return; }
-      setAuth(true);
       await fetchKeys();
       setLoading(false);
     })();
-  }, [fetchKeys]);
+  }, [fetchKeys, isAuthenticated]);
 
   const busy = (id: string, on: boolean) => setBusyIds((s) => {
     const n = new Set(s); on ? n.add(id) : n.delete(id); return n;
@@ -172,7 +172,7 @@ export default function KeysPage() {
     );
   }
 
-  if (!auth) {
+  if (!isAuthenticated) {
     return (
       <div className="panel" style={{ maxWidth: 440, margin: '60px auto', textAlign: 'center', padding: 32 }}>
         <h2 className="section-title" style={{ marginBottom: 8 }}>Authentication Required</h2>

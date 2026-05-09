@@ -1,7 +1,6 @@
 // Tests for InteractiveCommandGuard
 // Run: npx tsx --test tests/interactive-command-guard.test.ts
 
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectInteractiveCommand,

@@ -20,6 +20,7 @@ import {
   buildOperationalGuidance,
   type OperationalStateStore,
 } from '../context/operational-state';
+import { logInfo } from '../logging/event-logger';
 export type { WebSearchConfig };
 
 // Redis store adapter for operational state.
@@ -53,8 +54,8 @@ const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
 };
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h
-const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 90000);
-const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 65000);
+const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 180000);
+const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 120000);
 const DEFAULT_SUMMARY_CHAR_BUDGET = Number(process.env.CONTEXT_SUMMARY_CHAR_BUDGET || 3000);
 // Max chars of a single tool result before it is truncated.
 // Claude Code's Read tool can return 500KB+ files. Without a cap these blow
@@ -152,7 +153,8 @@ export async function transformRequestToGemini(
   /** Internal model name resolved by model-router — used for max_token clamping */
   internalModel?: string,
   originalToolNames?: Map<string, string>,
-  userId?: string
+  userId?: string,
+  requestId?: string,
 ): Promise<{ geminiBody: any; webSearchConfig: WebSearchConfig | null }> {
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
@@ -166,14 +168,27 @@ export async function transformRequestToGemini(
   );
 
   if (Array.isArray(anthropicReq.messages)) {
+    const hydrateStart = Date.now();
     anthropicReq.messages = await hydrateCompactedMarkers(anthropicReq.messages, conversationId).catch(() => anthropicReq.messages);
+    logInfo('RETRIEVAL', 'Compacted marker hydration completed', {
+      requestId,
+      duration: Date.now() - hydrateStart,
+      metadata: { conversationId, messageCount: anthropicReq.messages.length },
+    });
 
     // Pipeline initial metadata lookups to save RTT
+    const contextLookupStart = Date.now();
     const [rollingSummary, systemKey] = await Promise.all([
       redis.get<string>(summaryKey).catch(() => ''),
       getHealthiestKeyObj(userId)
     ]);
+    logInfo('RETRIEVAL', 'Context metadata lookup completed', {
+      requestId,
+      duration: Date.now() - contextLookupStart,
+      metadata: { hasRollingSummary: Boolean(rollingSummary), hasCompactionKey: Boolean(systemKey?.key) },
+    });
 
+    const compactionStart = Date.now();
     const compaction = await compactMessagesDetailed(anthropicReq.messages, {
       maxTokensApprox: compactionPolicy.maxTokensApprox,
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
@@ -183,9 +198,20 @@ export async function transformRequestToGemini(
       summaryCharBudget: compactionPolicy.summaryCharBudget,
       failureAnchorDepth: compactionPolicy.failureAnchorDepth,
       apiKey: systemKey?.key,
-      model: 'gemma-4-31b-it',
+      model: 'gemma-4-26b-a4b-it',  // Compaction model: smaller Gemma (efficient summarization)
       conversationId,
       compactedRangeTtlSeconds: SUMMARY_TTL_SECONDS,
+    });
+    logInfo('COMPACTION', 'Context compaction evaluated', {
+      requestId,
+      duration: Date.now() - compactionStart,
+      metadata: {
+        didCompact: compaction.didCompact,
+        originalMessageCount: compaction.originalMessageCount,
+        compactedMessageCount: compaction.compactedMessageCount,
+        estimatedTokensBefore: compaction.estimatedTokensBefore,
+        estimatedTokensAfter: compaction.estimatedTokensAfter,
+      },
     });
     anthropicReq.messages = compaction.messages;
 
@@ -233,7 +259,13 @@ export async function transformRequestToGemini(
   // ── Behavior auditor ────────────────────────────────────────────────────
   // Runs all agent-behavior checks: loop detection, completion gate, path
   // guard, spec validator. Appends combined guidance to systemInstruction.
+  const auditStart = Date.now();
   const auditResult = await runBehaviorAudit(anthropicReq.messages || [], systemText, internalModel);
+  logInfo('SYSTEM', 'Behavior audit completed', {
+    requestId,
+    duration: Date.now() - auditStart,
+    metadata: auditResult.diagnostics,
+  });
   if (auditResult.hasGuidance) {
     systemText = (systemText ? systemText + '\n' : '') + auditResult.guidance;
   }
@@ -244,6 +276,7 @@ export async function transformRequestToGemini(
   // a compact guidance block and save the updated state back.
   // Runs best-effort — a Redis failure never blocks the request.
   let opStateInjected = false;
+  const operationalStart = Date.now();
   try {
     const opState = await loadOperationalState(conversationId, opStateStore);
     const updatedOpState = updateStateFromMessages(opState, anthropicReq.messages || []);
@@ -256,6 +289,12 @@ export async function transformRequestToGemini(
     saveOperationalState(updatedOpState, opStateStore).catch(() => {});
   } catch (e) {
     console.warn('[request] operational state error (non-fatal):', String(e));
+  } finally {
+    logInfo('MEMORY', 'Operational memory evaluated', {
+      requestId,
+      duration: Date.now() - operationalStart,
+      metadata: { injected: opStateInjected },
+    });
   }
 
   const systemInstruction = systemText ? {
@@ -278,10 +317,16 @@ export async function transformRequestToGemini(
   }
 
   const idList = Array.from(allToolIds);
+  const metadataLookupStart = Date.now();
   const [sigs, names] = idList.length > 0 ? await Promise.all([
     redis.mget<string[]>(idList.map(id => `gemini:thought:${id}`)),
     redis.mget<string[]>(idList.map(id => `gemini:toolname:${id}`))
   ]) : [[], []];
+  logInfo('MEMORY', 'Tool metadata lookup completed', {
+    requestId,
+    duration: Date.now() - metadataLookupStart,
+    metadata: { toolIds: idList.length },
+  });
 
   const sigMap = new Map<string, string>();
   const nameMap = new Map<string, string>();

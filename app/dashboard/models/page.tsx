@@ -1,6 +1,7 @@
 "use client";
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
+import { useAuth } from '@/components/auth-provider';
 
 type RouteConfig = { primary: string; fallback: string[] };
 type Routes = Record<string, RouteConfig>;
@@ -12,7 +13,7 @@ type RoutingDiagnostics = {
 };
 
 export default function ModelsPage() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const { isAuthenticated } = useAuth();
   const [loading, setLoading] = useState(true);
   const [routes, setRoutes] = useState<Routes>({});
   const [jsonMode, setJsonMode] = useState(false);
@@ -36,17 +37,16 @@ export default function ModelsPage() {
 
   useEffect(() => {
     const load = async () => {
-      const authRes = await fetch('/api/auth/me');
-      if (!authRes.ok) {
+      if (isAuthenticated === null) return;
+      if (!isAuthenticated) {
         setLoading(false);
         return;
       }
-      setIsAuthenticated(true);
       await fetchRoutes();
       setLoading(false);
     };
     load();
-  }, []);
+  }, [isAuthenticated]);
 
   const saveRoutes = async (nextRoutes: Routes) => {
     setSaveMessage('');

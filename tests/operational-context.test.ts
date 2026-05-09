@@ -1,7 +1,6 @@
 // tests/operational-context.test.ts
 // Run: npx tsx --test tests/operational-context.test.ts
 
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   defaultOperationalState,
@@ -274,7 +273,7 @@ describe('persistence (load/save)', () => {
   });
 
   it('uses correct Redis key format', () => {
-    assert.equal(operationalStateKey('abc-123'), 'opstate:v2:abc-123');
+    assert.equal(operationalStateKey('abc-123'), 'opstate:v3:abc-123');
   });
 
   it('handles corrupted JSON gracefully', async () => {

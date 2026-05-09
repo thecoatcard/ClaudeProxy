@@ -16,6 +16,10 @@ const EMBEDDING_MODEL = 'text-embedding-004';
 const EMBEDDING_DIMENSION = 768; // text-embedding-004 default
 const MAX_BATCH_SIZE = 100; // Google API batch limit
 const MAX_CHARS_PER_TEXT = 30_000; // ~7500 tokens safe limit
+/** Max retries on transient embedding failures (429, 500, 503) */
+const MAX_EMBED_RETRIES = 2;
+/** Base backoff in ms between retries */
+const EMBED_RETRY_BASE_MS = 400;
 
 export { EMBEDDING_DIMENSION };
 
@@ -46,6 +50,7 @@ export interface BatchEmbeddingResult {
 
 /**
  * Embed a single text string using text-embedding-004.
+ * Retries up to MAX_EMBED_RETRIES times on transient failures.
  */
 export async function embedText(text: string): Promise<EmbeddingResult> {
   const truncated = text.length > MAX_CHARS_PER_TEXT
@@ -58,29 +63,46 @@ export async function embedText(text: string): Promise<EmbeddingResult> {
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${keyObj.key}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: `models/${EMBEDDING_MODEL}`,
-      content: { parts: [{ text: truncated }] },
-    }),
-  });
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => 'unknown');
-    throw new Error(`Embedding API error ${response.status}: ${errorText}`);
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= MAX_EMBED_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, EMBED_RETRY_BASE_MS * attempt));
+    }
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: `models/${EMBEDDING_MODEL}`,
+          content: { parts: [{ text: truncated }] },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'unknown');
+        // Retry on rate-limit or server error
+        if ((response.status === 429 || response.status >= 500) && attempt < MAX_EMBED_RETRIES) {
+          lastError = new Error(`Embedding API error ${response.status}: ${errorText}`);
+          continue;
+        }
+        throw new Error(`Embedding API error ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      const vector: number[] = data?.embedding?.values ?? [];
+      return {
+        text: truncated,
+        vector,
+        dimension: vector.length,
+        model: EMBEDDING_MODEL,
+      };
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Embedding API error')) throw err;
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
   }
-
-  const data = await response.json();
-  const vector: number[] = data?.embedding?.values ?? [];
-
-  return {
-    text: truncated,
-    vector,
-    dimension: vector.length,
-    model: EMBEDDING_MODEL,
-  };
+  throw lastError ?? new Error('Embedding failed after retries');
 }
 
 /**

@@ -31,14 +31,19 @@ async function handleHealthCheck() {
   const ids = await redis.zrange<string[]>('gemini:key_pool', 0, -1).catch(() => []);
   let healthy = 0, cooldown = 0, revoked = 0, disabled = 0;
 
-  for (const id of ids) {
-    const data = await redis.hgetall(`gemini:key:${id}`).catch(() => null);
-    if (!data) continue;
-    switch (data.status) {
-      case 'healthy': healthy++; break;
-      case 'cooldown': cooldown++; break;
-      case 'revoked': revoked++; break;
-      case 'disabled': disabled++; break;
+  if (ids.length > 0) {
+    const pipe = redis.pipeline();
+    for (const id of ids) pipe.hgetall(`gemini:key:${id}`);
+    const pipeResults = await pipe.exec();
+    for (let i = 0; i < ids.length; i++) {
+      const data = pipeResults[i] as Record<string, string> | null;
+      if (!data) continue;
+      switch (data.status) {
+        case 'healthy': healthy++; break;
+        case 'cooldown': cooldown++; break;
+        case 'revoked': revoked++; break;
+        case 'disabled': disabled++; break;
+      }
     }
   }
 
@@ -51,32 +56,47 @@ async function handleHealthCheck() {
 
 async function handleActivateAll() {
   const ids = await redis.zrange<string[]>('gemini:key_pool', 0, -1).catch(() => []);
+  if (ids.length === 0) return { activated: 0 };
+
+  const readPipe = redis.pipeline();
+  for (const id of ids) readPipe.hgetall(`gemini:key:${id}`);
+  const readResults = await readPipe.exec();
+
+  const writePipe = redis.pipeline();
   let activated = 0;
-  for (const id of ids) {
-    const data = await redis.hgetall(`gemini:key:${id}`).catch(() => null);
+  for (let i = 0; i < ids.length; i++) {
+    const data = readResults[i] as Record<string, string> | null;
     if (!data?.key) continue;
-    // Don't re-activate disabled or revoked keys.
     if (data.status === 'disabled' || data.status === 'revoked') continue;
-    await redis.hset(`gemini:key:${id}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 });
-    await redis.zadd('gemini:key_pool', { score: 100, member: id });
+    writePipe.hset(`gemini:key:${ids[i]}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 });
+    writePipe.zadd('gemini:key_pool', { score: 100, member: ids[i] });
     activated++;
   }
+  await writePipe.exec();
   return { activated };
 }
 
 async function handleClearFailed() {
   const ids = await redis.zrange<string[]>('gemini:key_pool', 0, -1).catch(() => []);
+  if (ids.length === 0) return { cleared: 0 };
+
+  const readPipe = redis.pipeline();
+  for (const id of ids) readPipe.hgetall(`gemini:key:${id}`);
+  const readResults = await readPipe.exec();
+
+  const writePipe = redis.pipeline();
   let cleared = 0;
-  for (const id of ids) {
-    const data = await redis.hgetall(`gemini:key:${id}`).catch(() => null);
+  for (let i = 0; i < ids.length; i++) {
+    const data = readResults[i] as Record<string, string> | null;
     if (!data) continue;
     const fc = Number(data.failure_count || 0);
     if (fc > 0 || data.status === 'cooldown') {
-      await redis.hset(`gemini:key:${id}`, { failure_count: 0, cooldown_until: 0, status: 'healthy' });
-      await redis.zadd('gemini:key_pool', { score: 100, member: id });
+      writePipe.hset(`gemini:key:${ids[i]}`, { failure_count: 0, cooldown_until: 0, status: 'healthy' });
+      writePipe.zadd('gemini:key_pool', { score: 100, member: ids[i] });
       cleared++;
     }
   }
+  await writePipe.exec();
   return { cleared };
 }
 

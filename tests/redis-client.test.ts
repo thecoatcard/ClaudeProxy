@@ -5,7 +5,6 @@
  * All tests mock ioredis so no live Redis connection is needed.
  */
 import assert from 'node:assert/strict';
-import { describe, it, beforeEach } from 'node:test';
 
 // ─── Mock ioredis ──────────────────────────────────────────────────────────────
 
@@ -106,7 +105,7 @@ async function buildRedisClient() {
   // create an instance using a mock-backed getClient approach.
   // For simplicity, we directly test the API-translation logic here.
   
-  const { RedisPipeline, RedisClient } = await import('../lib/redis/client.js');
+  const { RedisPipeline, RedisClient } = await import('../lib/redis/client');
   return { RedisPipeline, RedisClient };
 }
 

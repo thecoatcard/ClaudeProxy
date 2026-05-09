@@ -20,6 +20,7 @@ function makeFile(relativePath: string, content: string): FileEntry {
     content,
     size: content.length,
     extension: '.ts',
+    mtime: Date.now(),
   };
 }
 

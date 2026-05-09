@@ -4,7 +4,6 @@
  * Tests for gateway key creation with extended fields (rpm_limit, max_usage, notes, expires_at, status).
  * Run: npx tsx --test tests/dashboard-auth-keys.test.ts
  */
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 // ─────────────────────────────────────────────────────────────────────────────

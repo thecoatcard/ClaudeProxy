@@ -46,13 +46,24 @@ export class RedisVectorStore {
 
   /**
    * Insert or update a vector entry.
+   * Uses a pipeline to batch set + sadd + expire into one round-trip.
    */
   async insert(entry: VectorEntry): Promise<void> {
     const r = redis as any;
     const key = entryKey(this.wsId, entry.id);
-    await r.set(key, JSON.stringify(entry), { ex: TTL_SECONDS }).catch(() => {});
-    await r.sadd(indexKey(this.wsId), entry.id).catch(() => {});
-    await r.expire(indexKey(this.wsId), TTL_SECONDS).catch(() => {});
+    const idxKey = indexKey(this.wsId);
+    try {
+      const pl = r.pipeline();
+      pl.set(key, JSON.stringify(entry), 'EX', TTL_SECONDS);
+      pl.sadd(idxKey, entry.id);
+      pl.expire(idxKey, TTL_SECONDS);
+      await pl.exec();
+    } catch {
+      // Fallback: individual commands if pipeline not available
+      await r.set(key, JSON.stringify(entry), { ex: TTL_SECONDS }).catch(() => {});
+      await r.sadd(idxKey, entry.id).catch(() => {});
+      await r.expire(idxKey, TTL_SECONDS).catch(() => {});
+    }
   }
 
   /**
@@ -108,17 +119,29 @@ export class RedisVectorStore {
 
   /**
    * Remove all entries whose ID starts with the given prefix.
+   * Batches deletions into a pipeline for efficiency.
    */
   async removeByPrefix(prefix: string): Promise<number> {
     const ids = await this.allIds();
-    let count = 0;
-    for (const id of ids) {
-      if (id.startsWith(prefix)) {
+    const matching = ids.filter((id) => id.startsWith(prefix));
+    if (matching.length === 0) return 0;
+
+    const r = redis as any;
+    const idxKey = indexKey(this.wsId);
+    try {
+      const pl = r.pipeline();
+      for (const id of matching) {
+        pl.del(entryKey(this.wsId, id));
+        pl.srem(idxKey, id);
+      }
+      await pl.exec();
+    } catch {
+      // Fallback: sequential removal
+      for (const id of matching) {
         await this.remove(id);
-        count++;
       }
     }
-    return count;
+    return matching.length;
   }
 
   /**
@@ -164,12 +187,18 @@ export class RedisVectorStore {
     if (ids.length === 0) return [];
 
     const entries: VectorEntry[] = [];
-    // Batch in groups of 50 to avoid excessive pipeline size
+    const r = redis as any;
+    // Use mget for each batch — single round-trip per 50 entries
     for (let i = 0; i < ids.length; i += 50) {
       const batch = ids.slice(i, i + 50);
-      const raws = await Promise.all(
-        batch.map((id) => (redis as any).get(entryKey(this.wsId, id)).catch(() => null)),
-      );
+      const keys = batch.map((id) => entryKey(this.wsId, id));
+      let raws: (string | null)[];
+      try {
+        raws = await r.mget(...keys);
+      } catch {
+        // Fallback: individual gets
+        raws = await Promise.all(keys.map((k) => r.get(k).catch(() => null)));
+      }
       for (const raw of raws) {
         if (!raw) continue;
         try {

@@ -1,4 +1,5 @@
 import { redis } from './redis';
+import { logInfo, logWarn } from './logging/event-logger';
 
 const CACHE_ENABLED = process.env.GEMINI_CACHE_ENABLED === 'true';
 
@@ -55,7 +56,7 @@ export async function getHealthiestKeyObj(userId?: string): Promise<{ id: string
     
     if (restoredCount > 0) {
       await restorePipeline.exec();
-      console.log(`[Auto-Restore] Restored ${restoredCount} keys from cooldown.`);
+      logInfo('KEY_ROTATION', `Restored ${restoredCount} keys from cooldown`);
     }
   };
   restoreKeys().catch(() => {});
@@ -154,7 +155,7 @@ export async function reportKeyFailure(id: string, type: 'ratelimit' | 'server' 
       redis.hset(`gemini:key:${id}`, { status: 'revoked', failure_count: 999 }),
       redis.zrem('gemini:key_pool', id)
     ]);
-    console.warn(`[KeyManager] Key ${id} revoked (403 Forbidden). Removed from pool.`);
+    logWarn('KEY_ROTATION', `Key ${id} revoked (403). Removed from pool`);
     return;
   }
 

@@ -4,7 +4,6 @@
  * Tests for model routing table CRUD logic.
  * Run: npx tsx --test tests/dashboard-routing.test.ts
  */
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 type RouteConfig = { primary: string; fallback: string[] };

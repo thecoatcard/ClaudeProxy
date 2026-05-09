@@ -5,7 +5,6 @@
  * All Redis calls are stubbed.
  */
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
 
 // ─── Default model routing (mirrors lib/model-router.ts) ─────────────────────
 

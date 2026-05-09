@@ -8,11 +8,12 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: Request) {
   if (!(await validateAdminKey(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   const userKeys = await redis.smembers('user:key_set');
-  const result = [];
-  for (const token of userKeys) {
-    const data = await redis.hgetall(`user:key:${token}`);
-    result.push({ token, ...data });
-  }
+  if (userKeys.length === 0) return NextResponse.json({ userKeys: [] });
+
+  const pipe = redis.pipeline();
+  for (const token of userKeys) pipe.hgetall(`user:key:${token}`);
+  const pipeResults = await pipe.exec();
+  const result = userKeys.map((token, i) => ({ token, ...(pipeResults[i] as Record<string, string> || {}) }));
   return NextResponse.json({ userKeys: result });
 }
 

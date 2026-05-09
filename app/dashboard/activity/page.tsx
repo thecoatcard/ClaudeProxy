@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useToast } from '@/components/ui/toast';
+import { useAuth } from '@/components/auth-provider';
 
 type ActivityEntry = {
   ts: number;
@@ -24,7 +25,7 @@ function compact(n: number) { return new Intl.NumberFormat('en-US', { notation: 
 
 export default function ActivityPage() {
   const { toast, ToastContainer } = useToast();
-  const [auth, setAuth] = useState<boolean | null>(null);
+  const { isAuthenticated } = useAuth();
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -47,18 +48,18 @@ export default function ActivityPage() {
   }, [filterModel, filterStatus, search]);
 
   useEffect(() => {
+    if (isAuthenticated === null) return;
+    if (!isAuthenticated) { setLoading(false); return; }
     (async () => {
-      const res = await fetch('/api/auth/me');
-      if (!res.ok) { setAuth(false); setLoading(false); return; }
-      setAuth(true);
       await fetchActivity();
       setLoading(false);
     })();
-  }, []); // eslint-disable-line
+  }, [fetchActivity, isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     fetchActivity();
-  }, [fetchActivity]);
+  }, [fetchActivity, isAuthenticated]);
 
   useEffect(() => {
     if (autoRefresh) {
@@ -88,7 +89,7 @@ export default function ActivityPage() {
     );
   }
 
-  if (!auth) {
+  if (!isAuthenticated) {
     return (
       <div className="panel" style={{ maxWidth: 440, margin: '60px auto', textAlign: 'center', padding: 32 }}>
         <h2 className="section-title" style={{ marginBottom: 8 }}>Authentication Required</h2>

@@ -24,6 +24,14 @@ function makeBody(text: string) {
 }
 
 describe('prepareOrchestration', () => {
+  beforeEach(() => {
+    process.env.ENABLE_GATEWAY_ORCHESTRATOR = 'true';
+  });
+
+  afterEach(() => {
+    delete process.env.ENABLE_GATEWAY_ORCHESTRATOR;
+  });
+
   test('trivial task → orchestrator disabled, body unchanged', async () => {
     const body = makeBody('ping');
     const { ctx, enrichedBody } = await prepareOrchestration(body, 'user-1');
@@ -83,6 +91,14 @@ describe('prepareOrchestration', () => {
 });
 
 describe('finalizeOrchestration', () => {
+  beforeEach(() => {
+    process.env.ENABLE_GATEWAY_ORCHESTRATOR = 'true';
+  });
+
+  afterEach(() => {
+    delete process.env.ENABLE_GATEWAY_ORCHESTRATOR;
+  });
+
   test('does not throw when orchestratorEnabled=false', async () => {
     const body = makeBody('ping');
     const { ctx } = await prepareOrchestration(body, 'user-1');

@@ -5,7 +5,6 @@
  * Verifies the pipeline command queue and exec() unwrapping behaviour.
  */
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
 
 // ─── Recorded pipeline commands ──────────────────────────────────────────────
 

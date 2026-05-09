@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import '@/app/globals.css';
+import { AuthProvider, useAuth } from '@/components/auth-provider';
+import { DashboardErrorBoundary } from '@/components/error-boundary';
 
 const NAV_ITEMS = [
   { href: '/dashboard',                 label: 'Overview',       icon: '⬡' },
@@ -12,6 +14,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/user-keys',       label: 'Gateway Keys',   icon: '🛡' },
   { href: '/dashboard/models',          label: 'Model Routing',  icon: '🔀' },
   { href: '/dashboard/orchestrator',    label: 'Orchestrator',   icon: '🤖' },
+  { href: '/dashboard/logs',            label: 'Logs',           icon: '📊' },
   { href: '/dashboard/system',          label: 'System',         icon: '⚙' },
 ];
 
@@ -82,23 +85,25 @@ function LoginModal({ onSuccess, onClose }: LoginModalProps) {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [showLogin, setShowLogin] = useState(false);
+  return (
+    <AuthProvider>
+      <DashboardLayoutInner>{children}</DashboardLayoutInner>
+    </AuthProvider>
+  );
+}
 
-  useEffect(() => {
-    fetch('/api/auth/me', { cache: 'no-store' }).then((r) => {
-      setIsAuthenticated(r.ok);
-    });
-  }, []);
+function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const { isAuthenticated, refresh } = useAuth();
+  const [showLogin, setShowLogin] = useState(false);
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
-    setIsAuthenticated(false);
+    refresh();
   };
 
   const handleLoginSuccess = () => {
-    setIsAuthenticated(true);
+    refresh();
     setShowLogin(false);
   };
 
@@ -158,7 +163,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </aside>
 
       <main className="dashboard-main">
-        {children}
+        <DashboardErrorBoundary>
+          {children}
+        </DashboardErrorBoundary>
       </main>
     </div>
   );

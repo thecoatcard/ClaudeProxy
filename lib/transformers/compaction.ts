@@ -333,7 +333,6 @@ export async function compactMessagesDetailed(
   options: CompactionOptions = {}
 ): Promise<CompactionResult> {
   const {
-    maxMessages = DEFAULT_OPTIONS.maxMessages!,
     maxTokensApprox = DEFAULT_OPTIONS.maxTokensApprox!,
     keepFirstN = DEFAULT_OPTIONS.keepFirstN!,
     keepLastN = DEFAULT_OPTIONS.keepLastN!,
@@ -345,9 +344,11 @@ export async function compactMessagesDetailed(
   } = options;
 
   const estimatedTokensBefore = estimateTokens(messages);
-  const belowLimits = messages.length <= maxMessages && estimatedTokensBefore <= maxTokensApprox;
+  // Token-pressure based: compact only when the estimated token budget is
+  // exceeded. Message count alone should not trigger an internal model call.
+  const tokenPressureHigh = estimatedTokensBefore > maxTokensApprox;
   
-  if (belowLimits) {
+  if (!tokenPressureHigh) {
     return {
       messages,
       didCompact: false,

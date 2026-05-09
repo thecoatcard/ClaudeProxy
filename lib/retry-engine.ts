@@ -21,6 +21,12 @@ import {
   computeOverloadBackoff,
   RECOVERY_CHAIN_SIZE,
 } from './recovery/overload-recovery';
+import { logInfo, logWarn, logError } from './logging/event-logger';
+import { errorOneLiner } from './logging/error-summarizer';
+import { raceKeys } from './racing/key-racer';
+import { raceModels } from './racing/model-racer';
+import { startTimer } from './metrics/performance-tracker';
+import { withTimeout, MODEL_CALL_TIMEOUT, REQUEST_TIMEOUT } from './runtime/response-watchdog';
 
 // Models that can't see images. We strip inlineData/fileData parts before
 // sending to avoid a round-trip 400.
@@ -164,13 +170,14 @@ export async function executeWithRetry(
   geminiBody: any,
   stream: boolean,
   userId?: string,
-  routePlan?: ModelRoute
+  routePlan?: ModelRoute,
+  requestId?: string,
 ) {
   const isThinkingRequested = !!geminiBody.generationConfig?.thinkingConfig;
   const modelMap = routePlan || await getModelMapping(anthropicModel, { thinkingEnabled: isThinkingRequested, userId });
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
   const configuredRetries = Number(process.env.MAX_RETRIES || 3);
-  const maxRetries = Math.max(configuredRetries, (fallbacks.length * 2) + 2);
+  const maxRetries = Math.min(Math.max(configuredRetries, (fallbacks.length * 2) + 2), 12);
 
   const primaryModel = modelMap.primary;
   let currentInternalModel = primaryModel;
@@ -188,7 +195,90 @@ export async function executeWithRetry(
   // for all subsequent attempts. Null = use the value already in geminiBody.
   let maxOutputTokensOverride: number | null = null;
 
+  const requestTimer = startTimer();
+
+  // -----------------------------------------------------------------------
+  // Phase 0: Parallel key racing — fire multiple keys simultaneously on
+  // primary model. If one responds 2xx, return immediately (skips serial loop).
+  // -----------------------------------------------------------------------
+  const KEY_RACE_COUNT = Number(process.env.KEY_RACE_COUNT || 1);
+  if (KEY_RACE_COUNT > 1) {
+    const keyRaceTimer = startTimer();
+    const keyRaceResult = await withTimeout(
+      raceKeys({
+        model: primaryModel,
+        body: geminiBody,
+        stream,
+        keyCount: KEY_RACE_COUNT,
+        userId,
+      }),
+      MODEL_CALL_TIMEOUT + 2_000,
+      'keyRace',
+    ).catch(() => null);
+    if (keyRaceResult?.response.ok) {
+      await rememberLastWorkingModel(userId, anthropicModel, primaryModel, modelMap.routeVersion);
+      logInfo('KEY_RACE', `Fast path: key race won on ${primaryModel} in ${keyRaceResult.latencyMs}ms`);
+      logInfo('KEY_RACE', 'Key race completed', {
+        requestId,
+        duration: keyRaceResult.latencyMs,
+        metadata: { model: primaryModel, racedKeys: keyRaceResult.racedKeys, winnerId: keyRaceResult.winnerId },
+      });
+      await keyRaceTimer.record('key_race_latency');
+      await requestTimer.record('total_latency');
+      return keyRaceResult.response;
+    }
+  } else {
+    logInfo('KEY_RACE', 'Key race skipped', { requestId, duration: 0, metadata: { enabled: false } });
+  }
+
+  // -----------------------------------------------------------------------
+  // Phase 0b: Parallel model racing — if key race failed/overloaded,
+  // race fallback models simultaneously before falling back to serial loop.
+  // -----------------------------------------------------------------------
+  const MODEL_RACE_ENABLED = process.env.MODEL_RACE_ENABLED === 'true';
+  if (MODEL_RACE_ENABLED && fallbacks.length > 0) {
+    const modelRaceTimer = startTimer();
+    const modelRaceResult = await withTimeout(
+      raceModels({
+        models: [primaryModel, ...fallbacks.slice(0, 2)],
+        body: geminiBody,
+        stream,
+        userId,
+        bodyTransformer: (model, b) => {
+          if (isTextOnly(model)) return stripImagesFromBody(b);
+          return b;
+        },
+      }),
+      MODEL_CALL_TIMEOUT + 2_000,
+      'modelRace',
+    ).catch(() => null);
+    if (modelRaceResult?.response.ok) {
+      await rememberLastWorkingModel(userId, anthropicModel, modelRaceResult.model, modelMap.routeVersion);
+      logInfo('MODEL_RACE', `Fast path: model race won on ${modelRaceResult.model} in ${modelRaceResult.latencyMs}ms`);
+      logInfo('MODEL_RACE', 'Model race completed', {
+        requestId,
+        duration: modelRaceResult.latencyMs,
+        metadata: { winnerModel: modelRaceResult.winnerModel, racedModels: modelRaceResult.racedModels },
+      });
+      await modelRaceTimer.record('model_race_latency');
+      await requestTimer.record('total_latency');
+      return modelRaceResult.response;
+    }
+  } else {
+    logInfo('MODEL_RACE', 'Model race skipped', { requestId, duration: 0, metadata: { enabled: false } });
+  }
+
+  // -----------------------------------------------------------------------
+  // Serial retry loop — fallback when racing doesn't produce a winner
+  // -----------------------------------------------------------------------
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Hard budget check: if total elapsed time exceeds REQUEST_TIMEOUT, stop retrying
+    if (requestTimer.elapsed() >= REQUEST_TIMEOUT) {
+      logError('RETRY', `Request time budget exhausted (${requestTimer.elapsed()}ms) — failing after ${attempt - 1} attempt(s)`);
+      break;
+    }
+
     const keyObj = await getHealthiestKeyObj(userId);
 
     if (!keyObj) {
@@ -202,7 +292,7 @@ export async function executeWithRetry(
         userId,
       });
       if (recoveryResult.recovered && recoveryResult.newKeyId) {
-        console.info(`[retry] No key available — recovery rotated to key ${recoveryResult.newKeyId}`);
+        logInfo('KEY_ROTATION', `Recovery rotated to key ${recoveryResult.newKeyId}`);
         await sleep(recoveryResult.backoffMs);
         continue;
       }
@@ -212,7 +302,7 @@ export async function executeWithRetry(
     // Phase 7: Proactive token pressure detection — compact before overload
     const pressure = detectTokenPressure(geminiBody);
     if (pressure.high && attempt === 1) {
-      console.info(`[retry] High token pressure detected (${pressure.estimatedTokens} est tokens) — compacting proactively`);
+      logInfo('COMPACTION', `High token pressure (${pressure.estimatedTokens} est tokens) — compacting proactively`);
       geminiBody = compactBodyForOverload(geminiBody);
     }
 
@@ -267,14 +357,24 @@ export async function executeWithRetry(
         lastCacheHash = cacheResult.hash;
       } catch (e) {
         // Caching is a best-effort optimization — never fail the request over it.
-        console.warn('[retry] cache apply failed, proceeding without', e);
+        logWarn('RETRY', `Cache apply failed: ${errorOneLiner(e, 'cache')}`);
       }
     } else {
       lastCacheHash = null;
     }
 
     try {
-      const res = await callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream);
+      const modelCallStart = Date.now();
+      const res = await withTimeout(
+        callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream),
+        MODEL_CALL_TIMEOUT,
+        `callGemini(${currentInternalModel})`,
+      );
+      logInfo('MODEL_CALL', 'Gemini model call completed', {
+        requestId,
+        duration: Date.now() - modelCallStart,
+        metadata: { model: currentInternalModel, status: res.status, attempt, stream },
+      });
 
       if (res.status === 403) {
         // Invalid or revoked key — mark as revoked and move to next key immediately
@@ -311,7 +411,7 @@ export async function executeWithRetry(
 
         // Phase 5: Model fallback from recovery pipeline
         if (recovery.newModel) {
-          console.warn(`[routing] Recovery fallback: ${currentInternalModel} -> ${recovery.newModel} (status=${res.status})`);
+          logWarn('OVERLOAD', `Recovery fallback: ${currentInternalModel} → ${recovery.newModel} (status=${res.status})`);
           currentInternalModel = recovery.newModel;
           // Also advance fallbackIndex past this model if it's in our chain
           while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
@@ -321,14 +421,14 @@ export async function executeWithRetry(
         } else if (fallbackIndex < fallbacks.length) {
           const prev = currentInternalModel;
           currentInternalModel = fallbacks[fallbackIndex++];
-          console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_overload status=${res.status})`);
+          logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (server_overload status=${res.status})`);
         }
 
         // Fast-exit: every model in the chain has now returned 503 at least once.
         // Use the larger of router chain and recovery chain to avoid premature exit.
         const totalAvailableModels = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
         if (overloadedModels.size >= totalAvailableModels) {
-          console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded — failing fast after ${attempt} attempt(s).`);
+          logError('OVERLOAD', `All ${overloadedModels.size} models overloaded — failing fast after ${attempt} attempt(s)`);
           break;
         }
 
@@ -344,7 +444,7 @@ export async function executeWithRetry(
 
         // Handle 503 Service Unavailable or 500 Internal Server Error
         // Also handle transient 400 "unexpected error" as a server-side glitch
-        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error|service is currently unavailable/i.test(msg));
+        const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
         
         if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
           // Use recovery pipeline for body-parse path too
@@ -364,17 +464,17 @@ export async function executeWithRetry(
           }
 
           if (recovery.newModel) {
-            console.warn(`[routing] Recovery fallback: ${currentInternalModel} -> ${recovery.newModel} (reason=server_error status=${res.status})`);
+            logWarn('RECOVERY', `Recovery fallback: ${currentInternalModel} → ${recovery.newModel} (server_error status=${res.status})`);
             currentInternalModel = recovery.newModel;
           } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
             currentInternalModel = fallbacks[fallbackIndex++];
-            console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_error status=${res.status})`);
+            logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (server_error status=${res.status})`);
           }
 
           const totalAvailableModels2 = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
           if (overloadedModels.size >= totalAvailableModels2) {
-            console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded (body parse) — failing fast.`);
+            logError('OVERLOAD', `All ${overloadedModels.size} models overloaded (body parse) — failing fast`);
             break;
           }
 
@@ -383,13 +483,9 @@ export async function executeWithRetry(
           continue;
         }
 
-        console.error("Gemini API Error:", JSON.stringify(err, null, 2));
-        console.error("DEBUG PAYLOAD:", JSON.stringify({
-          model: currentInternalModel,
-          stripSigs,
-          geminiBody: bodyForThisAttempt,
-          error: err,
-        }));
+        logError('RETRY', `Gemini API Error on ${currentInternalModel}`, {
+          metadata: { error: err, model: currentInternalModel, stripSigs },
+        });
 
         // Cache miss / expired / bad reference: drop the mapping, flip the
         // skip flag so the next attempt sends the full uncached body.
@@ -422,7 +518,7 @@ export async function executeWithRetry(
           if (isThoughtSigErr) {
             stripSigs    = true;
             stripThinking = true;
-            console.warn(`[retry] thought_signature 400 on ${currentInternalModel} — disabling thinking for next attempt.`);
+            logWarn('RETRY', `thought_signature 400 on ${currentInternalModel} — disabling thinking`);
             lastError = { status: 400, message: msg };
             await sleep(computeBackoffMs(attempt));
             continue;
@@ -434,7 +530,7 @@ export async function executeWithRetry(
             const limitMatch = msg.match(/(\d{4,6})/);
             const modelActualLimit = limitMatch ? Number(limitMatch[1]) : 32000;
             maxOutputTokensOverride = Math.floor(modelActualLimit * 0.9);
-            console.warn(`[retry] Max token 400 on ${currentInternalModel}: reported limit=${modelActualLimit}, retrying with ${maxOutputTokensOverride}`);
+            logWarn('RETRY', `Max token 400 on ${currentInternalModel}: limit=${modelActualLimit}, retrying with ${maxOutputTokensOverride}`);
             lastError = { status: 400, message: msg };
             await sleep(computeBackoffMs(attempt));
             continue;
@@ -452,9 +548,8 @@ export async function executeWithRetry(
             stripThinking = true;
           } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
-            currentInternalModel = fallbacks[fallbackIndex];
-            fallbackIndex++;
-            console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=bad_request_400)`);
+            currentInternalModel = fallbacks[fallbackIndex++];
+            logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (bad_request_400)`);
           }
 
           lastError = { status: 400, message: msg };
@@ -468,6 +563,7 @@ export async function executeWithRetry(
       // Success
       await recordKeyUsage(keyObj.id);
       await rememberLastWorkingModel(userId, anthropicModel, currentInternalModel, modelMap.routeVersion);
+      await requestTimer.record('total_latency');
       return res;
     } catch (err: any) {
       // Phase 1: Classify overload errors as recoverable — don't hard throw
@@ -494,9 +590,8 @@ export async function executeWithRetry(
       // If it's a 400 (likely safety or bad request), try one more time with a fallback model
       if (err.status === 400 && fallbackIndex < fallbacks.length) {
         const prev = currentInternalModel;
-        currentInternalModel = fallbacks[fallbackIndex];
-        fallbackIndex++;
-        console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=exception_400)`);
+        currentInternalModel = fallbacks[fallbackIndex++];
+        logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (exception_400)`);
         lastError = err;
         await sleep(computeBackoffMs(attempt));
         continue;

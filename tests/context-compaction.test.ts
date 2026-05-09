@@ -1,5 +1,4 @@
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
 
 import { compactMessagesDetailed } from '../lib/transformers/compaction';
 
@@ -21,7 +20,7 @@ function toolResult(role: 'user', toolUseId: string, content: string, isError = 
 async function runCompaction(messages: any[]) {
   return compactMessagesDetailed(messages, {
     maxMessages: 6,
-    maxTokensApprox: 120,
+    maxTokensApprox: 20,
     keepFirstN: 1,
     keepLastN: 2,
     summaryCharBudget: 1400,

@@ -6,7 +6,7 @@
  * Covers Part 7 (task memory) and Part 8 (error memory).
  */
 
-import { embedSummary } from './embedding-engine';
+import { embedSummary, embedBatch } from './embedding-engine';
 import { VectorIndex, type VectorEntry } from './vector-index';
 import { getSummariesFilePath, isLocalCacheEnabled } from './project-memory-path';
 
@@ -109,15 +109,25 @@ export class SummaryStore {
 
   /**
    * Embed all un-embedded summaries into the vector index.
+   * Uses batch embedding for efficiency (one API call per chunk of 100).
    */
   async embedPending(vectorIndex: VectorIndex): Promise<number> {
-    let count = 0;
+    const pending = Array.from(this.summaries.values()).filter((s) => !s.embedded);
+    if (pending.length === 0) return 0;
 
-    for (const summary of this.summaries.values()) {
-      if (summary.embedded) continue;
+    // Build prefixed texts for batch embedding
+    const texts = pending.map(
+      (s) => `[${s.type.toUpperCase()}] ${s.title}\n---\n${s.content}`
+    );
 
-      try {
-        const result = await embedSummary(summary.type, summary.title, summary.content);
+    let embedded = 0;
+    try {
+      const batch = await embedBatch(texts);
+      for (let i = 0; i < pending.length; i++) {
+        const summary = pending[i];
+        const result = batch.embeddings[i];
+        if (!result || result.vector.length === 0) continue;
+
         const entry: VectorEntry = {
           id: `summary:${summary.id}`,
           vector: result.vector,
@@ -130,13 +140,34 @@ export class SummaryStore {
         };
         vectorIndex.insert(entry);
         summary.embedded = true;
-        count++;
-      } catch (err) {
-        console.warn(`[SummaryStore] Failed to embed summary ${summary.id}:`, err);
+        embedded++;
+      }
+    } catch (err) {
+      // Fallback: embed one by one so partial failures don't lose all summaries
+      console.warn('[SummaryStore] Batch embed failed, falling back to sequential:', err);
+      for (const summary of pending) {
+        try {
+          const result = await embedSummary(summary.type, summary.title, summary.content);
+          const entry: VectorEntry = {
+            id: `summary:${summary.id}`,
+            vector: result.vector,
+            metadata: {
+              type: summary.type,
+              title: summary.title,
+              text: summary.content.slice(0, 500),
+              embeddedAt: Date.now(),
+            },
+          };
+          vectorIndex.insert(entry);
+          summary.embedded = true;
+          embedded++;
+        } catch (innerErr) {
+          console.warn(`[SummaryStore] Failed to embed summary ${summary.id}:`, innerErr);
+        }
       }
     }
 
-    return count;
+    return embedded;
   }
 
   /**

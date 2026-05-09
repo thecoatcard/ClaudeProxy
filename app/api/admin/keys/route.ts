@@ -9,11 +9,12 @@ export async function GET(req: Request) {
   if (!(await validateAdminKey(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   
   const keys = await redis.zrange('gemini:key_pool', 0, -1);
-  const result = [];
-  for (const id of keys) {
-    const data = await redis.hgetall(`gemini:key:${id}`);
-    result.push({ id, ...data });
-  }
+  if (keys.length === 0) return NextResponse.json({ keys: [] });
+
+  const pipe = redis.pipeline();
+  for (const id of keys) pipe.hgetall(`gemini:key:${id}`);
+  const pipeResults = await pipe.exec();
+  const result = keys.map((id, i) => ({ id, ...(pipeResults[i] as Record<string, string> || {}) }));
   return NextResponse.json({ keys: result });
 }
 
@@ -76,19 +77,28 @@ export async function PATCH(req: Request) {
   }
 
   const ids = await redis.zrange<string[]>('gemini:key_pool', 0, -1);
-  let activated = 0;
+  if (ids.length === 0) return NextResponse.json({ success: true, activated: 0 });
 
-  for (const id of ids) {
-    const data = await redis.hgetall(`gemini:key:${id}`);
+  // Batch read all keys
+  const readPipe = redis.pipeline();
+  for (const id of ids) readPipe.hgetall(`gemini:key:${id}`);
+  const readResults = await readPipe.exec();
+
+  // Batch write all activations
+  const writePipe = redis.pipeline();
+  let activated = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const data = readResults[i] as Record<string, string> | null;
     if (!data || !data.key) continue;
-    await redis.hset(`gemini:key:${id}`, {
+    writePipe.hset(`gemini:key:${ids[i]}`, {
       status: 'healthy',
       failure_count: 0,
       cooldown_until: 0,
     });
-    await redis.zadd('gemini:key_pool', { score: 100, member: id });
+    writePipe.zadd('gemini:key_pool', { score: 100, member: ids[i] });
     activated++;
   }
+  await writePipe.exec();
 
   return NextResponse.json({ success: true, activated });
 }

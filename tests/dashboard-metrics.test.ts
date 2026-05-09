@@ -4,7 +4,6 @@
  * Tests for stats & activity API response shapes and transformation logic.
  * Run: npx tsx --test tests/dashboard-metrics.test.ts
  */
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -193,13 +193,13 @@ export function compactBodyForOverload(body: any): any {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute overload-specific backoff with increasing delays.
- * Pattern: 2s → 5s → 10s → then give up and fallback.
+ * Compute overload-specific backoff with fast failover.
+ * Pattern: 500ms → 1s → 2s → cap (prioritize model rotation over waiting).
  */
 export function computeOverloadBackoff(attempt: number): number {
-  const delays = [2000, 5000, 10000];
-  const base = delays[Math.min(attempt - 1, delays.length - 1)] ?? 10000;
-  const jitter = Math.floor(Math.random() * 500);
+  const delays = [500, 1000, 2000];
+  const base = delays[Math.min(attempt - 1, delays.length - 1)] ?? 2000;
+  const jitter = Math.floor(Math.random() * 300);
   return base + jitter;
 }
 

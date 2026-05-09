@@ -1,7 +1,6 @@
 // tests/contradiction-detector.test.ts
 // Tests for the contradiction loop detector.
 
-import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   scanHistoryForContraEvents,

@@ -13,7 +13,8 @@ import { runWithWebSearch } from '@/lib/tools/search-executor';
 import { callGemini } from '@/lib/gemini-adapter';
 import { getHealthiestKeyObj } from '@/lib/key-manager';
 import { logActivity, maskToken } from '@/lib/activity';
-import { prepareOrchestration, finalizeOrchestration, markOrchestrationRunning } from '@/lib/agent/orchestrator-enforcer';
+import { createRequestLogger } from '@/lib/logging/event-logger';
+import { errorOneLiner } from '@/lib/logging/error-summarizer';
 
 // Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
 export const runtime = 'nodejs';
@@ -50,6 +51,10 @@ export async function HEAD() {
 
 export async function POST(req: Request) {
   const startTime = Date.now();
+  const requestId = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const log = createRequestLogger(requestId);
+
+  log.info('ACTIVITY', 'Request started', { metadata: { method: 'POST', path: '/api/v1/messages' } });
   
   // 1. Auth check
   const token = extractToken(req);
@@ -78,21 +83,34 @@ export async function POST(req: Request) {
     return NextResponse.json(optimized);
   }
 
-  // 3a. Orchestrator enforcement — inject coordinator behaviour for non-trivial tasks
-  const { enrichedBody: orchBody, ctx: orchCtx } = await prepareOrchestration(body, token).catch(() => ({ enrichedBody: body, ctx: { parentId: '', complexity: { level: 'NORMAL' as const, reason: 'fallback', orchestratorRequired: false, explicitOverride: false }, subagentTasks: [], orchestratorEnabled: false, systemPromptInjected: false } }));
-  // Use the enriched body (with injected coordinator prompt) for all downstream calls
-  const activeBody = orchCtx.systemPromptInjected ? orchBody : body;
-
   // 3. Parallel Pre-flight (Auth + Routing)
   const isThinking = !!(body.thinking && body.thinking.type === 'enabled');
-  const [isValid, modelMap] = await Promise.all([
-    validateUserKey(token),
-    getModelMapping(model, {
+  const preflightStart = Date.now();
+  const authStart = Date.now();
+  const authPromise = validateUserKey(token).then((isValid) => {
+    log.info('AUTH', 'Gateway key validated', { duration: Date.now() - authStart });
+    return isValid;
+  });
+  const routingStart = Date.now();
+  const routePromise = getModelMapping(model, {
       thinkingEnabled: isThinking,
       requestBody: body,
       userId: token,
-    })
-  ]);
+    }).then((route) => {
+      log.info('ROUTING', 'Model routing completed', {
+        duration: Date.now() - routingStart,
+        metadata: {
+          requestedModel: model,
+          resolvedModel: route.primary,
+          source: route.routingSource,
+          task: route.taskType,
+          version: route.routeVersion,
+        },
+      });
+      return route;
+    });
+  const [isValid, modelMap] = await Promise.all([authPromise, routePromise]);
+  log.info('ACTIVITY', 'Preflight completed', { duration: Date.now() - preflightStart });
 
   if (!isValid) {
     return NextResponse.json({ type: "error", error: { type: "authentication_error", message: "Invalid API key" } }, { status: 401 });
@@ -104,18 +122,19 @@ export async function POST(req: Request) {
   console.info(
     `[routing] requested=${model} resolved=${internalModel} source=${modelMap.routingSource ?? 'unknown'} task=${modelMap.taskType ?? 'unknown'} version=${modelMap.routeVersion ?? '0'}`,
   );
+  log.info('ROUTING', `Resolved ${model} → ${internalModel}`, {
+    metadata: { source: modelMap.routingSource, task: modelMap.taskType, version: modelMap.routeVersion },
+  });
 
   try {
-    // Mark orchestrator tasks as RUNNING before model call
-    await markOrchestrationRunning(orchCtx).catch(() => {});
-
     if (stream) {
       // Return response IMMEDIATELY to avoid platform "initial response" timeouts (e.g. 25s on Vercel)
       const usageRef: StreamUsage = { inputTokens: 0, outputTokens: 0 };
       
       // All heavy work (Redis lookups, transformation, and Gemini API call) happens 
       // inside transformStream AFTER it has yielded the first headers/chunks.
-      const transformIterator = transformStream(activeBody, model, internalModel, token, usageRef, modelMap);
+      const streamStart = Date.now();
+      const transformIterator = transformStream(body, model, internalModel, token, usageRef, modelMap, requestId);
 
       const streamBody = new ReadableStream({
         async start(controller) {
@@ -137,7 +156,7 @@ export async function POST(req: Request) {
               safeEnqueue(new TextEncoder().encode(chunk));
             }
           } catch (e) {
-            console.error("Stream error", e);
+            log.error('STREAM', errorOneLiner(e, 'stream-transform'));
             await incrementErrorCount({ model, userToken: token });
             safeEnqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
@@ -146,7 +165,7 @@ export async function POST(req: Request) {
             try { controller.close(); } catch {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
-            finalizeOrchestration(orchCtx, [], '', Date.now() - startTime).catch(() => {});
+            log.info('STREAM', 'Stream completed', { duration: Date.now() - streamStart });
             logActivity({
               ts: Date.now(),
               userKey: maskToken(token),
@@ -185,7 +204,9 @@ export async function POST(req: Request) {
       const toolIdMap = new Map<string, string>();
       const toolSchemas = new Map<string, any>();
       const originalToolNames = new Map<string, string>();
-      const { geminiBody, webSearchConfig } = await transformRequestToGemini(activeBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+      const transformStart = Date.now();
+      const { geminiBody, webSearchConfig } = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token, requestId);
+      log.info('ACTIVITY', 'Request transformed', { duration: Date.now() - transformStart });
 
       let geminiRes: any;
       if (webSearchConfig) {
@@ -198,14 +219,14 @@ export async function POST(req: Request) {
           callGemini: (b) => callGemini(internalModel, apiKey, b, false),
         });
       } else {
-        const res = await executeWithRetry(model, geminiBody, false, token, modelMap);
+        const res = await executeWithRetry(model, geminiBody, false, token, modelMap, requestId);
         geminiRes = await res.json();
       }
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames, internalModel);
 
       await recordLatency(Date.now() - startTime);
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
-      finalizeOrchestration(orchCtx, [], '', Date.now() - startTime).catch(() => {});
+      log.info('ACTIVITY', 'Request completed', { duration: Date.now() - startTime });
       logRequest({
         model,
         resolvedModel: internalModel,

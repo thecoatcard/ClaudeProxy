@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { validateAdminKey } from '@/lib/auth';
 import { redis } from '@/lib/redis';
+import { cachedAdminResponse } from '@/lib/admin-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -67,8 +68,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
   }
 
-  const today = utcDay();
-  const days = pastUtcDays(14);
+  const data = await cachedAdminResponse('admin:stats', async () => {
+    const today = utcDay();
+    const days = pastUtcDays(14);
 
   const [
     reqs,
@@ -136,7 +138,7 @@ export async function GET(req: Request) {
   const todayInput = toNumber(todayInTok);
   const todayOutput = toNumber(todayOutTok);
 
-  return NextResponse.json({
+  return {
     requests: toNumber(reqs),
     errors: toNumber(errs),
     avgLatency: avgLatencyMs(lats as any[]),
@@ -162,5 +164,8 @@ export async function GET(req: Request) {
       todayTokens: topEntries(todayModelsTok as any),
     },
     topUsersTodayByTokens: topEntries(todayUsersTok as any),
-  });
+  };
+  }); // end cachedAdminResponse
+
+  return NextResponse.json(data);
 }

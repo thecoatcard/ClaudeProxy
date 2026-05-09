@@ -1,4 +1,3 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyTaskType, getTaskModelChain } from '../lib/routing/task-router.js';
 
@@ -31,7 +30,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'LIGHT_CODING');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemini-2.5-flash-lite');
+    assert.equal(chain[0], 'gemini-3-flash-preview');  // Fast coding: lower latency model
   });
 
   test('health checks route to lite chain', () => {
@@ -51,6 +50,6 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'COMPACTION');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemma-4-31b-it');
+    assert.equal(chain[0], 'gemma-4-26b-a4b-it');  // Compaction primary: smaller Gemma (efficient)
   });
 });

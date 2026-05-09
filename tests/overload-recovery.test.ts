@@ -166,22 +166,22 @@ describe('detectTokenPressure', () => {
 });
 
 describe('computeOverloadBackoff', () => {
-  test('attempt 1 returns ~2s', () => {
+  test('attempt 1 returns ~500ms', () => {
     const ms = computeOverloadBackoff(1);
-    expect(ms).toBeGreaterThanOrEqual(2000);
-    expect(ms).toBeLessThan(3000);
+    expect(ms).toBeGreaterThanOrEqual(500);
+    expect(ms).toBeLessThan(1000);
   });
 
-  test('attempt 2 returns ~5s', () => {
+  test('attempt 2 returns ~1s', () => {
     const ms = computeOverloadBackoff(2);
-    expect(ms).toBeGreaterThanOrEqual(5000);
-    expect(ms).toBeLessThan(6000);
+    expect(ms).toBeGreaterThanOrEqual(1000);
+    expect(ms).toBeLessThan(1500);
   });
 
-  test('attempt 3+ returns ~10s', () => {
+  test('attempt 3+ returns ~2s', () => {
     const ms = computeOverloadBackoff(3);
-    expect(ms).toBeGreaterThanOrEqual(10000);
-    expect(ms).toBeLessThan(11000);
+    expect(ms).toBeGreaterThanOrEqual(2000);
+    expect(ms).toBeLessThan(2500);
   });
 });
 
@@ -197,7 +197,7 @@ describe('recoverFromOverload', () => {
     });
     expect(result.recovered).toBe(true);
     expect(result.newModel).toBeTruthy();
-    expect(result.backoffMs).toBeGreaterThanOrEqual(2000);
+    expect(result.backoffMs).toBeGreaterThanOrEqual(500);
   });
 
   test('recovery returns recovered=false when all models exhausted', async () => {

@@ -15,7 +15,7 @@ const mockRedis = {
   expire: jest.fn(),
 };
 jest.mock('@/lib/redis', () => ({ redis: mockRedis }));
-jest.mock('./embedding-engine', () => ({
+jest.mock('@/lib/memory/embedding-engine', () => ({
   cosineSimilarity: jest.fn((a: number[], b: number[]) => {
     let dot = 0, normA = 0, normB = 0;
     for (let i = 0; i < a.length; i++) {

@@ -14,6 +14,10 @@ function makeBody(text: string, toolCount = 0) {
 }
 
 describe('classifyComplexity', () => {
+  beforeEach(() => {
+    delete process.env.ENABLE_GATEWAY_ORCHESTRATOR;
+  });
+
   // ── TRIVIAL ────────────────────────────────────────────────────────────────
   test('ping message → TRIVIAL', () => {
     const result = classifyComplexity(makeBody('ping'));
@@ -35,19 +39,21 @@ describe('classifyComplexity', () => {
   test('small coding task → NORMAL', () => {
     const result = classifyComplexity(makeBody('add a helper function to utils.ts'));
     expect(result.level).toBe('NORMAL');
-    expect(result.orchestratorRequired).toBe(true);
+    expect(result.orchestratorRequired).toBe(false);
   });
 
   // ── COMPLEX ────────────────────────────────────────────────────────────────
   test('api keyword → COMPLEX', () => {
     const result = classifyComplexity(makeBody('add a REST api endpoint'));
     expect(result.level).toBe('COMPLEX');
-    expect(result.orchestratorRequired).toBe(true);
+    expect(result.orchestratorRequired).toBe(false);
   });
 
-  test('high tool count (≥3) → COMPLEX', () => {
+  test('high tool count does NOT force COMPLEX (removed tool-count logic)', () => {
     const result = classifyComplexity(makeBody('do something', 3));
-    expect(result.level).toBe('COMPLEX');
+    // Tool count no longer drives complexity — should be NORMAL (no complex keywords)
+    expect(result.level).toBe('NORMAL');
+    expect(result.reason).not.toMatch(/tool.count/i);
   });
 
   test('scaffold keyword → COMPLEX', () => {
@@ -59,7 +65,7 @@ describe('classifyComplexity', () => {
   test('build app from scratch → MULTI_STAGE', () => {
     const result = classifyComplexity(makeBody('build a full-stack app from scratch'));
     expect(result.level).toBe('MULTI_STAGE');
-    expect(result.orchestratorRequired).toBe(true);
+    expect(result.orchestratorRequired).toBe(false);
   });
 
   test('dashboard keyword → MULTI_STAGE', () => {
@@ -82,7 +88,7 @@ describe('classifyComplexity', () => {
     const result = classifyComplexity(makeBody('use subagents for this'));
     expect(result.level).toBe('MULTI_STAGE');
     expect(result.explicitOverride).toBe(true);
-    expect(result.orchestratorRequired).toBe(true);
+    expect(result.orchestratorRequired).toBe(false);
   });
 
   test('"switch to orchestrator" → MULTI_STAGE with explicitOverride', () => {
@@ -108,15 +114,20 @@ describe('classifyComplexity', () => {
     expect(requiresOrchestrator(makeBody('ping'))).toBe(false);
   });
 
-  test('requiresOrchestrator returns true for NORMAL', () => {
-    expect(requiresOrchestrator(makeBody('add a function'))).toBe(true);
+  test('requiresOrchestrator returns false for NORMAL by default', () => {
+    expect(requiresOrchestrator(makeBody('add a function'))).toBe(false);
   });
 
-  test('requiresOrchestrator returns true for COMPLEX', () => {
-    expect(requiresOrchestrator(makeBody('build an api endpoint'))).toBe(true);
+  test('requiresOrchestrator returns false for COMPLEX by default', () => {
+    expect(requiresOrchestrator(makeBody('build an api endpoint'))).toBe(false);
   });
 
-  test('requiresOrchestrator returns true for MULTI_STAGE', () => {
+  test('requiresOrchestrator returns false for MULTI_STAGE by default', () => {
+    expect(requiresOrchestrator(makeBody('create a full-stack app'))).toBe(false);
+  });
+
+  test('requiresOrchestrator returns true only when legacy gateway orchestrator is explicitly enabled', () => {
+    process.env.ENABLE_GATEWAY_ORCHESTRATOR = 'true';
     expect(requiresOrchestrator(makeBody('create a full-stack app'))).toBe(true);
   });
 });

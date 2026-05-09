@@ -164,6 +164,8 @@ export class RedisPipeline {
     return this;
   }
   ltrim(key: string, start: number, stop: number) { this._pipe.ltrim(key, start, stop); return this; }
+  lrange(key: string, start: number, stop: number) { this._pipe.lrange(key, start, stop); return this; }
+  exists(...keys: string[]) { this._pipe.exists(...keys); return this; }
 
   /** Execute the pipeline. Returns a plain array of results (Upstash-compatible). */
   async exec(): Promise<unknown[]> {
@@ -324,6 +326,12 @@ export class RedisClient {
 
   async ltrim(key: string, start: number, stop: number): Promise<string> {
     return getClient().ltrim(key, start, stop);
+  }
+
+  async scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (getClient() as any).scan(Number(cursor), ...args);
+    return result as [string, string[]];
   }
 
   // ── Pipeline ─────────────────────────────────────────────────────────────────

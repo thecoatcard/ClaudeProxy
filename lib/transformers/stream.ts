@@ -4,6 +4,7 @@ import { repairToolInput } from './repair';
 import { recoverActionText } from './action-recovery';
 import { setexBestEffort } from './metadata-persist';
 import { shouldRecoverActionText } from './adaptive-action-policy';
+import { withTimeout } from '../runtime/response-watchdog';
 
 export interface StreamUsage {
   inputTokens: number;
@@ -21,7 +22,8 @@ export async function* transformStream(
   internalModel: string,
   token: string,
   usageRef?: StreamUsage,
-  routePlan?: ModelRoute
+  routePlan?: ModelRoute,
+  requestId?: string,
 ) {
   const msgId = 'msg_' + nanoid(24);
   const toolIdMap = new Map<string, string>();
@@ -71,7 +73,7 @@ export async function* transformStream(
     let geminiReq: any;
     let webSearchConfig: import('./request').WebSearchConfig | null = null;
     try {
-      const transformed = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+      const transformed = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token, requestId);
       geminiReq = transformed.geminiBody;
       webSearchConfig = transformed.webSearchConfig;
     } catch (e: any) {
@@ -137,7 +139,7 @@ export async function* transformStream(
 
     let res: Response;
     try {
-      res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan);
+      res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan, requestId);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
       const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
@@ -171,7 +173,11 @@ export async function* transformStream(
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await withTimeout(
+          reader.read(),
+          30_000,
+          'stream-chunk-read',
+        );
         
         if (value) {
           buffer += decoder.decode(value, { stream: true });

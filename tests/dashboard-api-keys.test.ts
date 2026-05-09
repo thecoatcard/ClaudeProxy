@@ -4,7 +4,6 @@
  * Tests for bulk key validation and pool management endpoints.
  * Run: npx tsx --test tests/dashboard-api-keys.test.ts
  */
-import { describe, it, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 /**
  * lib/agent/task-complexity.ts
  *
- * Classify the complexity of an incoming task so the orchestrator layer
- * can decide whether to run in direct (linear) mode or coordinator mode.
+ * Classify task complexity for diagnostics. Gateway orchestration is disabled
+ * by default because Claude Code is the agent runtime.
  *
  * Levels:
  *   TRIVIAL    — single-step, no tools, no system changes
@@ -10,8 +10,10 @@
  *   COMPLEX    — multiple files / tools / systems
  *   MULTI_STAGE— full app build, refactor, architecture work
  *
- * Rule: NORMAL and above → orchestrator mode is MANDATORY.
+ * Rule: orchestration may only be required when ENABLE_GATEWAY_ORCHESTRATOR=true.
  */
+
+import { detectIntent, extractUserMessage } from './intent-detector';
 
 export type ComplexityLevel = 'TRIVIAL' | 'NORMAL' | 'COMPLEX' | 'MULTI_STAGE';
 
@@ -21,6 +23,14 @@ export interface ComplexityResult {
   orchestratorRequired: boolean;
   /** True when an explicit user override command was detected. */
   explicitOverride: boolean;
+}
+
+export function isGatewayOrchestratorEnabled(): boolean {
+  return process.env.ENABLE_GATEWAY_ORCHESTRATOR === 'true';
+}
+
+function orchestrationRequiredFor(nonTrivial: boolean): boolean {
+  return isGatewayOrchestratorEnabled() && nonTrivial;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +136,20 @@ function countToolsInRequest(requestBody: unknown): number {
 
 export function classifyComplexity(requestBody: unknown): ComplexityResult {
   const text = extractText(requestBody);
+  const userMessage = extractUserMessage(requestBody);
   const toolCount = countToolsInRequest(requestBody);
+
+  // --- TRIVIAL_CHAT: check intent on user message FIRST (before system prompt pollutes detection) ---
+  // But only if no tools are attached (tools indicate real work, not chat)
+  const intent = detectIntent(requestBody);
+  if (intent.intent === 'TRIVIAL_CHAT' && toolCount === 0) {
+    return {
+      level: 'TRIVIAL',
+      reason: `intent: ${intent.reason}`,
+      orchestratorRequired: false,
+      explicitOverride: false,
+    };
+  }
 
   // --- Explicit orchestrator override command ---
   for (const pattern of ORCHESTRATOR_OVERRIDE_PATTERNS) {
@@ -134,7 +157,7 @@ export function classifyComplexity(requestBody: unknown): ComplexityResult {
       return {
         level: 'MULTI_STAGE',
         reason: 'explicit-orchestrator-override',
-        orchestratorRequired: true,
+        orchestratorRequired: orchestrationRequiredFor(true),
         explicitOverride: true,
       };
     }
@@ -146,35 +169,30 @@ export function classifyComplexity(requestBody: unknown): ComplexityResult {
       return {
         level: 'MULTI_STAGE',
         reason: `multi-stage-keyword: ${pattern.source}`,
-        orchestratorRequired: true,
+        orchestratorRequired: orchestrationRequiredFor(true),
         explicitOverride: false,
       };
     }
   }
 
-  // --- COMPLEX detection (many tools or complexity keywords) ---
-  if (toolCount >= 3) {
-    return {
-      level: 'COMPLEX',
-      reason: `high-tool-count: ${toolCount}`,
-      orchestratorRequired: true,
-      explicitOverride: false,
-    };
-  }
+  // --- COMPLEX detection (complexity keywords — NOT tool count) ---
+  // Tool registry size is irrelevant to task complexity. A greeting with 20
+  // tools attached is still trivial. Complexity depends on user intent, scope,
+  // files involved, and task stages only.
   for (const pattern of COMPLEX_PATTERNS) {
     if (pattern.test(text)) {
       return {
         level: 'COMPLEX',
         reason: `complex-keyword: ${pattern.source}`,
-        orchestratorRequired: true,
+        orchestratorRequired: orchestrationRequiredFor(true),
         explicitOverride: false,
       };
     }
   }
 
-  // --- TRIVIAL detection ---
+  // --- TRIVIAL detection (on user message only) ---
   for (const pattern of TRIVIAL_PATTERNS) {
-    if (pattern.test(text.trim())) {
+    if (pattern.test(userMessage.trim())) {
       return {
         level: 'TRIVIAL',
         reason: `trivial-keyword: ${pattern.source}`,
@@ -188,7 +206,7 @@ export function classifyComplexity(requestBody: unknown): ComplexityResult {
   return {
     level: 'NORMAL',
     reason: 'default-normal',
-    orchestratorRequired: true,
+    orchestratorRequired: orchestrationRequiredFor(true),
     explicitOverride: false,
   };
 }
