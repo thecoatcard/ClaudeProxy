@@ -15,6 +15,7 @@ import { classifyFailure, formatStrategy } from './retry-strategy';
 import { detectPrematureCompletion } from './completion-gate';
 import { inspectHistoryPaths, buildPathGuidance } from './path-guard';
 import { validateSpec } from './spec-validator';
+import { buildAdaptiveBehaviorReminder } from '../transformers/adaptive-guidance';
 
 export interface BehaviorAuditResult {
   hasGuidance: boolean;
@@ -31,6 +32,7 @@ export interface BehaviorAuditResult {
 export async function runBehaviorAudit(
   messages: any[],
   systemText: string,
+  internalModel?: string,
 ): Promise<BehaviorAuditResult> {
   const guidanceParts: string[] = [];
   const diagnostics = {
@@ -42,7 +44,7 @@ export async function runBehaviorAudit(
   };
 
   // 1. Loop detection (highest priority — replaces previous standalone call).
-  const loopResult = detectFailureLoop(messages);
+  const loopResult = detectFailureLoop(messages, internalModel);
   if (loopResult.detected && loopResult.diagnostics) {
     diagnostics.loopDetected = true;
     diagnostics.loopRepeats = loopResult.diagnostics.repeats;
@@ -94,6 +96,9 @@ export async function runBehaviorAudit(
       if (specResult.guidance) guidanceParts.push(specResult.guidance);
     }
   }
+
+  const adaptiveReminder = buildAdaptiveBehaviorReminder(internalModel, guidanceParts.length > 0);
+  if (adaptiveReminder) guidanceParts.push(adaptiveReminder);
 
   const guidance = guidanceParts.join('\n');
   return {

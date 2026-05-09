@@ -3,6 +3,7 @@ import { mapStopReason } from './stop-reason';
 import { repairToolInput } from './repair';
 import { recoverActionText } from './action-recovery';
 import { setexBestEffort } from './metadata-persist';
+import { shouldRecoverActionText } from './adaptive-action-policy';
 
 export interface StreamUsage {
   inputTokens: number;
@@ -238,6 +239,7 @@ export async function* transformStream(
           while (true) {
             const recovered = recoverActionText(cleanedText);
             if (!recovered) break;
+            if (!shouldRecoverActionText(internalModel, cleanedText, recovered)) break;
 
             const originalName = originalToolNames.get(recovered.toolName) || recovered.toolName;
             const schema = toolSchemas?.get(originalName) || toolSchemas?.get(recovered.toolName);

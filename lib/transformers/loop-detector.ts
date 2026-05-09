@@ -20,7 +20,8 @@
 // The corrective fragment is appended to systemInstruction (NOT to user
 // turns, so the model treats it as authoritative guidance, not a new task).
 
-const MIN_REPEATS = 2; // 2nd identical failure → already a problem
+import { getAdaptiveLoopPolicy } from './adaptive-loop-policy';
+
 const ERROR_TEXT_PATTERNS = [
   /no such file or directory/i,
   /enoent/i,
@@ -123,13 +124,14 @@ function buildPairs(messages: any[]): ToolPair[] {
   return order.map(id => byId.get(id)!).filter(Boolean);
 }
 
-export function detectFailureLoop(messages: any[]): LoopDetectionResult {
+export function detectFailureLoop(messages: any[], internalModel?: string): LoopDetectionResult {
+  const policy = getAdaptiveLoopPolicy(internalModel);
   if (!Array.isArray(messages) || messages.length < 2) {
     return { detected: false, guidance: '', diagnostics: null };
   }
 
   const pairs = buildPairs(messages);
-  if (pairs.length < MIN_REPEATS) {
+  if (pairs.length < policy.minRepeats) {
     return { detected: false, guidance: '', diagnostics: null };
   }
 
@@ -153,7 +155,7 @@ export function detectFailureLoop(messages: any[]): LoopDetectionResult {
     }
   }
 
-  if (runCount < MIN_REPEATS || !lastFailed) {
+  if (runCount < policy.minRepeats || !lastFailed) {
     return { detected: false, guidance: '', diagnostics: null };
   }
 
@@ -170,6 +172,7 @@ export function detectFailureLoop(messages: any[]): LoopDetectionResult {
     '5. If you cannot determine a corrective action, stop calling tools and report the blocker in plain text to the user.',
     '',
     `Last error observed: ${lastFailed.errorText.slice(0, 240) || '(empty)'}`,
+    policy.extraGuidance,
     '---',
     '',
   ].join('\n');

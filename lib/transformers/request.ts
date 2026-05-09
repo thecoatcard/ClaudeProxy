@@ -9,6 +9,7 @@ import {
   ARCHIVE_KEEP_RECENT,
 } from '../tool-archive';
 import { runBehaviorAudit } from '../agent/behavior-auditor';
+import { getAdaptiveCompactionPolicy } from './adaptive-compaction-policy';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 // Per-model max output token ceilings (Gemini rejects values above these).
@@ -32,6 +33,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const SUMMARY_TTL_SECONDS = Number(process.env.CONTEXT_SUMMARY_TTL || 21600); // 6h
 const DEFAULT_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS || 90000);
 const LITE_COMPACTION_TARGET_TOKENS = Number(process.env.CONTEXT_COMPACTION_TARGET_TOKENS_LITE || 65000);
+const DEFAULT_SUMMARY_CHAR_BUDGET = Number(process.env.CONTEXT_SUMMARY_CHAR_BUDGET || 3000);
 // Max chars of a single tool result before it is truncated.
 // Claude Code's Read tool can return 500KB+ files. Without a cap these blow
 // the context window in 2-3 turns. Default = ~40k chars ≈ 10k tokens.
@@ -125,6 +127,13 @@ export async function transformRequestToGemini(
 ) {
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
+  const baseKeepLastN = Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20);
+  const compactionPolicy = getAdaptiveCompactionPolicy(
+    internalModel,
+    getCompactionTargetTokens(internalModel),
+    baseKeepLastN,
+    DEFAULT_SUMMARY_CHAR_BUDGET,
+  );
 
   if (Array.isArray(anthropicReq.messages)) {
     // Pipeline initial metadata lookups to save RTT
@@ -134,11 +143,13 @@ export async function transformRequestToGemini(
     ]);
 
     const compaction = await compactMessagesDetailed(anthropicReq.messages, {
-      maxTokensApprox: getCompactionTargetTokens(internalModel),
+      maxTokensApprox: compactionPolicy.maxTokensApprox,
       maxMessages: Number(process.env.CONTEXT_COMPACTION_MAX_MESSAGES || 60),
       keepFirstN: Number(process.env.CONTEXT_COMPACTION_KEEP_FIRST || 2),
-      keepLastN: Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20),
+      keepLastN: compactionPolicy.keepLastN,
       rollingSummary: typeof rollingSummary === 'string' ? rollingSummary : '',
+      summaryCharBudget: compactionPolicy.summaryCharBudget,
+      failureAnchorDepth: compactionPolicy.failureAnchorDepth,
       apiKey: systemKey?.key,
       model: 'gemma-4-31b-it',
     });
@@ -178,7 +189,7 @@ export async function transformRequestToGemini(
   // ── Behavior auditor ────────────────────────────────────────────────────
   // Runs all agent-behavior checks: loop detection, completion gate, path
   // guard, spec validator. Appends combined guidance to systemInstruction.
-  const auditResult = await runBehaviorAudit(anthropicReq.messages || [], systemText);
+  const auditResult = await runBehaviorAudit(anthropicReq.messages || [], systemText, internalModel);
   if (auditResult.hasGuidance) {
     systemText = (systemText ? systemText + '\n' : '') + auditResult.guidance;
   }
@@ -337,10 +348,14 @@ export async function transformRequestToGemini(
             );
           }
 
+          const isFailure = block.is_error === true;
+
           parts.push({
             functionResponse: {
               name: fnName,
-              response: { result: resultText },
+              response: isFailure
+                ? { ok: false, error: resultText }
+                : { ok: true, result: resultText },
             },
           });
         }

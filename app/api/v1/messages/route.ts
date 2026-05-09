@@ -157,7 +157,7 @@ export async function POST(req: Request) {
       
       const res = await executeWithRetry(model, geminiReq, false, token, modelMap);
       const geminiRes = await res.json();
-      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames);
+      const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames, internalModel);
 
       await recordLatency(Date.now() - startTime);
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });

@@ -3,13 +3,15 @@ import { nanoid } from 'nanoid';
 import { repairToolInput } from './repair';
 import { recoverActionText } from './action-recovery';
 import { setexBestEffort } from './metadata-persist';
+import { shouldRecoverActionText } from './adaptive-action-policy';
 
 export async function transformGeminiToAnthropic(
   geminiRes: any,
   reqModel: string,
   toolIdMap: Map<string, string>,
   toolSchemas?: Map<string, any>,
-  originalToolNames?: Map<string, string>
+  originalToolNames?: Map<string, string>,
+  internalModel?: string,
 ) {
   const candidate = geminiRes.candidates?.[0];
   if (!candidate) {
@@ -39,6 +41,7 @@ export async function transformGeminiToAnthropic(
       while (true) {
         const recovered = recoverActionText(cleanedText);
         if (!recovered) break;
+        if (!shouldRecoverActionText(internalModel, cleanedText, recovered)) break;
 
         const before = cleanedText.slice(0, recovered.start).trim();
         if (before) contentBlocks.push({ type: 'text', text: before });

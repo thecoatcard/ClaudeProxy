@@ -3,15 +3,27 @@
 ## Commands
 
 - npx tsc --noEmit
-- npx tsx --test tests/behavioral-tests.ts tests/tool-structure.test.ts tests/context-compaction.test.ts
+- npx tsx --test tests/behavioral-tests.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts
 
 ## Outcome
 
 - TypeScript check: PASS
-- Test suites: 11
-- Total tests: 65
-- Passed: 65
+- Test suites: 12
+- Total tests: 71
+- Passed: 71
 - Failed: 0
+
+## Adaptive Coverage Added
+
+### Model-adaptive policies
+
+- profile selection differs by model family
+- strong models use lighter loop intervention
+- weaker models use stronger loop intervention
+- strong context models compact later
+- weaker context models preserve more recent turns and deeper failure anchoring
+- guidance strength changes by model capability
+- action-text recovery aggressiveness changes by model capability
 
 ## Key Coverage Added
 

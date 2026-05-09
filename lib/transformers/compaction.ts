@@ -10,6 +10,7 @@ export interface CompactionOptions {
   keepLastN?: number;
   rollingSummary?: string;
   summaryCharBudget?: number;
+  failureAnchorDepth?: number;
   // If provided, used to call AI for semantic summarization
   apiKey?: string;
   model?: string;
@@ -31,6 +32,7 @@ const DEFAULT_OPTIONS: CompactionOptions = {
   keepFirstN: 2,           
   keepLastN: 14,           
   summaryCharBudget: 3000,
+  failureAnchorDepth: 3,
 };
 
 // Realistic token weights
@@ -329,6 +331,7 @@ export async function compactMessagesDetailed(
     keepLastN = DEFAULT_OPTIONS.keepLastN!,
     rollingSummary = '',
     summaryCharBudget = DEFAULT_OPTIONS.summaryCharBudget!,
+    failureAnchorDepth = DEFAULT_OPTIONS.failureAnchorDepth!,
   } = options;
 
   const estimatedTokensBefore = estimateTokens(messages);
@@ -353,7 +356,7 @@ export async function compactMessagesDetailed(
   lastPartStart = findSafeBoundary(messages, lastPartStart);
 
   // Preserve recent failure chains so retries remain grounded in actual errors.
-  const failureAnchor = findRecentFailureAnchor(messages, lastPartStart, 3);
+  const failureAnchor = findRecentFailureAnchor(messages, lastPartStart, failureAnchorDepth);
   if (failureAnchor != null) {
     lastPartStart = Math.min(lastPartStart, failureAnchor);
   }
