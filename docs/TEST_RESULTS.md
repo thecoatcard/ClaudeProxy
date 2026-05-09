@@ -1,6 +1,46 @@
 # TEST_RESULTS.md
 
-## Routing Persistence + Adaptive Rotation — Test Run
+## Embedding Memory System — Test Run
+
+**61 new tests passing | 6 new suites | 0 failures**
+
+### New Test Files (61 tests)
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| `embedding-engine.test.ts` | 11 | PASS |
+| `vector-index.test.ts` | 11 | PASS |
+| `incremental-embedding.test.ts` | 10 | PASS |
+| `retrieval-pipeline.test.ts` | 11 | PASS |
+| `context-priority.test.ts` | 9 | PASS |
+| `memory-integration.test.ts` | 8 | PASS |
+
+### TypeScript
+
+`npx tsc --noEmit` — 0 errors in new files (2 pre-existing errors in `fallback-overload.test.ts`)
+
+---
+
+## Overload Recovery Pipeline — Test Run
+
+**147 tests passing | 0 failures | 17 suites pass**
+
+### New Test Files (39 tests)
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| `overload-recovery.test.ts` | 27 | PASS |
+| `key-rotation-overload.test.ts` | 4 | PASS |
+| `fallback-overload.test.ts` | 4 | PASS |
+| `subagent-resume.test.ts` | 6 | PASS |
+
+### TypeScript
+
+`npx tsc --noEmit` — 0 errors
+
+---
+
+## Previous: Routing Persistence + Adaptive Rotation — Test Run
 
 **9 tests | 0 failures | 3 suites**
 

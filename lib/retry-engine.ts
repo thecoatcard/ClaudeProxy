@@ -19,6 +19,7 @@ import {
   compactBodyForOverload,
   detectTokenPressure,
   computeOverloadBackoff,
+  RECOVERY_CHAIN_SIZE,
 } from './recovery/overload-recovery';
 
 // Models that can't see images. We strip inlineData/fileData parts before
@@ -324,7 +325,9 @@ export async function executeWithRetry(
         }
 
         // Fast-exit: every model in the chain has now returned 503 at least once.
-        if (overloadedModels.size === 1 + fallbacks.length) {
+        // Use the larger of router chain and recovery chain to avoid premature exit.
+        const totalAvailableModels = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
+        if (overloadedModels.size >= totalAvailableModels) {
           console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded — failing fast after ${attempt} attempt(s).`);
           break;
         }
@@ -369,7 +372,8 @@ export async function executeWithRetry(
             console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_error status=${res.status})`);
           }
 
-          if (overloadedModels.size === 1 + fallbacks.length) {
+          const totalAvailableModels2 = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
+          if (overloadedModels.size >= totalAvailableModels2) {
             console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded (body parse) — failing fast.`);
             break;
           }

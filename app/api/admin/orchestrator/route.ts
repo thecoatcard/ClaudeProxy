@@ -19,6 +19,8 @@ const MODELS = [
   'gemma-4-26b-a4b-it',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
 ];
 
 const TASK_TYPES = ['PLANNER', 'CODER', 'VERIFIER', 'MERGER', 'GENERIC'] as const;

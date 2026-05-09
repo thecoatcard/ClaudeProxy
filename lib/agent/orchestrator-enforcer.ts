@@ -44,6 +44,7 @@ import {
   checkOrchestrationDedup,
   registerOrchestrationFingerprint,
 } from './orchestrator-lock';
+import { recordSubagentPerformance, type SubagentRole } from './subagent-performance';
 
 // ---------------------------------------------------------------------------
 // Model assignments per role
@@ -197,6 +198,17 @@ export async function prepareOrchestration(
 }
 
 /**
+ * Mark all subagent tasks as RUNNING when the actual model call begins.
+ * Call this just before executeWithRetry / transformStream.
+ */
+export async function markOrchestrationRunning(ctx: OrchestratorContext): Promise<void> {
+  if (!ctx.orchestratorEnabled) return;
+  for (const task of ctx.subagentTasks) {
+    await updateSubagentStatus(task.id, 'RUNNING').catch(() => {});
+  }
+}
+
+/**
  * Finalise orchestration after the model call completes.
  * Phase 7: Persists final output and closes the orchestration (COMPLETED).
  * Phase 9: Stream-safe — calling this after stream end prevents re-entry.
@@ -204,12 +216,23 @@ export async function prepareOrchestration(
 export async function finalizeOrchestration(
   ctx: OrchestratorContext,
   artifacts: string[] = [],
-  finalOutput = ''
+  finalOutput = '',
+  latencyMs = 0
 ): Promise<void> {
   if (!ctx.orchestratorEnabled) return;
 
   for (const task of ctx.subagentTasks) {
     await updateSubagentStatus(task.id, 'COMPLETED', artifacts).catch(() => {});
+    // Record performance data for dashboard metrics
+    const role = inferRoleFromDescription(task.description);
+    await recordSubagentPerformance({
+      model: task.model,
+      taskType: role,
+      latencyMs: latencyMs || (Date.now() - task.createdAt),
+      inputTokens: 0,
+      outputTokens: 0,
+      success: true,
+    }).catch(() => {});
   }
 
   // Phase 7: Persist final output and transition to COMPLETED (prevents reopen)
@@ -360,6 +383,16 @@ function injectOrchestratorPrompt(
       ? `${existing}\n\n${ORCHESTRATOR_SYSTEM_INJECTION}`
       : ORCHESTRATOR_SYSTEM_INJECTION,
   };
+}
+
+/** Map task description to a SubagentRole for performance tracking. */
+function inferRoleFromDescription(description: string): SubagentRole {
+  const d = description.toLowerCase();
+  if (d.includes('plan') || d.includes('decompose')) return 'PLANNER';
+  if (d.includes('coding') || d.includes('code') || d.includes('execute')) return 'CODER';
+  if (d.includes('verify') || d.includes('check')) return 'VERIFIER';
+  if (d.includes('merge')) return 'MERGER';
+  return 'GENERIC';
 }
 
 async function createSubagentStubs(

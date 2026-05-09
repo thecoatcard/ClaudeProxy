@@ -13,7 +13,7 @@ import { runWithWebSearch } from '@/lib/tools/search-executor';
 import { callGemini } from '@/lib/gemini-adapter';
 import { getHealthiestKeyObj } from '@/lib/key-manager';
 import { logActivity, maskToken } from '@/lib/activity';
-import { prepareOrchestration, finalizeOrchestration } from '@/lib/agent/orchestrator-enforcer';
+import { prepareOrchestration, finalizeOrchestration, markOrchestrationRunning } from '@/lib/agent/orchestrator-enforcer';
 
 // Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
 export const runtime = 'nodejs';
@@ -106,6 +106,9 @@ export async function POST(req: Request) {
   );
 
   try {
+    // Mark orchestrator tasks as RUNNING before model call
+    await markOrchestrationRunning(orchCtx).catch(() => {});
+
     if (stream) {
       // Return response IMMEDIATELY to avoid platform "initial response" timeouts (e.g. 25s on Vercel)
       const usageRef: StreamUsage = { inputTokens: 0, outputTokens: 0 };
@@ -143,7 +146,7 @@ export async function POST(req: Request) {
             try { controller.close(); } catch {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
-            finalizeOrchestration(orchCtx).catch(() => {});
+            finalizeOrchestration(orchCtx, [], '', Date.now() - startTime).catch(() => {});
             logActivity({
               ts: Date.now(),
               userKey: maskToken(token),
@@ -202,7 +205,7 @@ export async function POST(req: Request) {
 
       await recordLatency(Date.now() - startTime);
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
-      finalizeOrchestration(orchCtx).catch(() => {});
+      finalizeOrchestration(orchCtx, [], '', Date.now() - startTime).catch(() => {});
       logRequest({
         model,
         resolvedModel: internalModel,

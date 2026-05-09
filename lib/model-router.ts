@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { redis } from './redis';
 import { classifyTaskType, getTaskModelChain, type TaskType } from './routing/task-router';
+import { normalizeModelName } from './models/capability-profile';
 
 export interface ModelRoute {
   primary: string;
@@ -84,10 +85,6 @@ let redisClient: RedisLike = redis;
 let registryCache: RoutingRegistryCache | null = null;
 let localRegistryCache: Record<string, ModelRoute> | null = null;
 
-function normalizeModelName(rawModel: string): string {
-  if (!rawModel) return rawModel;
-  return rawModel.trim().toLowerCase();
-}
 
 function dedupeChain(models: string[]): string[] {
   const seen = new Set<string>();

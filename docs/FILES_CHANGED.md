@@ -2,6 +2,76 @@
 
 ---
 
+## Session: Embedding Memory System + Dead Code Cleanup
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `lib/memory/embedding-engine.ts` | Google text-embedding-004 integration |
+| `lib/memory/file-ingestion.ts` | Project file scanner for embedding |
+| `lib/memory/vector-index.ts` | In-memory vector index with disk persistence |
+| `lib/memory/incremental-embedding.ts` | SHA-256 hash-based change detection |
+| `lib/memory/summary-memory.ts` | Task + error summary embedding |
+| `lib/memory/retrieval-pipeline.ts` | Query → embed → search → inject pipeline |
+| `lib/memory/context-priority.ts` | Priority-ordered context merging |
+| `lib/memory/subagent-retrieval.ts` | Role-scoped retrieval for subagents |
+| `tests/embedding-engine.test.ts` | 11 tests |
+| `tests/vector-index.test.ts` | 11 tests |
+| `tests/incremental-embedding.test.ts` | 10 tests |
+| `tests/retrieval-pipeline.test.ts` | 11 tests |
+| `tests/context-priority.test.ts` | 9 tests |
+| `tests/memory-integration.test.ts` | 8 tests (integration) |
+| `.coatcard/` directory structure | Project-scoped persistent memory |
+| `docs/EMBEDDING_MEMORY_REPORT.md` | Full system report |
+| `docs/FILES_REMOVED.md` | Dead code removal log |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `lib/model-router.ts` | Removed duplicate `normalizeModelName()`; imports from capability-profile |
+| `.gitignore` | Added `.coatcard/` exclusions |
+
+### Removed Files
+
+| File | Reason |
+|------|---------|
+| `lib/reasoning/gemma-helper.ts` | Dead — 6 unused exports |
+| `tests/gemma-helper.test.ts` | Test for dead code |
+| `src/` directory | Stale duplicate |
+| `store/auth.ts` | Unused Zustand store |
+| `test-compaction-fixed.ts` | Dev-only script |
+| `test-gemini-history.mjs` | Dev-only script |
+| `test-gemini-tool-call.mjs` | Dev-only script |
+| `test-gemma.mjs` | Dev-only script |
+| `lib/scripts/` | Empty directory |
+| `scratch/` | Empty directory |
+
+---
+
+## Session: Overload Recovery Pipeline
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `lib/recovery/overload-recovery.ts` | Central overload recovery module |
+| `tests/overload-recovery.test.ts` | 27 tests |
+| `tests/key-rotation-overload.test.ts` | 4 tests |
+| `tests/fallback-overload.test.ts` | 4 tests |
+| `tests/subagent-resume.test.ts` | 6 tests |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `lib/retry-engine.ts` | Wired overload recovery pipeline at 4 integration points |
+| `lib/agent/orchestrator-enforcer.ts` | Added `resumeOrchestratedExecution()` |
+| `tests/orchestrator-dedupe.test.ts` | Removed unused import |
+
+---
+
 ## Session: Orchestrator Enforcement + Model Router Fix (2026-05-09)
 
 ### New Files

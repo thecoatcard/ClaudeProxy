@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# project memory (local embeddings)
+.coatcard/embeddings/
+.coatcard/retrieval-index/
+.coatcard/artifacts/
+.coatcard/operational-state/

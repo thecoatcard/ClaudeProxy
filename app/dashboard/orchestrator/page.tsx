@@ -54,22 +54,21 @@ function ms(v: number | null) {
 export default function OrchestratorPage() {
   const [data, setData] = useState<OrchestratorData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [adminKey, setAdminKey] = useState('');
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [auth, setAuth] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
-    if (!adminKey) return;
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/admin/orchestrator', {
-        headers: { 'x-admin-key': adminKey },
-      });
+      const res = await fetch('/api/admin/orchestrator', { cache: 'no-store' });
       if (!res.ok) {
-        setError(res.status === 401 ? 'Invalid admin key' : 'Failed to load');
+        if (res.status === 401) setAuth(false);
+        setError(res.status === 401 ? 'Not authenticated — please sign in from the sidebar' : 'Failed to load');
         return;
       }
+      setAuth(true);
       const json: OrchestratorData = await res.json();
       setData(json);
     } catch {
@@ -77,18 +76,18 @@ export default function OrchestratorPage() {
     } finally {
       setLoading(false);
     }
-  }, [adminKey]);
+  }, []);
 
   useEffect(() => {
-    if (adminKey) load();
-  }, [adminKey, load]);
+    load();
+  }, [load]);
 
   // Auto-refresh every 10s
   useEffect(() => {
-    if (!adminKey) return;
+    if (auth === false) return;
     const id = setInterval(load, 10_000);
     return () => clearInterval(id);
-  }, [adminKey, load]);
+  }, [auth, load]);
 
   return (
     <div style={{ padding: '24px', maxWidth: '1100px', margin: '0 auto' }}>
@@ -96,25 +95,11 @@ export default function OrchestratorPage() {
         🤖 Orchestrator Monitor
       </h1>
 
-      {/* Admin key input */}
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
-        <input
-          type="password"
-          placeholder="Admin Key"
-          value={adminKey}
-          onChange={(e) => setAdminKey(e.target.value)}
-          style={{
-            flex: 1,
-            padding: '8px 12px',
-            borderRadius: '6px',
-            border: '1px solid #334155',
-            background: '#0f172a',
-            color: '#e2e8f0',
-          }}
-        />
+      {/* Refresh button */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', alignItems: 'center' }}>
         <button
           onClick={load}
-          disabled={loading || !adminKey}
+          disabled={loading}
           style={{
             padding: '8px 20px',
             borderRadius: '6px',
@@ -124,8 +109,13 @@ export default function OrchestratorPage() {
             cursor: 'pointer',
           }}
         >
-          {loading ? 'Loading…' : 'Refresh'}
+          {loading ? 'Loading…' : '↻ Refresh'}
         </button>
+        {auth === false && (
+          <span style={{ color: '#f87171', fontSize: '0.85rem' }}>
+            Sign in from the sidebar to view orchestrator data
+          </span>
+        )}
       </div>
 
       {error && (

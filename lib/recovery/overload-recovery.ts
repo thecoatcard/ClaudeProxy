@@ -55,6 +55,9 @@ const OVERLOAD_FALLBACK_CHAIN: string[] = [
   'gemma-4-31b-it',
 ];
 
+/** Total number of distinct models in the recovery fallback chain. */
+export const RECOVERY_CHAIN_SIZE = OVERLOAD_FALLBACK_CHAIN.length;
+
 /**
  * Returns the next model in the priority chain that hasn't been tried.
  * Returns null when all models are exhausted.
@@ -76,7 +79,7 @@ export function getNextFallbackModel(
 // ---------------------------------------------------------------------------
 
 const KEY_OVERLOAD_COOLDOWN_KEY = (keyId: string) => `key:overload:cooldown:${keyId}`;
-const KEY_OVERLOAD_COOLDOWN_SECS = 30; // 30s cooldown after overload
+const KEY_OVERLOAD_COOLDOWN_SECS = 10; // 10s cooldown (was 30s — too aggressive with few keys)
 
 /**
  * Mark a key as overloaded — puts it on cooldown so getHealthiestKeyObj
@@ -275,8 +278,11 @@ export async function recoverFromOverload(opts: {
     triedModels: [...triedModels],
   });
 
-  // Step 1: Cooldown the overloaded key
-  await cooldownOverloadedKey(currentKeyId);
+  // Step 1: Cooldown the overloaded key (skip if already cooled)
+  const alreadyCooled = await (redis as any).get(KEY_OVERLOAD_COOLDOWN_KEY(currentKeyId)).catch(() => null);
+  if (!alreadyCooled) {
+    await cooldownOverloadedKey(currentKeyId);
+  }
 
   // Step 2: Detect if compaction would help
   const pressure = detectTokenPressure(body);
