@@ -4,6 +4,12 @@ import { useEffect, useMemo, useState } from 'react';
 
 type RouteConfig = { primary: string; fallback: string[] };
 type Routes = Record<string, RouteConfig>;
+type RoutingDiagnostics = {
+  source: 'redis' | 'local' | 'hardcoded';
+  version: string;
+  aliases: number;
+  loadedAt: number;
+};
 
 export default function ModelsPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -11,6 +17,8 @@ export default function ModelsPage() {
   const [routes, setRoutes] = useState<Routes>({});
   const [jsonMode, setJsonMode] = useState(false);
   const [jsonValue, setJsonValue] = useState('');
+  const [saveMessage, setSaveMessage] = useState('');
+  const [routingDiagnostics, setRoutingDiagnostics] = useState<RoutingDiagnostics | null>(null);
 
   const [alias, setAlias] = useState('');
   const [primary, setPrimary] = useState('');
@@ -22,6 +30,7 @@ export default function ModelsPage() {
       const data = await res.json();
       setRoutes(data.models || {});
       setJsonValue(JSON.stringify(data.models || {}, null, 2));
+      setRoutingDiagnostics(data.routing || null);
     }
   };
 
@@ -40,6 +49,7 @@ export default function ModelsPage() {
   }, []);
 
   const saveRoutes = async (nextRoutes: Routes) => {
+    setSaveMessage('');
     const res = await fetch('/api/admin/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -49,8 +59,12 @@ export default function ModelsPage() {
       alert('Failed to save model routes');
       return false;
     }
+    const data = await res.json();
     setRoutes(nextRoutes);
     setJsonValue(JSON.stringify(nextRoutes, null, 2));
+    setRoutingDiagnostics(data.routing || null);
+    setSaveMessage(data.message || 'Routing saved and reloaded successfully.');
+    await fetchRoutes();
     return true;
   };
 
@@ -146,6 +160,18 @@ export default function ModelsPage() {
           <p className="kpi-subtle">Configured per alias for reliability.</p>
         </article>
       </section>
+
+      {routingDiagnostics && (
+        <section className="panel">
+          <div className="panel-header">
+            <h2 className="section-title">Live Routing Status</h2>
+          </div>
+          <p className="muted-text">
+            Source: <strong>{routingDiagnostics.source}</strong> · Version: <strong>{routingDiagnostics.version}</strong> · Loaded aliases: <strong>{routingDiagnostics.aliases}</strong>
+          </p>
+          {saveMessage && <p className="muted-text"><strong>{saveMessage}</strong></p>}
+        </section>
+      )}
 
       {jsonMode ? (
         <section className="panel">

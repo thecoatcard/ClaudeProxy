@@ -95,6 +95,9 @@ export async function POST(req: Request) {
   await incrementRequestCount({ model, userToken: token });
 
   const internalModel = modelMap.primary;
+  console.info(
+    `[routing] requested=${model} resolved=${internalModel} source=${modelMap.routingSource ?? 'unknown'} task=${modelMap.taskType ?? 'unknown'} version=${modelMap.routeVersion ?? '0'}`,
+  );
 
   try {
     if (stream) {
@@ -194,6 +197,11 @@ export async function POST(req: Request) {
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
       logRequest({
         model,
+        resolvedModel: internalModel,
+        routingSource: modelMap.routingSource,
+        routeVersion: modelMap.routeVersion,
+        taskType: modelMap.taskType,
+        taskReason: modelMap.taskReason,
         stream: false,
         latency: Date.now() - startTime,
         status: 200
@@ -210,6 +218,10 @@ export async function POST(req: Request) {
         status: 'success',
         streaming: false,
         fallback: modelMap.primary !== internalModel,
+        routingSource: modelMap.routingSource,
+        routeVersion: modelMap.routeVersion,
+        taskType: modelMap.taskType,
+        taskReason: modelMap.taskReason,
         toolsUsed: (anthropicRes.content ?? []).filter((b: { type: string }) => b.type === 'tool_use').length,
       }).catch(() => {});
 

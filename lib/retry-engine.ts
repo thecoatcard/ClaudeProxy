@@ -1,5 +1,5 @@
 import { getHealthiestKeyObj, reportKeyFailure, recordKeyUsage } from './key-manager';
-import { getModelMapping } from './model-router';
+import { buildStickyRouteKey, getModelMapping } from './model-router';
 import type { ModelRoute } from './model-router';
 import { callGemini } from './gemini-adapter';
 import { redis } from './redis';
@@ -83,10 +83,16 @@ function computeBackoffMs(attempt: number): number {
   return base + jitter;
 }
 
-async function rememberLastWorkingModel(userId: string | undefined, anthropicModel: string, internalModel: string) {
+async function rememberLastWorkingModel(
+  userId: string | undefined,
+  anthropicModel: string,
+  internalModel: string,
+  routeVersion?: string,
+) {
   if (!userId) return;
   try {
-    await redis.set(`route:last:${userId}:${anthropicModel.toLowerCase()}`, internalModel, { ex: 1800 });
+    const stickyKey = buildStickyRouteKey(userId, anthropicModel, routeVersion ?? '0');
+    await redis.set(stickyKey, internalModel, { ex: 1800 });
   } catch {
     // Best-effort only.
   }
@@ -263,7 +269,9 @@ export async function executeWithRetry(
         // same overloaded model a second time on a different key; it's the model
         // tier that's under load, not the key.
         if (fallbackIndex < fallbacks.length) {
+          const prev = currentInternalModel;
           currentInternalModel = fallbacks[fallbackIndex++];
+          console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_overload status=${res.status})`);
         }
 
         // Fast-exit: every model in the chain has now returned 503 at least once.
@@ -291,7 +299,9 @@ export async function executeWithRetry(
           overloadedModels.add(currentInternalModel);
 
           if (fallbackIndex < fallbacks.length) {
+            const prev = currentInternalModel;
             currentInternalModel = fallbacks[fallbackIndex++];
+            console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_error status=${res.status})`);
           }
 
           if (overloadedModels.size === 1 + fallbacks.length) {
@@ -372,8 +382,10 @@ export async function executeWithRetry(
           } else if (hasThinking && !stripThinking) {
             stripThinking = true;
           } else if (fallbackIndex < fallbacks.length) {
+            const prev = currentInternalModel;
             currentInternalModel = fallbacks[fallbackIndex];
             fallbackIndex++;
+            console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=bad_request_400)`);
           }
 
           lastError = { status: 400, message: msg };
@@ -386,15 +398,17 @@ export async function executeWithRetry(
 
       // Success
       await recordKeyUsage(keyObj.id);
-      await rememberLastWorkingModel(userId, anthropicModel, currentInternalModel);
+      await rememberLastWorkingModel(userId, anthropicModel, currentInternalModel, modelMap.routeVersion);
       return res;
     } catch (err: any) {
       if (err.message === 'overloaded_error') throw err;
       
       // If it's a 400 (likely safety or bad request), try one more time with a fallback model
       if (err.status === 400 && fallbackIndex < fallbacks.length) {
+        const prev = currentInternalModel;
         currentInternalModel = fallbacks[fallbackIndex];
         fallbackIndex++;
+        console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=exception_400)`);
         lastError = err;
         await sleep(computeBackoffMs(attempt));
         continue;

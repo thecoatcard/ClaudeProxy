@@ -2,6 +2,47 @@
 
 ---
 
+## Session: Routing Persistence + Adaptive Model Rotation
+
+### New Files
+
+- **lib/routing/task-router.ts** — Task classification + model chains (`REASONING`, `HEAVY_CODING`, `LIGHT_CODING`, `HEALTH_CHECK`, `COMPACTION`).
+
+- **lib/routing/default-model-routing.json** — Local default registry used when Redis is unavailable.
+
+- **tests/routing-registry.test.ts** — Redis precedence and dashboard-save runtime effect tests.
+
+- **tests/routing-cache.test.ts** — Version bump, force reload, in-memory invalidation tests.
+
+- **tests/task-router.test.ts** — Task classification and model-chain selection tests.
+
+- **MODEL_ROUTING_FIX_REPORT.md** — Root cause and end-to-end fix notes.
+
+- **ROUTING_CACHE_REPORT.md** — Cache invalidation strategy and behavior.
+
+- **TASK_ROUTING_REPORT.md** — Task-aware routing strategy and task/model mapping.
+
+### Modified Files
+
+- **lib/model-router.ts** — Rebuilt routing pipeline:
+  Redis → local JSON → hardcoded fallback priority,
+  versioned registry cache, `forceReloadRouting()`,
+  `saveRoutingRegistry()`, `getRoutingDiagnostics()`,
+  version-scoped sticky key (`route:last:v{version}:...`),
+  task-aware routing integration.
+
+- **app/api/admin/models/route.ts** — Uses centralized router save/load functions and returns live reload diagnostics.
+
+- **app/dashboard/models/page.tsx** — Save confirmation + live routing status panel (source/version/alias count).
+
+- **lib/retry-engine.ts** — Version-aware sticky persistence and explicit fallback-reason logs.
+
+- **app/api/v1/messages/route.ts** — Added routing resolution logs (requested/resolved/source/task/version) and activity telemetry enrichment.
+
+- **lib/activity.ts** — Added optional routing telemetry fields.
+
+---
+
 ## Session: Behavior System Upgrade — Phases 1–9
 
 ### New Files

@@ -22,6 +22,10 @@ export interface ActivityEntry {
   streaming: boolean;
   fallback: boolean;
   toolsUsed: number;
+  routingSource?: 'redis' | 'local' | 'hardcoded';
+  routeVersion?: string;
+  taskType?: string;
+  taskReason?: string;
 }
 
 /** Mask a key token: keep first 8 and last 4 chars. */

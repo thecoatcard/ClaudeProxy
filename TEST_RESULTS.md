@@ -1,5 +1,21 @@
 # TEST_RESULTS.md
 
+## Routing Persistence + Adaptive Rotation — Test Run
+
+**9 tests | 0 failures | 3 suites**
+
+```
+npx tsx --test tests/routing-registry.test.ts tests/routing-cache.test.ts tests/task-router.test.ts
+```
+
+```
+ℹ tests 9  |  ℹ pass 9  |  ℹ fail 0  |  ℹ duration_ms 2832
+```
+
+TypeScript: `npx tsc --noEmit` → zero errors.
+
+---
+
 ## Behavior System Upgrade — Test Run (Phases 5–9)
 
 **46 tests | 0 failures | 14 suites**
