@@ -8,6 +8,7 @@ import {
   ARCHIVE_THRESHOLD_CHARS,
   ARCHIVE_KEEP_RECENT,
 } from '../tool-archive';
+import { detectFailureLoop } from './loop-detector';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 // Per-model max output token ceilings (Gemini rejects values above these).
@@ -172,6 +173,21 @@ export async function transformRequestToGemini(
       })
       .filter(Boolean)
       .join('\n');
+  }
+
+  // ── Failure-loop detection ───────────────────────────────────────────────
+  // If the client has been repeating the same failing tool call, append
+  // corrective guidance to the system prompt. This is the gateway's main
+  // mitigation for blind-retry loops since we cannot prevent the client
+  // from sending them.
+  const loopResult = detectFailureLoop(anthropicReq.messages || []);
+  if (loopResult.detected) {
+    systemText = (systemText ? systemText + '\n' : '') + loopResult.guidance;
+    if (loopResult.diagnostics) {
+      console.warn(
+        `[loop-detector] tool=${loopResult.diagnostics.toolName} repeats=${loopResult.diagnostics.repeats} input=${loopResult.diagnostics.inputPreview}`
+      );
+    }
   }
 
   const systemInstruction = systemText ? {
