@@ -60,6 +60,23 @@ function hasToolResult(message: any): boolean {
   return message.content.some((b: any) => b.type === 'tool_result');
 }
 
+function toolResultText(block: any): string {
+  if (!block || block.type !== 'tool_result') return '';
+  if (typeof block.content === 'string') return block.content;
+  if (Array.isArray(block.content)) {
+    return block.content.map((c: any) => (typeof c?.text === 'string' ? c.text : JSON.stringify(c))).join('\n');
+  }
+  return JSON.stringify(block.content || {});
+}
+
+function isToolFailureBlock(block: any): boolean {
+  if (!block || block.type !== 'tool_result') return false;
+  if (block.is_error === true) return true;
+  const text = toolResultText(block).toLowerCase();
+  if (!text) return false;
+  return /(error|failed|enoent|no such file|permission denied|not found|invalid argument|exception|traceback|cannot)/i.test(text);
+}
+
 /**
  * Sentinel embedded in every summary message we generate.
  * Future compaction passes detect this to skip re-summarizing the same content.
@@ -154,6 +171,153 @@ function findSafeBoundary(messages: any[], index: number): number {
   return Math.max(0, safeIdx);
 }
 
+function findRecentFailureAnchor(messages: any[], startIndex: number, keepFailures: number): number | null {
+  let kept = 0;
+  let anchor: number | null = null;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!Array.isArray(msg?.content)) continue;
+
+    const hasFailure = msg.content.some((b: any) => isToolFailureBlock(b));
+    if (!hasFailure) continue;
+
+    kept++;
+    // Include the preceding assistant tool_use message when present.
+    const prev = messages[i - 1];
+    const prevIsToolUse = prev?.role === 'assistant' && hasToolUse(prev);
+    anchor = prevIsToolUse ? i - 1 : i;
+
+    if (kept >= keepFailures) break;
+  }
+
+  if (anchor == null) return null;
+  return Math.min(anchor, startIndex);
+}
+
+function findPendingToolAnchor(messages: any[], startIndex: number): number | null {
+  const resolved = new Set<string>();
+
+  for (let i = startIndex; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!Array.isArray(msg?.content)) continue;
+    for (const block of msg.content) {
+      if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        resolved.add(block.tool_use_id);
+      }
+    }
+  }
+
+  const windowStart = Math.max(0, startIndex - 40);
+  for (let i = startIndex - 1; i >= windowStart; i--) {
+    const msg = messages[i];
+    if (msg?.role !== 'assistant' || !Array.isArray(msg?.content)) continue;
+    const hasPending = msg.content.some((block: any) => block?.type === 'tool_use' && typeof block.id === 'string' && !resolved.has(block.id));
+    if (hasPending) return i;
+  }
+
+  return null;
+}
+
+function extractLikelyPaths(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/(?:[A-Za-z]:[\\/]|\.{0,2}\/)?[\w.-]+(?:[\\/][\w.@-]+)+/g) || [];
+  return Array.from(new Set(matches)).slice(0, 12);
+}
+
+function firstNonEmptyLine(text: string): string {
+  const line = text
+    .split('\n')
+    .map(l => l.trim())
+    .find(Boolean);
+  return line || '';
+}
+
+function buildOperationalHeuristicSummary(
+  freshTurns: any[],
+  rollingSummary: string,
+  summaryCharBudget: number
+): string {
+  const recentUser = [...freshTurns]
+    .reverse()
+    .find(m => m?.role === 'user' && normalizeWhitespace(messageText(m)).length > 0);
+  const recentAssistant = [...freshTurns]
+    .reverse()
+    .find(m => m?.role === 'assistant' && normalizeWhitespace(messageText(m)).length > 0);
+
+  const currentGoal = clip(firstNonEmptyLine(normalizeWhitespace(messageText(recentUser))), 220);
+  const latestState = clip(firstNonEmptyLine(normalizeWhitespace(messageText(recentAssistant))), 220);
+
+  const pathSet = new Set<string>();
+  const failures: string[] = [];
+  const pending: string[] = [];
+
+  const toolNameById = new Map<string, string>();
+  for (const msg of freshTurns) {
+    if (!Array.isArray(msg?.content)) continue;
+    for (const b of msg.content) {
+      if (b?.type === 'tool_use' && typeof b.id === 'string') {
+        toolNameById.set(b.id, b.name || 'tool');
+      }
+    }
+  }
+
+  for (const msg of freshTurns) {
+    const txt = messageText(msg);
+    for (const p of extractLikelyPaths(txt)) pathSet.add(p);
+
+    if (typeof txt === 'string') {
+      const lines = txt.split('\n');
+      for (const ln of lines) {
+        const t = ln.trim();
+        if (!t) continue;
+        if (/^[-*]\s*\[\s\]/.test(t) || /\b(todo|next steps?|pending|remaining)\b/i.test(t)) {
+          pending.push(clip(t, 180));
+        }
+      }
+    }
+
+    if (Array.isArray(msg?.content)) {
+      for (const b of msg.content) {
+        if (isToolFailureBlock(b)) {
+          const toolName = toolNameById.get(b.tool_use_id) || 'tool';
+          const err = clip(firstNonEmptyLine(normalizeWhitespace(toolResultText(b))), 180);
+          failures.push(`${toolName}: ${err}`);
+        }
+      }
+    }
+  }
+
+  const lines: string[] = [];
+  if (rollingSummary) {
+    lines.push(`Previous memory: ${clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.25))}`);
+  }
+  if (currentGoal) lines.push(`Current goal: ${currentGoal}`);
+  if (latestState) lines.push(`Latest working state: ${latestState}`);
+  if (failures.length > 0) {
+    lines.push('Failed attempts:');
+    for (const f of failures.slice(-6)) lines.push(`- ${f}`);
+  }
+  if (pathSet.size > 0) {
+    lines.push(`Active files/paths: ${Array.from(pathSet).slice(0, 10).join(', ')}`);
+  }
+  if (pending.length > 0) {
+    lines.push('Pending subtasks:');
+    for (const p of pending.slice(-8)) lines.push(`- ${p}`);
+  }
+
+  if (lines.length === 0) {
+    const fallbackLines = freshTurns.slice(-15).map(msg => {
+      const role = msg.role === 'assistant' ? 'AI' : 'User';
+      return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
+    });
+    lines.push('Recent Discussion:');
+    for (const ln of fallbackLines) lines.push(`- ${ln}`);
+  }
+
+  return clip(lines.join('\n'), summaryCharBudget);
+}
+
 export async function compactMessagesDetailed(
   messages: any[],
   options: CompactionOptions = {}
@@ -187,6 +351,18 @@ export async function compactMessagesDetailed(
   
   // Shift boundary to avoid breaking tool sequences
   lastPartStart = findSafeBoundary(messages, lastPartStart);
+
+  // Preserve recent failure chains so retries remain grounded in actual errors.
+  const failureAnchor = findRecentFailureAnchor(messages, lastPartStart, 3);
+  if (failureAnchor != null) {
+    lastPartStart = Math.min(lastPartStart, failureAnchor);
+  }
+
+  // Preserve pending tool dependency chains (tool_use awaiting tool_result).
+  const pendingAnchor = findPendingToolAnchor(messages, lastPartStart);
+  if (pendingAnchor != null) {
+    lastPartStart = Math.min(lastPartStart, pendingAnchor);
+  }
 
   const firstPart = messages.slice(0, firstPartEnd);
   const removedPart = messages.slice(firstPartEnd, lastPartStart);
@@ -233,13 +409,7 @@ export async function compactMessagesDetailed(
   }
 
   if (!generatedByAI && freshTurns.length > 0) {
-    const existing = rollingSummary ? clip(normalizeWhitespace(rollingSummary), Math.floor(summaryCharBudget * 0.4)) : '';
-    const lines = freshTurns.slice(-15).map(msg => {
-      const role = msg.role === 'assistant' ? 'AI' : 'User';
-      return `${role}: ${clip(normalizeWhitespace(messageText(msg)), 200)}`;
-    });
-    summary = (existing ? `Previous: ${existing}\n\n` : "") + "Recent Discussion:\n- " + lines.join('\n- ');
-    summary = clip(summary, summaryCharBudget);
+    summary = buildOperationalHeuristicSummary(freshTurns, rollingSummary, summaryCharBudget);
   }
 
   // 4. Insert Summary while maintaining role alternation.

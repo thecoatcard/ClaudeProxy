@@ -50,7 +50,7 @@ function stripImagesFromBody(body: any): any {
   };
 }
 
-function stripThoughtSignatures(body: any): any {
+export function stripThoughtSignatures(body: any): any {
   if (!body || !Array.isArray(body.contents)) return body;
   return {
     ...body,

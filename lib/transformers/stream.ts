@@ -1,7 +1,8 @@
 import { nanoid } from 'nanoid';
 import { mapStopReason } from './stop-reason';
-import { redis } from '../redis';
 import { repairToolInput } from './repair';
+import { recoverActionText } from './action-recovery';
+import { setexBestEffort } from './metadata-persist';
 
 export interface StreamUsage {
   inputTokens: number;
@@ -232,60 +233,70 @@ export async function* transformStream(
           // Filter out <think> tags if they appear in text (cross-model compatibility)
           cleanedText = fullText.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
           
-          // catch it here and convert to a real tool_use block.
-          const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+({[\s\S]*})\s*\]/i;
-          const match = cleanedText.match(actionRegex);
-          if (match) {
-            const toolName = match[1];
-            const argsStr = match[2];
-            const originalName = originalToolNames.get(toolName) || toolName;
+          // If action-style tool text appears in the text stream and is fully
+          // parseable, recover it into a structured tool_use block.
+          while (true) {
+            const recovered = recoverActionText(cleanedText);
+            if (!recovered) break;
 
-            try {
-              const args = JSON.parse(argsStr);
-              const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
-              
-              // 1. Emit the text delta for anything BEFORE the action
-              const beforeAction = cleanedText.slice(outputTextLength, match.index);
-              if (beforeAction.length > 0) {
-                yield `event: content_block_delta\ndata: ${JSON.stringify({
-                  type: 'content_block_delta',
-                  index: contentBlockIndex,
-                  delta: { type: 'text_delta', text: beforeAction }
-                })}\n\n`;
-              }
-              
-              // 2. Stop the current text block
-              yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-              contentBlockIndex++;
-              inContentBlock = false;
-              
-              // 3. Start and emit the recovered tool call
-              const toolId = 'toolu_' + nanoid(24);
-              toolIdMap.set(toolId, originalName);
-              sawToolUse = true;
-              
-              yield `event: content_block_start\ndata: ${JSON.stringify({
-                type: 'content_block_start',
-                index: contentBlockIndex,
-                content_block: { type: 'tool_use', id: toolId, name: originalName, input: {} }
-              })}\n\n`;
-              
+            const originalName = originalToolNames.get(recovered.toolName) || recovered.toolName;
+            const schema = toolSchemas?.get(originalName) || toolSchemas?.get(recovered.toolName);
+            const repairedInput = repairToolInput(recovered.args, schema);
+
+            // 1. Emit the text delta for anything before the action marker.
+            const beforeAction = cleanedText.slice(outputTextLength, recovered.start);
+            if (beforeAction.length > 0) {
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
-                delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedInput) }
+                delta: { type: 'text_delta', text: beforeAction }
               })}\n\n`;
-              
-              yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
-              contentBlockIndex++;
-              
-              // 4. Update outputTextLength to skip the recovered action
-              outputTextLength = (match.index || 0) + match[0].length;
-              
-              // Persist for history turns — fire-and-forget so stream is not blocked.
-              redis.setex(`gemini:toolname:${toolId}`, 3600, originalName).catch(() => {});
-            } catch (e) {
-              // Fail silently and let it stream as text if parsing fails
+            }
+
+            // 2. Close current text block.
+            yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+            contentBlockIndex++;
+            inContentBlock = false;
+
+            // 3. Emit recovered tool_use.
+            const toolId = 'toolu_' + nanoid(24);
+            toolIdMap.set(toolId, originalName);
+            sawToolUse = true;
+
+            yield `event: content_block_start\ndata: ${JSON.stringify({
+              type: 'content_block_start',
+              index: contentBlockIndex,
+              content_block: { type: 'tool_use', id: toolId, name: originalName, input: {} }
+            })}\n\n`;
+
+            yield `event: content_block_delta\ndata: ${JSON.stringify({
+              type: 'content_block_delta',
+              index: contentBlockIndex,
+              delta: { type: 'input_json_delta', partial_json: JSON.stringify(repairedInput) }
+            })}\n\n`;
+
+            yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+            contentBlockIndex++;
+
+            outputTextLength = recovered.end;
+
+            console.info('[action-recovery] recovered action text as tool_use', {
+              source: 'stream',
+              toolName: originalName,
+              recoveredChars: recovered.raw.length,
+            });
+
+            // Persist for history turns — fire-and-forget so stream is not blocked.
+            setexBestEffort(`gemini:toolname:${toolId}`, 3600, originalName).catch(() => {});
+
+            // Start a new text block if we still have trailing text.
+            if (!inContentBlock) {
+              yield `event: content_block_start\ndata: ${JSON.stringify({
+                type: 'content_block_start',
+                index: contentBlockIndex,
+                content_block: { type: 'text', text: '' }
+              })}\n\n`;
+              inContentBlock = true;
             }
           }
 
@@ -360,16 +371,16 @@ export async function* transformStream(
           // Persistence for next turn — truly fire-and-forget.
           // DO NOT await this: every await here stalls SSE delivery to the client.
           const redisPromises = [
-            redis.setex(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
+            setexBestEffort(`gemini:toolname:${currentToolId}`, 3600, part.functionCall.name)
           ];
           if (part.thoughtSignature) {
-            redisPromises.push(redis.setex(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
+            redisPromises.push(setexBestEffort(`gemini:thought:${currentToolId}`, 3600, part.thoughtSignature));
           }
           Promise.all(redisPromises).catch(e => console.error('Redis persist error in stream', e));
 
           const repairedArgs = repairToolInput(
             part.functionCall.args,
-            toolSchemas?.get(part.functionCall.name)
+            toolSchemas?.get(originalName) || toolSchemas?.get(part.functionCall.name)
           );
 
           yield `event: content_block_delta\ndata: ${JSON.stringify({

@@ -1,42 +1,50 @@
 # FILES_CHANGED.md
 
-## New files
+## Added
 
-| File | Phase | Purpose |
-|---|---|---|
-| [lib/agent/retry-strategy.ts](lib/agent/retry-strategy.ts) | 3 | Failure classification + concrete alternative strategy generation. `classifyFailure(toolName, errorText)` returns `FailureClass`, `rootCause`, `prohibition`, `alternativeSteps`. Used to enrich loop-detector guidance. |
-| [lib/agent/verification-engine.ts](lib/agent/verification-engine.ts) | 2 | Content-based tool-result verdicts (`success` / `failure` / `uncertain`) without filesystem access. Driven by error-pattern matching and tool-family heuristics. |
-| [lib/agent/path-guard.ts](lib/agent/path-guard.ts) | 4 | Structural path inspection in `tool_use.input` values. Detects traversal (`../`), mixed separators, null bytes, empty paths, and shell metacharacters. |
-| [lib/agent/spec-validator.ts](lib/agent/spec-validator.ts) | 1 | Numbered/bulleted requirement extraction from system text + tracking against successful tool calls in message history. |
-| [lib/agent/completion-gate.ts](lib/agent/completion-gate.ts) | 5 | Detects premature "done/complete/finished" claims in the last assistant turn and validates them against the tool-result record. |
-| [lib/agent/behavior-auditor.ts](lib/agent/behavior-auditor.ts) | all | Orchestrator: runs all checks in priority order, returns combined `guidance` string for `systemInstruction`. |
-| [lib/transformers/loop-detector.ts](lib/transformers/loop-detector.ts) | 3 (prev) | Added in previous audit. Detects ≥2 consecutive identical failed tool calls by stable input signature. |
-| [tests/behavioral-tests.ts](tests/behavioral-tests.ts) | 7 | 54 behavioral tests across 9 suites using `node:test` + `tsx`. |
-| [prompts-upgrade.md](prompts-upgrade.md) | 6 | Documents all triggered guidance text with before/after behavior comparison. |
+- lib/transformers/action-recovery.ts
+  - New robust parser to recover action-style tool text into structured tool_use blocks.
+- lib/transformers/metadata-persist.ts
+  - Best-effort Redis metadata persistence with retry for tool name/signature keys.
+- tests/tool-structure.test.ts
+  - Tool-structure fidelity tests (normal flow, retry prep, fallback prep, action recovery, leakage prevention).
+- tests/context-compaction.test.ts
+  - Context continuity tests (unfinished tasks, failed history, pending chains, goal/state retention).
+- ACTION_TOOL_FIX_REPORT.md
+  - Tool leakage audit and fixes report.
+- CONTEXT_IMPROVEMENTS.md
+  - Compaction audit outcome and applied improvements.
 
-## Modified files
+## Modified
 
-| File | Change |
-|---|---|
-| [lib/transformers/request.ts](lib/transformers/request.ts) | Replaced `detectFailureLoop` import with `runBehaviorAudit`. Single call replaces previous loop-detector call; awaits result and appends combined guidance to `systemText`. |
+- lib/transformers/request.ts
+  - Removed request-time demotion of tool_use to `[Action: ...]` text when thoughtSignature is missing.
+  - Always emits structured functionCall; attaches thoughtSignature when available.
+- lib/transformers/response.ts
+  - Uses shared action recovery parser.
+  - Recovers parseable action-text to tool_use and strips it from visible text.
+  - Improves schema lookup for repair (original tool name fallback).
+  - Uses best-effort metadata persistence helper.
+  - Adds action-recovery logging.
+- lib/transformers/stream.ts
+  - Uses shared action recovery parser for streaming text deltas.
+  - Recovers parseable action-text to tool_use during stream and avoids leakage.
+  - Improves schema lookup for repair (original tool name fallback).
+  - Uses best-effort metadata persistence helper.
+  - Adds action-recovery logging.
+- lib/transformers/compaction.ts
+  - Added failure detection helpers for tool_result blocks.
+  - Added boundary anchors to preserve recent failed chains and pending tool dependency chains.
+  - Replaced heuristic fallback summary with operational summary preserving:
+    - current goal
+    - latest working state
+    - failed attempts
+    - active file paths
+    - pending subtasks
+- lib/retry-engine.ts
+  - Exported stripThoughtSignatures for direct retry/fallback integrity tests.
 
-## Files audited but not changed
+## Not Changed (Audit-only)
 
-| File | Status |
-|---|---|
-| [lib/transformers/response.ts](lib/transformers/response.ts) | No changes needed — tool roundtrip and repair correct. |
-| [lib/transformers/stream.ts](lib/transformers/stream.ts) | No changes needed — SSE sequence correct. |
-| [lib/transformers/tools.ts](lib/transformers/tools.ts) | No changes needed — schema conversion correct. |
-| [lib/transformers/repair.ts](lib/transformers/repair.ts) | No changes needed — coercion complete. |
-| [lib/retry-engine.ts](lib/retry-engine.ts) | No changes needed — fallback/key-rotation logic correct. |
-| [app/api/v1/messages/route.ts](app/api/v1/messages/route.ts) | No changes needed — routing correct. |
-
-## What was NOT built (and why)
-
-| Requested | Decision |
-|---|---|
-| Filesystem-based `VerificationEngine` (file exists?) | Impossible on Edge runtime — implemented content-based equivalent instead. |
-| `PathGuard` calling `path.resolve()` / checking parent dir via fs | Impossible on Edge runtime — implemented structural path heuristics instead. |
-| Tool execution runtime | Out of scope — the gateway is a protocol translator, not an executor. |
-| Sandbox / container mounts | Out of scope — same reason. |
-| Shell cwd propagation | Out of scope — same reason. |
+- lib/transformers/repair.ts
+  - Kept as-is; still used for schema coercion on recovered/structured tool args.

@@ -1,7 +1,8 @@
 import { mapStopReason } from './stop-reason';
 import { nanoid } from 'nanoid';
-import { redis } from '../redis';
 import { repairToolInput } from './repair';
+import { recoverActionText } from './action-recovery';
+import { setexBestEffort } from './metadata-persist';
 
 export async function transformGeminiToAnthropic(
   geminiRes: any,
@@ -34,27 +35,34 @@ export async function transformGeminiToAnthropic(
 
     if (part.text) {
       let cleanedText = part.text.replace(/<(think|thought)>[\s\S]*?(<\/(think|thought)>|$)/gi, '');
-      const actionRegex = /\[Action:\s+I\s+am\s+calling\s+tool\s+[`']?([^`'\s]+)[`']?\s+with\s+arguments:\s+({[\s\S]*})\s*\]/i;
-      const match = cleanedText.match(actionRegex);
-      if (match) {
-        const toolName = match[1];
-        const argsStr = match[2];
+
+      while (true) {
+        const recovered = recoverActionText(cleanedText);
+        if (!recovered) break;
+
+        const before = cleanedText.slice(0, recovered.start).trim();
+        if (before) contentBlocks.push({ type: 'text', text: before });
+
         const toolId = 'toolu_' + nanoid(24);
-        const originalName = originalToolNames?.get(toolName) || toolName;
-        try {
-          const args = JSON.parse(argsStr);
-          const repairedInput = repairToolInput(args, toolSchemas?.get(toolName));
-          cleanedText = cleanedText.replace(match[0], '').trim();
-          contentBlocks.push({ type: 'tool_use', id: toolId, name: originalName, input: repairedInput });
-          toolIdMap.set(toolId, originalName);
-          redisTasks.push(redis.setex(`gemini:toolname:${toolId}`, 3600, originalName));
-        } catch (e) { console.warn('[recovery] failed to parse hallucinated tool args', e); }
-      }
-      if (cleanedText) {
-        contentBlocks.push({
-          type: 'text',
-          text: cleanedText
+        const originalName = originalToolNames?.get(recovered.toolName) || recovered.toolName;
+        const schema = toolSchemas?.get(originalName) || toolSchemas?.get(recovered.toolName);
+        const repairedInput = repairToolInput(recovered.args, schema);
+
+        contentBlocks.push({ type: 'tool_use', id: toolId, name: originalName, input: repairedInput });
+        toolIdMap.set(toolId, originalName);
+        redisTasks.push(setexBestEffort(`gemini:toolname:${toolId}`, 3600, originalName));
+
+        console.info('[action-recovery] recovered action text as tool_use', {
+          source: 'response',
+          toolName: originalName,
+          recoveredChars: recovered.raw.length,
         });
+
+        cleanedText = cleanedText.slice(recovered.end).trim();
+      }
+
+      if (cleanedText) {
+        contentBlocks.push({ type: 'text', text: cleanedText });
       }
     } else if (part.functionCall) {
       const toolId = 'toolu_' + nanoid(24);
@@ -65,14 +73,14 @@ export async function transformGeminiToAnthropic(
       // Store the GEMINI (sanitized) name so request.ts can send the correct
       // functionResponse.name on the next turn. Using originalName here would
       // cause a 400 for any MCP tool whose name contains hyphens or dots.
-      redisTasks.push(redis.setex(`gemini:toolname:${toolId}`, 3600, geminiName));
+      redisTasks.push(setexBestEffort(`gemini:toolname:${toolId}`, 3600, geminiName));
       if (part.thoughtSignature) {
-        redisTasks.push(redis.setex(`gemini:thought:${toolId}`, 3600, part.thoughtSignature));
+        redisTasks.push(setexBestEffort(`gemini:thought:${toolId}`, 3600, part.thoughtSignature));
       }
 
       const repairedInput = repairToolInput(
         part.functionCall.args,
-        toolSchemas?.get(geminiName)
+        toolSchemas?.get(originalName) || toolSchemas?.get(geminiName)
       );
 
       contentBlocks.push({

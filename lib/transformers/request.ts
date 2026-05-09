@@ -149,7 +149,6 @@ export async function transformRequestToGemini(
     }
   }
 
-  const convertedToolIds = new Set<string>();
   // Capture original Anthropic input_schemas so the response/stream path can
   // repair Gemini functionCall args against them before emitting tool_use.
   if (toolSchemas && Array.isArray(anthropicReq.tools)) {
@@ -265,37 +264,17 @@ export async function transformRequestToGemini(
           // the function declaration. MCP tools with hyphens (my-server__my-tool)
           // become (my_server__my_tool) — using the original name here causes a 400.
           const geminiToolName = block.name.replace(/[^a-zA-Z0-9_]/g, '_');
-          if (sig) {
-            parts.push({
-              functionCall: {
-                name: geminiToolName,
-                args: block.input && typeof block.input === 'object' ? block.input : {}
-              },
-              thoughtSignature: sig
-            });
-          } else {
-            // If signature is lost, we MUST convert to text. 
-            // Sending a functionCall without a signature to a reasoning-enabled Gemini model results in a 400.
-            convertedToolIds.add(block.id);
-            parts.push({
-              text: `[Action: I am calling tool \`${geminiToolName}\` with arguments: ${JSON.stringify(block.input)}]`
-            });
-          }
-        } else if (block.type === 'tool_result') {
-          if (convertedToolIds.has(block.tool_use_id)) {
-            // Corresponding tool_use was converted to text, so this must be text too.
-            let resultText = "";
-            if (typeof block.content === 'string') {
-              resultText = block.content;
-            } else if (Array.isArray(block.content)) {
-              resultText = block.content.map((c: any) => c.text || JSON.stringify(c)).join("\n");
-            } else {
-              resultText = JSON.stringify(block.content);
+          const functionCallPart: any = {
+            functionCall: {
+              name: geminiToolName,
+              args: block.input && typeof block.input === 'object' ? block.input : {}
             }
-            parts.push({ text: `[Tool Result]:\n${resultText}` });
-            continue;
-          }
-
+          };
+          // Prefer structured calls always. If the signature is missing, retry-engine
+          // can degrade thinking/fallback strategy; demoting to plain text leaks action text.
+          if (sig) functionCallPart.thoughtSignature = sig;
+          parts.push(functionCallPart);
+        } else if (block.type === 'tool_result') {
           // Look up the actual function name.
           let fnName = nameMap.get(block.tool_use_id);
           
