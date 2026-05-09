@@ -8,6 +8,28 @@
 npx tsx --test tests/routing-registry.test.ts tests/routing-cache.test.ts tests/task-router.test.ts
 ```
 
+---
+
+## Orchestrator Enforcement + Model Router Fix — Test Run (2026-05-09)
+
+**47 tests | 0 failures | 4 suites**
+
+```
+npx jest tests/task-complexity.test.ts tests/orchestrator-enforcer.test.ts tests/subagent-memory.test.ts tests/model-router-imports.test.ts
+```
+
+### Suite Results
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| task-complexity.test.ts | 19 | ✅ All pass |
+| orchestrator-enforcer.test.ts | 10 | ✅ All pass |
+| subagent-memory.test.ts | 9 | ✅ All pass |
+| model-router-imports.test.ts | 9 | ✅ All pass |
+
+### TypeScript: `npx tsc --noEmit` → 0 errors
+### Next.js Build: `npm run build` → Compiled successfully
+
 ```
 ℹ tests 9  |  ℹ pass 9  |  ℹ fail 0  |  ℹ duration_ms 2832
 ```

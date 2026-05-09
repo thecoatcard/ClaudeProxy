@@ -13,6 +13,7 @@ import { runWithWebSearch } from '@/lib/tools/search-executor';
 import { callGemini } from '@/lib/gemini-adapter';
 import { getHealthiestKeyObj } from '@/lib/key-manager';
 import { logActivity, maskToken } from '@/lib/activity';
+import { prepareOrchestration, finalizeOrchestration } from '@/lib/agent/orchestrator-enforcer';
 
 // Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
 export const runtime = 'nodejs';
@@ -77,6 +78,11 @@ export async function POST(req: Request) {
     return NextResponse.json(optimized);
   }
 
+  // 3a. Orchestrator enforcement — inject coordinator behaviour for non-trivial tasks
+  const { enrichedBody: orchBody, ctx: orchCtx } = await prepareOrchestration(body, token).catch(() => ({ enrichedBody: body, ctx: { parentId: '', complexity: { level: 'NORMAL' as const, reason: 'fallback', orchestratorRequired: false, explicitOverride: false }, subagentTasks: [], orchestratorEnabled: false, systemPromptInjected: false } }));
+  // Use the enriched body (with injected coordinator prompt) for all downstream calls
+  const activeBody = orchCtx.systemPromptInjected ? orchBody : body;
+
   // 3. Parallel Pre-flight (Auth + Routing)
   const isThinking = !!(body.thinking && body.thinking.type === 'enabled');
   const [isValid, modelMap] = await Promise.all([
@@ -106,7 +112,7 @@ export async function POST(req: Request) {
       
       // All heavy work (Redis lookups, transformation, and Gemini API call) happens 
       // inside transformStream AFTER it has yielded the first headers/chunks.
-      const transformIterator = transformStream(body, model, internalModel, token, usageRef, modelMap);
+      const transformIterator = transformStream(activeBody, model, internalModel, token, usageRef, modelMap);
 
       const streamBody = new ReadableStream({
         async start(controller) {
@@ -137,6 +143,7 @@ export async function POST(req: Request) {
             try { controller.close(); } catch {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
+            finalizeOrchestration(orchCtx).catch(() => {});
             logActivity({
               ts: Date.now(),
               userKey: maskToken(token),
@@ -175,7 +182,7 @@ export async function POST(req: Request) {
       const toolIdMap = new Map<string, string>();
       const toolSchemas = new Map<string, any>();
       const originalToolNames = new Map<string, string>();
-      const { geminiBody, webSearchConfig } = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+      const { geminiBody, webSearchConfig } = await transformRequestToGemini(activeBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
 
       let geminiRes: any;
       if (webSearchConfig) {
@@ -195,6 +202,7 @@ export async function POST(req: Request) {
 
       await recordLatency(Date.now() - startTime);
       await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
+      finalizeOrchestration(orchCtx).catch(() => {});
       logRequest({
         model,
         resolvedModel: internalModel,

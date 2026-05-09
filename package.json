@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "jest --config jest.config.ts",
+    "test:new": "jest --config jest.config.ts tests/task-complexity.test.ts tests/orchestrator-enforcer.test.ts tests/subagent-memory.test.ts tests/model-router-imports.test.ts"
   },
   "dependencies": {
     "ioredis": "^5.10.1",
@@ -19,11 +21,14 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.9",
     "typescript": "^5"
   }
 }

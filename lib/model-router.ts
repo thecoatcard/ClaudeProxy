@@ -269,6 +269,9 @@ export async function getEffectiveRoutingRegistry(): Promise<Record<string, Mode
   return loaded.registry;
 }
 
+/** Public alias — single stable name for external consumers. */
+export const getRoutingRegistry = getEffectiveRoutingRegistry;
+
 export async function saveRoutingRegistry(models: unknown): Promise<RoutingDiagnostics> {
   const sanitized = sanitizeRegistry(models);
   await redisClient.set(ROUTING_REGISTRY_KEY, JSON.stringify(sanitized));

@@ -5,13 +5,14 @@ import { useEffect, useState } from 'react';
 import '@/app/globals.css';
 
 const NAV_ITEMS = [
-  { href: '/dashboard',            label: 'Overview',       icon: '⬡' },
-  { href: '/dashboard/stats',      label: 'Observability',  icon: '📈' },
-  { href: '/dashboard/activity',   label: 'Activity Feed',  icon: '📋' },
-  { href: '/dashboard/keys',       label: 'Provider Keys',  icon: '🔑' },
-  { href: '/dashboard/user-keys',  label: 'Gateway Keys',   icon: '🛡' },
-  { href: '/dashboard/models',     label: 'Model Routing',  icon: '🔀' },
-  { href: '/dashboard/system',     label: 'System',         icon: '⚙' },
+  { href: '/dashboard',                 label: 'Overview',       icon: '⬡' },
+  { href: '/dashboard/stats',           label: 'Observability',  icon: '📈' },
+  { href: '/dashboard/activity',        label: 'Activity Feed',  icon: '📋' },
+  { href: '/dashboard/keys',            label: 'Provider Keys',  icon: '🔑' },
+  { href: '/dashboard/user-keys',       label: 'Gateway Keys',   icon: '🛡' },
+  { href: '/dashboard/models',          label: 'Model Routing',  icon: '🔀' },
+  { href: '/dashboard/orchestrator',    label: 'Orchestrator',   icon: '🤖' },
+  { href: '/dashboard/system',          label: 'System',         icon: '⚙' },
 ];
 
 interface LoginModalProps {

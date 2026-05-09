@@ -2,6 +2,42 @@
 
 ---
 
+## Session: Orchestrator Enforcement + Model Router Fix (2026-05-09)
+
+### New Files
+
+- **lib/agent/task-complexity.ts** — Classifies requests into TRIVIAL/NORMAL/COMPLEX/MULTI_STAGE; detects explicit orchestrator override commands.
+
+- **lib/agent/orchestrator-enforcer.ts** — Gateway enforcement layer; injects coordinator system prompt; creates subagent task stubs; finalizes tasks after model call.
+
+- **lib/agent/subagent-memory.ts** — Redis-backed subagent task store with 24h TTL; tracks id/owner/status/dependencies/artifacts.
+
+- **tests/task-complexity.test.ts** — 19 tests covering all complexity levels and override commands.
+
+- **tests/orchestrator-enforcer.test.ts** — 10 tests for orchestrator prepare/finalize flow.
+
+- **tests/subagent-memory.test.ts** — 9 tests for Redis roundtrip, status updates, parent indexing.
+
+- **tests/model-router-imports.test.ts** — 9 tests validating all public model-router exports.
+
+- **jest.config.ts** — Jest + ts-jest configuration for the project.
+
+- **docs/ORCHESTRATOR_ENFORCEMENT_REPORT.md** — Full orchestrator architecture and success criteria.
+
+- **docs/MODEL_ROUTER_FIX_REPORT.md** — Model router fix notes and import verification.
+
+### Modified Files
+
+- **lib/model-router.ts** — Added `getRoutingRegistry` as public alias for `getEffectiveRoutingRegistry`.
+
+- **app/api/v1/messages/route.ts** — Imported and wired `prepareOrchestration` / `finalizeOrchestration`; streaming and non-streaming paths both use enriched orchestrated body.
+
+- **package.json** — Added `test` and `test:new` scripts; added jest/ts-jest dev dependencies.
+
+- **docs/TEST_RESULTS.md** — Appended new test suite results.
+
+---
+
 ## Session: Routing Persistence + Adaptive Model Rotation
 
 ### New Files

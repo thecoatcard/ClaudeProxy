@@ -99,9 +99,12 @@ export async function runBehaviorAudit(
     );
   }
 
-  // 3. Path guard — scan recent (last 20) messages to keep it cheap.
-  const recentMessages = messages.slice(-20);
-  const pathIssues = inspectHistoryPaths(recentMessages);
+  // 3. Path guard — scan ONLY the most recent assistant turn (per-request scope).
+  //    Scanning the full history causes path issues to accumulate across requests.
+  //    We only care about paths from tool calls in the latest assistant message.
+  const lastAssistantMsg = [...messages].reverse().find((m) => m.role === 'assistant');
+  const pathScopeMessages = lastAssistantMsg ? [lastAssistantMsg] : [];
+  const pathIssues = inspectHistoryPaths(pathScopeMessages);
   if (pathIssues.length > 0) {
     diagnostics.pathIssues = pathIssues.length;
     const pathGuidance = buildPathGuidance(pathIssues);
