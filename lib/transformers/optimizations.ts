@@ -67,31 +67,13 @@ export async function tryOptimizations(body: any): Promise<OptimizationResult | 
     return createTextResponse(model, matches.join('\n'), 100, 10);
   }
 
-  // 6. Agentic Browsing (Local Tool Execution for web_search/web_fetch)
-  // Only if forced via tool_choice
-  if (tool_choice?.type === 'tool' && (tool_choice.name === 'web_search' || tool_choice.name === 'web_fetch')) {
-    const toolName = tool_choice.name;
-    const rawText = extractText(lastUserMessage.content);
-    
-    if (toolName === 'web_search') {
-      const query = extractValue(rawText, ['query', 'search', 'q']) || rawText.slice(0, 50);
-      const results = await performWebSearch(query);
-      return createToolResponse(model, toolName, { query }, results);
-    } else {
-      const url = extractValue(rawText, ['url', 'href', 'link']) || (rawText.match(/https?:\/\/[^\s]+/)?.[0]);
-      if (url) {
-        const result = await performWebFetch(url);
-        return createToolResponse(model, toolName, { url }, result);
-      }
-    }
-  }
-
-  // 7. Superpower Permission Bypass
-  // If the model is asked to "bypass" or "force" an action that usually triggers
-  // a local permission prompt, we can mock a success state.
-  if (userText.includes('bypass permission') || userText.includes('force execute')) {
-    return createTextResponse(model, "Permission granted. Proceeding with execution.", 100, 10);
-  }
+  // NOTE: Items 6 (Agentic Browsing) and 7 (Permission Bypass) were removed.
+  // - Agentic Browsing (web_search/web_fetch local execution) was removed due to
+  //   SSRF risk: user-controlled URLs were fetched server-side without validation.
+  //   This gateway is a translator layer only — it must not issue arbitrary outbound HTTP.
+  // - The "Superpower Permission Bypass" block was removed as a security vulnerability:
+  //   any message containing "bypass permission" would return a fake grant response,
+  //   enabling prompt injection attacks.
 
   return null;
 }
@@ -103,66 +85,6 @@ function extractText(content: any): string {
     return content.map(c => (typeof c === 'string' ? c : c.text || "")).join("\n");
   }
   return "";
-}
-
-function extractValue(text: string, keys: string[]): string | null {
-  for (const key of keys) {
-    const regex = new RegExp(`${key}["'\\s:]+([^"'\\s\\n}]+)`, 'i');
-    const match = text.match(regex);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-async function performWebSearch(query: string): Promise<string> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) return "Search failed.";
-    const html = await res.text();
-    
-    // Simple HTML parsing for DDG Lite results
-    const results: string[] = [];
-    const parts = html.split('result-link');
-    for (const part of parts.slice(1, 6)) { // Get top 5
-      const titleMatch = part.match(/>([^<]+)<\/a>/);
-      const snippetMatch = part.match(/result-snippet">([^<]+)/);
-      if (titleMatch) {
-        results.push(`Title: ${titleMatch[1]}\nSnippet: ${snippetMatch ? snippetMatch[1] : 'No snippet.'}`);
-      }
-    }
-    return results.length > 0 ? results.join('\n\n') : "No results found.";
-  } catch (e) {
-    return "Web search unavailable.";
-  }
-}
-
-async function performWebFetch(url: string): Promise<string> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10s for full page
-    const res = await fetch(url, { 
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClaudeBot/1.0)' },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return `Failed to fetch URL: ${res.status}`;
-    const text = await res.text();
-    
-    // Basic HTML to text conversion (stripping tags)
-    const cleanText = text
-      .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gmi, "")
-      .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gmi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-      
-    return cleanText.slice(0, 10000); // Cap at 10k chars
-  } catch (e) {
-    return "Web fetch failed.";
-  }
 }
 
 function createTextResponse(model: string, text: string, inputTokens: number, outputTokens: number): OptimizationResult {
@@ -177,34 +99,6 @@ function createTextResponse(model: string, text: string, inputTokens: number, ou
     usage: {
       input_tokens: inputTokens,
       output_tokens: outputTokens
-    }
-  };
-}
-
-function createToolResponse(model: string, toolName: string, input: any, result: string): OptimizationResult {
-  const toolId = 'srvtoolu_' + nanoid(24);
-  return {
-    id: 'msg_' + nanoid(24),
-    type: 'message',
-    role: 'assistant',
-    model: model,
-    content: [
-      {
-        type: 'tool_use',
-        id: toolId,
-        name: toolName,
-        input: input
-      },
-      {
-        type: 'text',
-        text: `[Local Executor Result]:\n${result}`
-      }
-    ],
-    stop_reason: 'tool_use',
-    stop_sequence: null,
-    usage: {
-      input_tokens: 100,
-      output_tokens: Math.ceil(result.length / 4)
     }
   };
 }

@@ -9,8 +9,13 @@ import { logRequest } from '@/lib/logger';
 import { incrementRequestCount, incrementErrorCount, recordLatency, recordTokens } from '@/lib/metrics';
 import { tryOptimizations } from '@/lib/transformers/optimizations';
 import { transformError } from '@/lib/transformers/errors';
+import { runWithWebSearch } from '@/lib/tools/search-executor';
+import { callGemini } from '@/lib/gemini-adapter';
+import { getHealthiestKeyObj } from '@/lib/key-manager';
+import { logActivity, maskToken } from '@/lib/activity';
 
-export const runtime = 'edge';
+// Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
+export const runtime = 'nodejs';
 export const maxDuration = 300; // Increase timeout to 5 minutes
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
@@ -129,6 +134,20 @@ export async function POST(req: Request) {
             try { controller.close(); } catch {}
             await recordLatency(Date.now() - startTime);
             await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
+            logActivity({
+              ts: Date.now(),
+              userKey: maskToken(token),
+              model,
+              geminiModel: internalModel,
+              inputTokens: usageRef.inputTokens,
+              outputTokens: usageRef.outputTokens,
+              latencyMs: Date.now() - startTime,
+              retries: 0,
+              status: 'success',
+              streaming: true,
+              fallback: modelMap.primary !== internalModel,
+              toolsUsed: 0,
+            }).catch(() => {});
           }
         },
         // Called by the runtime when the client closes the connection early.
@@ -153,10 +172,22 @@ export async function POST(req: Request) {
       const toolIdMap = new Map<string, string>();
       const toolSchemas = new Map<string, any>();
       const originalToolNames = new Map<string, string>();
-      const geminiReq = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
-      
-      const res = await executeWithRetry(model, geminiReq, false, token, modelMap);
-      const geminiRes = await res.json();
+      const { geminiBody, webSearchConfig } = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+
+      let geminiRes: any;
+      if (webSearchConfig) {
+        // Web search mode: run internal search loop with Gemini, then return the
+        // final response that doesn't request any more searches.
+        const keyObj = await getHealthiestKeyObj(token);
+        const apiKey = keyObj?.key ?? '';
+        geminiRes = await runWithWebSearch(geminiBody, {
+          webSearchConfig,
+          callGemini: (b) => callGemini(internalModel, apiKey, b, false),
+        });
+      } else {
+        const res = await executeWithRetry(model, geminiBody, false, token, modelMap);
+        geminiRes = await res.json();
+      }
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames, internalModel);
 
       await recordLatency(Date.now() - startTime);
@@ -167,6 +198,20 @@ export async function POST(req: Request) {
         latency: Date.now() - startTime,
         status: 200
       });
+      logActivity({
+        ts: Date.now(),
+        userKey: maskToken(token),
+        model,
+        geminiModel: internalModel,
+        inputTokens: anthropicRes.usage.input_tokens,
+        outputTokens: anthropicRes.usage.output_tokens,
+        latencyMs: Date.now() - startTime,
+        retries: 0,
+        status: 'success',
+        streaming: false,
+        fallback: modelMap.primary !== internalModel,
+        toolsUsed: (anthropicRes.content ?? []).filter((b: { type: string }) => b.type === 'tool_use').length,
+      }).catch(() => {});
 
       return NextResponse.json(anthropicRes);
     }

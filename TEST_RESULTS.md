@@ -1,12 +1,73 @@
 # TEST_RESULTS.md
 
-## Commands
+## Dashboard Refactor — Test Run (Phase 5)
 
-- npx tsc --noEmit
-- npx tsx --test tests/process-supervisor.test.ts
-- npx tsx --test tests/behavioral-tests.ts tests/process-supervisor.test.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts tests/ai-compactor.test.ts
+**61 tests | 0 failures | 16 suites**
 
-## Outcome
+```
+npx tsx --test tests/dashboard-api-keys.test.ts tests/dashboard-auth-keys.test.ts tests/dashboard-routing.test.ts tests/dashboard-metrics.test.ts
+```
+
+```
+ℹ tests 61  |  ℹ pass 61  |  ℹ fail 0  |  ℹ duration_ms 2252
+```
+
+TypeScript: `npx tsc --noEmit` → zero errors.
+
+---
+
+## Session: Web Search + Operational Context
+
+### Commands Run
+
+```
+npx tsc --noEmit
+npx tsx --test tests/web-search.test.ts tests/operational-context.test.ts
+npx tsx --test tests/web-search.test.ts tests/operational-context.test.ts tests/interactive-command-guard.test.ts
+```
+
+### Outcome
+
+| Check | Result |
+|-------|--------|
+| TypeScript (`npx tsc --noEmit`) | **PASS** (0 errors) |
+| `tests/web-search.test.ts` | **24/24 pass** |
+| `tests/operational-context.test.ts` | **20/20 pass** |
+| Combined with `interactive-command-guard.test.ts` | **60/60 pass** |
+
+### Bug Fixed During Testing
+
+`operational-state.ts` background task failure detection: `"EADDRINUSE: address already in use"`
+contains `"already"` which contains the substring `"ready"` — matching the npm startup signal.
+Fixed by checking `isError` **before** startup signals in the task status update.
+
+### web-search.test.ts Coverage
+
+| Suite | Tests | Notes |
+|-------|-------|-------|
+| `isWebSearchTool` | 4 | Detection, edge cases, type safety |
+| `partitionWebSearchTools` | 6 | Split, defaults, domain config, multi-entry merge |
+| `WEB_SEARCH_FUNCTION_DECLARATION` | 1 | Gemini schema shape |
+| `transformToolsToGemini with web_search` | 2 | Filter integration |
+| `normalizeSearchResults` | 6 | Success, failure, empty, URL/title/rank preservation |
+| `buildSearchFunctionResponse` | 2 | Success and error shapes |
+| **Total** | **24** | |
+
+### operational-context.test.ts Coverage
+
+| Suite | Tests | Notes |
+|-------|-------|-------|
+| `shell type detection` | 4 | PowerShell, bash, git-bash, no-signal |
+| `artifact tracking` | 4 | exists, failed_create, missing, source |
+| `failure memory` | 3 | Interactive CLI, blocked escalation, permission denied |
+| `background task tracking` | 4 | Detect, running signal, failed on error, no duplicate |
+| `blocked patterns` | 3 | Guidance content, Windows warning, empty-state guard |
+| `persistence (load/save)` | 5 | Round-trip, Redis miss, key format, corrupt JSON, ID mismatch |
+| **Total** | **20** | |
+
+---
+
+## Session: Prior (abbreviated)
 
 - TypeScript check: PASS
 - Test suites: 14

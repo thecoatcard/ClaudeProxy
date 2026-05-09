@@ -1,6 +1,3 @@
-import { Redis } from '@upstash/redis';
-
-export const redis = new Redis({
-  url: process.env.REDIS_URL || 'http://localhost:8080',
-  token: process.env.REDIS_TOKEN || 'test-token',
-});
+// Thin re-export — all Redis operations now go through the ioredis-based wrapper.
+export { redis } from './redis/client';
+export type { RedisClient } from './redis/client';

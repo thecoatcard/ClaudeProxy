@@ -1,5 +1,47 @@
 # FILES_CHANGED.md
 
+---
+
+## Session: Web Search + Operational Context (current)
+
+### New Files
+
+- **lib/tools/web-search.ts** — Anthropic web_search tool compatibility layer for Gemini backend:
+  `isWebSearchTool`, `partitionWebSearchTools`, `WebSearchConfig`, `WEB_SEARCH_FUNCTION_DECLARATION`,
+  `executeWebSearch`, `braveSearch`, `tavilySearch`, `serpApiSearch`,
+  `normalizeSearchResults`, `buildSearchFunctionResponse`.
+
+- **lib/tools/search-executor.ts** — Multi-turn Gemini search loop:
+  `runWithWebSearch` (up to 5 turns), `injectWebSearchTool`, `removeWebSearchDeclaration`.
+
+- **lib/context/operational-state.ts** — Persistent operational context memory (Redis):
+  `OperationalState` schema (version 2), shell/artifact/failure/background-task detection,
+  `updateStateFromMessages`, `loadOperationalState`, `saveOperationalState`,
+  `buildOperationalGuidance`, `operationalStateKey`, `defaultOperationalState`.
+
+- **tests/web-search.test.ts** — 24 unit tests for web search layer.
+
+- **tests/operational-context.test.ts** — 20 unit tests for operational state system.
+
+- **WEB_SEARCH_SUPPORT_REPORT.md** — Architecture, provider config, streaming behaviour, env vars.
+
+- **OPERATIONAL_CONTEXT_REPORT.md** — Schema, detection rules, guidance format, Redis key structure.
+
+### Modified Files
+
+- **lib/transformers/tools.ts** — Filters `web_search` from Gemini FunctionDeclarations.
+
+- **lib/transformers/request.ts** — Returns `{geminiBody, webSearchConfig}`; wires operational state
+  load/update/inject/save; adds opStateStore Redis adapter; imports web-search and operational-state.
+
+- **app/api/v1/messages/route.ts** — Non-streaming web search path via `runWithWebSearch`.
+
+- **lib/transformers/stream.ts** — Streaming web search pre-execution; synthetic SSE emission.
+
+---
+
+## Session: Prior work (abbreviated)
+
 ## Added
 
 - lib/agent/process-supervisor.ts

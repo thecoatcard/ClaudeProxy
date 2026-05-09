@@ -156,6 +156,53 @@ export function detectFailureLoop(messages: any[], internalModel?: string): Loop
   }
 
   if (runCount < policy.minRepeats || !lastFailed) {
+    // BUG-011 FIX: Check for alternating failure patterns: A→B→A→B where A and B
+    // are different failed tool signatures. If any signature appears >= minRepeats
+    // times in the tail of failed pairs, it qualifies as a loop.
+    const failedPairs = pairs.filter(p => p.failed);
+    if (failedPairs.length >= policy.minRepeats * 2) {
+      const sigCounts = new Map<string, { pair: ToolPair; count: number }>();
+      for (const p of failedPairs) {
+        const entry = sigCounts.get(p.inputSig);
+        if (entry) {
+          entry.count++;
+        } else {
+          sigCounts.set(p.inputSig, { pair: p, count: 1 });
+        }
+      }
+      for (const [, entry] of sigCounts) {
+        if (entry.count >= policy.minRepeats) {
+          const alt = entry.pair;
+          const guidance = [
+            '',
+            '---',
+            `[GATEWAY LOOP DETECTOR] Tool \`${alt.name}\` has failed ${entry.count} times (alternating with other tools). This is a non-consecutive loop pattern — DO NOT retry the same call.`,
+            '',
+            'Required next step:',
+            '1. Read ALL recent error messages carefully to understand the combined pattern.',
+            '2. Your current strategy is not working — try a fundamentally different approach.',
+            '3. If dependencies between tool calls are cycling, break the cycle: resolve the root blocker first.',
+            '4. If you cannot proceed, stop and report the blocker in plain text to the user.',
+            '',
+            `Last error for this tool: ${alt.errorText.slice(0, 240) || '(empty)'}`,
+            policy.extraGuidance,
+            '---',
+            '',
+          ].join('\n');
+
+          return {
+            detected: true,
+            guidance,
+            diagnostics: {
+              toolName: alt.name,
+              repeats: entry.count,
+              inputPreview: alt.inputPreview,
+              errorPreview: alt.errorText.slice(0, 240),
+            },
+          };
+        }
+      }
+    }
     return { detected: false, guidance: '', diagnostics: null };
   }
 

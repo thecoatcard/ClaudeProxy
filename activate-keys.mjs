@@ -1,59 +1,72 @@
+// activate-keys.mjs
+// Resets all Gemini keys in the pool to healthy status.
+// Usage: node activate-keys.mjs
+//
+// Requires REDIS_URL in .env:
+//   REDIS_URL=redis://default:PASSWORD@HOST:PORT
+
 import fs from 'fs';
-import https from 'https';
+import { createRequire } from 'module';
 
-const env = fs.readFileSync('.env', 'utf8').split('\n');
-let redisUrl = '', redisToken = '';
+const require = createRequire(import.meta.url);
+
+// Read .env file manually (avoid requiring dotenv dependency).
+const env = fs.existsSync('.env') ? fs.readFileSync('.env', 'utf8').split('\n') : [];
+let redisUrl = process.env.REDIS_URL || '';
 for (const line of env) {
-  if (line.startsWith('REDIS_URL=')) redisUrl = line.split('=')[1].trim().replace(/['"]/g, '');
-  if (line.startsWith('REDIS_TOKEN=')) redisToken = line.split('=')[1].trim().replace(/['"]/g, '');
+  const trimmed = line.trim();
+  if (trimmed.startsWith('REDIS_URL=')) {
+    redisUrl = trimmed.slice('REDIS_URL='.length).replace(/^["']|["']$/g, '');
+  }
 }
-async function activateAllKeys() {
-  const res = await fetch(`${redisUrl}/zrange/gemini:key_pool/0/-1`, {
-    headers: { Authorization: `Bearer ${redisToken}` }
-  });
-  const data = await res.json();
-  const keys = data.result;
 
-  if (!keys || keys.length === 0) {
-    console.log("No keys found.");
+if (!redisUrl) {
+  console.error('Error: REDIS_URL is not set. Add it to .env or set the environment variable.');
+  process.exit(1);
+}
+
+const { default: Redis } = await import('ioredis');
+const redis = new Redis(redisUrl, {
+  maxRetriesPerRequest: 2,
+  enableReadyCheck: false,
+  lazyConnect: false,
+});
+
+redis.on('error', (err) => {
+  console.error('[Redis error]', err.message);
+});
+
+async function activateAllKeys() {
+  console.log(`Connecting to Redis: ${redisUrl.replace(/:[^:@]+@/, ':***@')}`);
+
+  const ids = await redis.zrange('gemini:key_pool', 0, -1);
+  if (!ids || ids.length === 0) {
+    console.log('No keys found in gemini:key_pool.');
+    await redis.quit();
     return;
   }
 
-  console.log(`Found ${keys.length} keys. Activating...`);
+  console.log(`Found ${ids.length} keys. Activating...`);
 
-  let count = 0;
-  for (const id of keys) {
-    // get key data
-    const kRes = await fetch(`${redisUrl}/hgetall/gemini:key:${id}`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
+  const pipeline = redis.pipeline();
+  for (const id of ids) {
+    pipeline.hset(`gemini:key:${id}`, {
+      status: 'healthy',
+      failure_count: 0,
+      cooldown_until: 0,
+      rpm_used: 0,
     });
-    const kData = await kRes.json();
-    const props = kData.result;
-    
-    // Convert array format [k1, v1, k2, v2] to object if needed
-    let rpmUsed = 0;
-    if (Array.isArray(props)) {
-      for (let i = 0; i < props.length; i += 2) {
-        if (props[i] === 'rpm_used') rpmUsed = Number(props[i+1]);
-      }
-    } else if (props && props.rpm_used) {
-      rpmUsed = Number(props.rpm_used);
-    }
-
-    // Set status healthy, failure_count 0, cooldown_until 0
-    await fetch(`${redisUrl}/hset/gemini:key:${id}/status/healthy/failure_count/0/cooldown_until/0`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
-    });
-
-    // Reset score to 100 - rpmUsed
-    await fetch(`${redisUrl}/zadd/gemini:key_pool/${100 - rpmUsed}/${id}`, {
-      headers: { Authorization: `Bearer ${redisToken}` }
-    });
-    
-    count++;
+    pipeline.zadd('gemini:key_pool', 100, id);
   }
 
-  console.log(`Successfully activated ${count} keys!`);
+  await pipeline.exec();
+  console.log(`Successfully activated ${ids.length} keys!`);
+  await redis.quit();
 }
 
-activateAllKeys().catch(console.error);
+activateAllKeys().catch((err) => {
+  console.error('Fatal error:', err.message);
+  redis.disconnect();
+  process.exit(1);
+});
+

@@ -364,6 +364,11 @@ export function assessLongRunningProcessHistory(messages: any[]): HistoryProcess
     lastCommand: detection,
     lastAnalysis: analysis,
     environment,
-    guidance: ['', '---', '[LONG-RUNNING PROCESS SUPERVISOR]', baseGuidance, monitoringGuidance, stateGuidance, terminationGuidance, '---', ''].join('\n'),
+    // BUG-012 FIX: When startup state is STARTED, the process is running — injecting
+    // "run in background and verify" guidance every subsequent turn is noise and can
+    // confuse the model. Only emit guidance for non-STARTED states.
+    guidance: analysis?.state === 'STARTED'
+      ? ''
+      : ['', '---', '[LONG-RUNNING PROCESS SUPERVISOR]', baseGuidance, monitoringGuidance, stateGuidance, terminationGuidance, '---', ''].join('\n'),
   };
 }

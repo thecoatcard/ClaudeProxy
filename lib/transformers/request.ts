@@ -11,6 +11,27 @@ import {
 import { runBehaviorAudit } from '../agent/behavior-auditor';
 import { getAdaptiveCompactionPolicy } from './adaptive-compaction-policy';
 import { hydrateCompactedMarkers } from '../compactor/ai-compactor';
+import { stableHash } from '../utils/hash';
+import { partitionWebSearchTools, type WebSearchConfig } from '../tools/web-search';
+import {
+  loadOperationalState,
+  saveOperationalState,
+  updateStateFromMessages,
+  buildOperationalGuidance,
+  type OperationalStateStore,
+} from '../context/operational-state';
+export type { WebSearchConfig };
+
+// Redis store adapter for operational state.
+const opStateStore: OperationalStateStore = {
+  async get(key: string) {
+    const v = await redis.get<string>(key).catch(() => null);
+    return typeof v === 'string' ? v : null;
+  },
+  async set(key: string, value: string, ttl: number) {
+    await redis.set(key, value, { ex: ttl }).catch(() => {});
+  },
+};
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 // Per-model max output token ceilings (Gemini rejects values above these).
@@ -41,15 +62,6 @@ const DEFAULT_SUMMARY_CHAR_BUDGET = Number(process.env.CONTEXT_SUMMARY_CHAR_BUDG
 // Tail bytes are preserved so file endings (exports, closing braces) remain visible.
 const TOOL_RESULT_MAX_CHARS = Number(process.env.TOOL_RESULT_MAX_CHARS || 40000);
 const TOOL_RESULT_TAIL_CHARS = Number(process.env.TOOL_RESULT_TAIL_CHARS || 4000);
-
-function stableHash(input: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-  }
-  return (hash >>> 0).toString(16);
-}
 
 function extractText(content: any): string {
   if (!content) return '';
@@ -141,7 +153,7 @@ export async function transformRequestToGemini(
   internalModel?: string,
   originalToolNames?: Map<string, string>,
   userId?: string
-) {
+): Promise<{ geminiBody: any; webSearchConfig: WebSearchConfig | null }> {
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
   const conversationId = deriveConversationId(anthropicReq, userId);
@@ -184,6 +196,16 @@ export async function transformRequestToGemini(
 
   // Capture original Anthropic input_schemas so the response/stream path can
   // repair Gemini functionCall args against them before emitting tool_use.
+  // Partition web_search server tools away from regular function tools so they
+  // are never sent to Gemini as FunctionDeclarations.
+  let webSearchConfig: WebSearchConfig | null = null;
+  if (Array.isArray(anthropicReq.tools)) {
+    const { webSearchConfig: wsc, functionTools } = partitionWebSearchTools(anthropicReq.tools);
+    webSearchConfig = wsc;
+    // Replace the tools array with only function tools for downstream processing.
+    anthropicReq = { ...anthropicReq, tools: functionTools };
+  }
+
   if (toolSchemas && Array.isArray(anthropicReq.tools)) {
     for (const tool of anthropicReq.tools) {
       if (tool && typeof tool.name === 'string' && tool.input_schema) {
@@ -214,6 +236,26 @@ export async function transformRequestToGemini(
   const auditResult = await runBehaviorAudit(anthropicReq.messages || [], systemText, internalModel);
   if (auditResult.hasGuidance) {
     systemText = (systemText ? systemText + '\n' : '') + auditResult.guidance;
+  }
+
+  // ── Operational context memory ───────────────────────────────────────────
+  // Load persistent operational state (shell type, artifact map, failure
+  // memory) from Redis, update it with the current messages, then inject
+  // a compact guidance block and save the updated state back.
+  // Runs best-effort — a Redis failure never blocks the request.
+  let opStateInjected = false;
+  try {
+    const opState = await loadOperationalState(conversationId, opStateStore);
+    const updatedOpState = updateStateFromMessages(opState, anthropicReq.messages || []);
+    const opGuidance = buildOperationalGuidance(updatedOpState);
+    if (opGuidance) {
+      systemText = (systemText ? systemText + '\n' : '') + opGuidance;
+      opStateInjected = true;
+    }
+    // Persist asynchronously — don't block the main path.
+    saveOperationalState(updatedOpState, opStateStore).catch(() => {});
+  } catch (e) {
+    console.warn('[request] operational state error (non-fatal):', String(e));
   }
 
   const systemInstruction = systemText ? {
@@ -430,9 +472,13 @@ export async function transformRequestToGemini(
   if (anthropicReq.temperature !== undefined) generationConfig.temperature = anthropicReq.temperature;
   if (anthropicReq.top_p       !== undefined) generationConfig.topP        = anthropicReq.top_p;
   // top_k is not in the Anthropic spec but Claude Code occasionally forwards it.
-  // Gemini's topK is usually capped at 40.
-  if (anthropicReq.top_k       !== undefined) {
-    generationConfig.topK = Math.min(Number(anthropicReq.top_k), 40);
+  // BUG-008 FIX: Gemini 2.5 supports topK up to 64; cap per-model rather than
+  // using a blanket 40 limit that silently truncates valid values for newer models.
+  if (anthropicReq.top_k !== undefined) {
+    const TOP_K_CEILING = (internalModel && (
+      internalModel.includes('2.5') || internalModel.includes('3.') 
+    )) ? 64 : 40;
+    generationConfig.topK = Math.min(Number(anthropicReq.top_k), TOP_K_CEILING);
   }
 
   // stop_sequences → Gemini stopSequences.
@@ -527,5 +573,5 @@ export async function transformRequestToGemini(
     { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
   ];
 
-  return result;
+  return { geminiBody: result, webSearchConfig };
 }

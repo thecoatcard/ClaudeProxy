@@ -108,7 +108,19 @@ describe('process supervisor detection and analysis', () => {
     const assessment = assessLongRunningProcessHistory(messages);
     assert.equal(assessment.foundLongRunningCommand, true);
     assert.equal(assessment.lastAnalysis?.state, 'STARTED');
+    // BUG-012 FIX: STARTED state suppresses guidance noise. Guidance is empty.
+    assert.equal(assessment.guidance, '', 'STARTED state should produce no guidance (BUG-012)');
+  });
+
+  it('injects guidance for UNKNOWN process state (not STARTED)', () => {
+    const messages = [
+      ...pair('p1', 'npm run dev', 'Starting server...'),
+    ];
+
+    const assessment = assessLongRunningProcessHistory(messages);
+    assert.equal(assessment.foundLongRunningCommand, true);
+    assert.ok(assessment.lastAnalysis?.state !== 'STARTED');
+    // Non-STARTED states SHOULD produce guidance.
     assert.match(assessment.guidance, /long-running process/i);
-    assert.match(assessment.guidance, /30 seconds/i);
   });
 });

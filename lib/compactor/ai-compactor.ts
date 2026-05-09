@@ -1,12 +1,16 @@
 import { callGemini } from '../gemini-adapter';
 import { getHealthiestKeyObj, reportKeyFailure } from '../key-manager';
 import { redis } from '../redis';
+import { stableHash } from '../utils/hash';
 
 const COMPACTOR_MODEL = 'gemma-4-31b-it';
 const COMPACTION_TOOL_OUTPUT_MAX_CHARS = Number(process.env.COMPACTION_TOOL_OUTPUT_MAX_CHARS || 4000);
 const CHUNK_TIMEOUT_MS = Number(process.env.COMPACTION_CHUNK_TIMEOUT_MS || 20000);
 
 export const COMPACTED_MARKER_SENTINEL = '<!-- compacted:v2 -->';
+// BUG-009 FIX: v1 sentinel must also be recognised during hydration so that
+// conversations compacted before the v2 migration are not silently broken.
+const COMPACTED_MARKER_SENTINEL_V1 = '<!-- compacted:v1 -->';
 
 export interface CompactedMemoryRecord {
   conversation_id: string;
@@ -29,15 +33,6 @@ const redisStore: CompactorStore = {
     return typeof v === 'string' ? v : null;
   },
 };
-
-function stableHash(input: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-  }
-  return (hash >>> 0).toString(16);
-}
 
 export function buildCompactedRangeId(messages: any[], start: number, end: number): string {
   const sig = `${start}:${end}:${messages.length}:${messages.map(m => `${m?.role || '?'}:${String(m?.content || '').slice(0, 64)}`).join('|')}`;
@@ -137,7 +132,12 @@ export async function hydrateCompactedMarkers(
 
     if (typeof msg.content === 'string') {
       const rangeId = parseCompactedRangeId(msg.content);
-      if (!rangeId) continue;
+      if (!rangeId) {
+        // BUG-009 FIX: v1 compacted messages use a different sentinel and have no
+        // range_id. Pass them through unchanged — they carry their summary inline.
+        if (msg.content.includes(COMPACTED_MARKER_SENTINEL_V1)) continue;
+        continue;
+      }
       const record = await loadCompactedSummary(conversationId, rangeId, store);
       if (record) hydrated[i] = { ...msg, content: buildStoredSummaryMessage(rangeId, record.summary) };
       continue;
@@ -147,6 +147,8 @@ export async function hydrateCompactedMarkers(
       let changed = false;
       const nextBlocks = msg.content.map((b: any) => {
         if (b?.type !== 'text' || typeof b.text !== 'string') return b;
+        // BUG-009 FIX: skip v1 compacted blocks — they carry inline summaries, no lookup needed.
+        if (b.text.includes(COMPACTED_MARKER_SENTINEL_V1)) return b;
         const rangeId = parseCompactedRangeId(b.text);
         if (!rangeId) return b;
         changed = true;

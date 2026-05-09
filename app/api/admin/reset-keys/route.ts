@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { validateAdminKey } from '@/lib/auth';
 import { resetAllKeys } from '@/lib/key-manager';
 
-export const runtime = 'edge';
+// Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
+export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   // 1. Auth check

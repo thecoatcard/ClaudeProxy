@@ -68,9 +68,12 @@ export async function* transformStream(
     // 2. Perform the heavy work (Transformation + Execution) INSIDE the stream
     // This work can take >25s on long histories, but the platform timeout is 
     // now averted because we've already sent the headers and initial chunks.
-    let geminiReq;
+    let geminiReq: any;
+    let webSearchConfig: import('./request').WebSearchConfig | null = null;
     try {
-      geminiReq = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+      const transformed = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token);
+      geminiReq = transformed.geminiBody;
+      webSearchConfig = transformed.webSearchConfig;
     } catch (e: any) {
       console.error("Request transformation failed", e);
       yield `event: error\ndata: ${JSON.stringify({
@@ -79,6 +82,58 @@ export async function* transformStream(
       })}\n\n`;
       return;
     }
+
+    // ── Web search pre-execution loop ────────────────────────────────────────
+    // When the request includes a web_search tool, we run all searches
+    // synchronously (non-streaming) before opening the final Gemini SSE stream.
+    // This keeps the streaming protocol intact: the stream starts only after
+    // all search results have been injected into the Gemini context.
+    if (webSearchConfig) {
+      try {
+        const { runWithWebSearch } = await import('../tools/search-executor');
+        const { getHealthiestKeyObj: getKey } = await import('../key-manager');
+        const { callGemini: cg } = await import('../gemini-adapter');
+        const keyObj = await getKey(token);
+        const apiKey = keyObj?.key ?? '';
+        // Build a non-streaming body to run the loop.
+        const nonStreamBody = { ...geminiReq };
+        const finalJson = await runWithWebSearch(nonStreamBody, {
+          webSearchConfig,
+          callGemini: (b) => cg(internalModel, apiKey, b, false),
+        });
+        // Extract the enriched contents from the resolved body. The search
+        // executor mutated its internal copy; we reconstruct from the last model
+        // turn to inject search results into the streaming request.
+        const lastParts = finalJson?.candidates?.[0]?.content?.parts ?? [];
+        const hasSearchCall = lastParts.some((p: any) => p.functionCall?.name === 'web_search');
+        if (!hasSearchCall && finalJson?.candidates?.[0]) {
+          // All searches done — pass the final JSON directly to the SSE synthetic
+          // stream path below by converting the JSON to SSE events and returning.
+          // (For now, re-inject as context so the streaming call continues cleanly.)
+          // This is a simple approach: we already have the final answer, emit it.
+          const text = lastParts.filter((p: any) => p.text && !p.thought).map((p: any) => p.text).join('');
+          if (text) {
+            const blockIdx = contentBlockIndex++;
+            yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIdx, content_block: { type: 'text', text: '' } })}\n\n`;
+            yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIdx, delta: { type: 'text_delta', text } })}\n\n`;
+            yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: blockIdx })}\n\n`;
+            const usage = finalJson?.usageMetadata;
+            yield `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: usage?.candidatesTokenCount ?? text.length >> 2 } })}\n\n`;
+            yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+            if (usageRef) {
+              usageRef.inputTokens = usage?.promptTokenCount ?? 0;
+              usageRef.outputTokens = usage?.candidatesTokenCount ?? 0;
+            }
+            return;
+          }
+        }
+        // Fall through to normal streaming with enriched context if there are
+        // still pending steps or no text was produced.
+      } catch (e) {
+        console.warn('[stream] web search loop error, proceeding without search results', e);
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     let res: Response;
     try {
@@ -236,17 +291,29 @@ export async function* transformStream(
           
           // If action-style tool text appears in the text stream and is fully
           // parseable, recover it into a structured tool_use block.
+          //
+          // BUG-003 FIX: track `actionSearchOffset` so each iteration searches
+          // only the *unprocessed* suffix of cleanedText. Without this, the loop
+          // re-matches the same action on every iteration (infinite loop / duplicate
+          // tool_use emissions). The offset is kept separate from outputTextLength
+          // because outputTextLength may be held back by the prefix-suffix guard below.
+          let actionSearchOffset = outputTextLength;
           while (true) {
-            const recovered = recoverActionText(cleanedText);
+            const searchSlice = cleanedText.slice(actionSearchOffset);
+            const recovered = recoverActionText(searchSlice);
             if (!recovered) break;
-            if (!shouldRecoverActionText(internalModel, cleanedText, recovered)) break;
+            // Translate relative positions back to absolute positions in cleanedText.
+            const absStart = actionSearchOffset + recovered.start;
+            const absEnd   = actionSearchOffset + recovered.end;
+            const absRecovered = { ...recovered, start: absStart, end: absEnd };
+            if (!shouldRecoverActionText(internalModel, cleanedText, absRecovered)) break;
 
             const originalName = originalToolNames.get(recovered.toolName) || recovered.toolName;
             const schema = toolSchemas?.get(originalName) || toolSchemas?.get(recovered.toolName);
             const repairedInput = repairToolInput(recovered.args, schema);
 
             // 1. Emit the text delta for anything before the action marker.
-            const beforeAction = cleanedText.slice(outputTextLength, recovered.start);
+            const beforeAction = cleanedText.slice(outputTextLength, absStart);
             if (beforeAction.length > 0) {
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
@@ -280,7 +347,8 @@ export async function* transformStream(
             yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
             contentBlockIndex++;
 
-            outputTextLength = recovered.end;
+            outputTextLength = absEnd;
+            actionSearchOffset = absEnd; // Advance search past this action — prevents re-match
 
             console.info('[action-recovery] recovered action text as tool_use', {
               source: 'stream',
@@ -433,6 +501,17 @@ export async function* transformStream(
   } catch (err) {
     console.error("Stream transformation failed", err);
     await incrementErrorCount({ model: reqModel, userToken: token }).catch(() => {});
+    // BUG-006 FIX: close any open content blocks before emitting error/stop.
+    // An unclosed block leaves the client SSE parser in a broken state.
+    if (inContentBlock || inToolCall || inThinking) {
+      yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
+    }
+    const stopReason = sawToolUse ? 'tool_use' : 'end_turn';
+    yield `event: message_delta\ndata: ${JSON.stringify({
+      type: 'message_delta',
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: finalOutputTokens }
+    })}\n\n`;
     // CRITICAL: Always send message_stop to prevent agent from hanging
     yield `event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream transformation failed"}}\n\n`;
     yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;

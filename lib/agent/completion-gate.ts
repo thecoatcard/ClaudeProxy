@@ -54,13 +54,20 @@ export function detectPrematureCompletion(messages: any[]): CompletionGateResult
     return { prematureCompletion: false, guidance: '', unverifiedClaims: [], failedToolCount: 0, uncertainToolCount: 0 };
   }
 
-  // Scan the LAST assistant message for completion signals. Earlier ones may be
-  // intermediate summaries — we only care about the most recent claim.
+  // Scan the LAST assistant message that contains actual TEXT for completion signals.
+  // BUG-007 FIX: A turn with only tool_use blocks (no text) used to cause the gate to
+  // skip the claim in the preceding text-bearing turn. We now scan back up to 5
+  // assistant messages until we find one with non-empty text content.
   let lastAssistantText = '';
-  for (let i = messages.length - 1; i >= 0; i--) {
+  let scanned = 0;
+  for (let i = messages.length - 1; i >= 0 && scanned < 5; i--) {
     if (messages[i].role === 'assistant') {
-      lastAssistantText = extractText(messages[i].content);
-      break;
+      scanned++;
+      const candidate = extractText(messages[i].content);
+      if (candidate.trim()) {
+        lastAssistantText = candidate;
+        break;
+      }
     }
   }
 

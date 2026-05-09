@@ -17,6 +17,7 @@ import { inspectHistoryPaths, buildPathGuidance } from './path-guard';
 import { validateSpec } from './spec-validator';
 import { buildAdaptiveBehaviorReminder } from '../transformers/adaptive-guidance';
 import { assessLongRunningProcessHistory } from './process-supervisor';
+import { detectInteractiveCommandsInHistory, buildInteractiveCommandGuidance } from './interactive-command-guard';
 
 export interface BehaviorAuditResult {
   hasGuidance: boolean;
@@ -29,6 +30,7 @@ export interface BehaviorAuditResult {
     unaddressedRequirements: number;
     longRunningProcessDetected: boolean;
     longRunningProcessState: 'STARTED' | 'FAILED' | 'UNKNOWN' | 'NONE';
+    interactiveCommandsDetected: number;
   };
 }
 
@@ -46,6 +48,7 @@ export async function runBehaviorAudit(
     unaddressedRequirements: 0,
     longRunningProcessDetected: false,
     longRunningProcessState: 'NONE',
+    interactiveCommandsDetected: 0,
   };
 
   // 1. Loop detection (highest priority — replaces previous standalone call).
@@ -112,6 +115,18 @@ export async function runBehaviorAudit(
     console.warn(
       `[behavior-auditor] long-running process: state=${diagnostics.longRunningProcessState}` +
       ` env=${processAssessment.environment}`,
+    );
+  }
+
+  // 6. Interactive command guard — detect wizard-style CLIs that block on TTY input.
+  // Scans recent messages (last 20) to keep cost low. Only fires once per detected command.
+  const interactiveDetections = detectInteractiveCommandsInHistory(messages.slice(-20));
+  if (interactiveDetections.length > 0) {
+    diagnostics.interactiveCommandsDetected = interactiveDetections.length;
+    const interactiveGuidance = buildInteractiveCommandGuidance(interactiveDetections);
+    if (interactiveGuidance) guidanceParts.push(interactiveGuidance);
+    console.warn(
+      `[behavior-auditor] interactive commands detected: ${interactiveDetections.map(d => d.matchedRule).join(', ')}`,
     );
   }
 

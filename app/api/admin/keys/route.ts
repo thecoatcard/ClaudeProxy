@@ -46,6 +46,31 @@ export async function PATCH(req: Request) {
 
   const { searchParams } = new URL(req.url);
   const action = searchParams.get('action');
+
+  // Per-key toggle: ?action=toggle&id=KEY_ID
+  if (action === 'toggle') {
+    const id = searchParams.get('id');
+    if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+    const data = await redis.hgetall(`gemini:key:${id}`);
+    if (!data) return NextResponse.json({ error: 'Key not found' }, { status: 404 });
+    const newStatus = data.status === 'disabled' ? 'healthy' : 'disabled';
+    const newScore = newStatus === 'healthy' ? 100 : 0;
+    await redis.hset(`gemini:key:${id}`, { status: newStatus, failure_count: 0, cooldown_until: 0 });
+    await redis.zadd('gemini:key_pool', { score: newScore, member: id });
+    return NextResponse.json({ success: true, status: newStatus });
+  }
+
+  // Per-key revalidate: ?action=reactivate&id=KEY_ID
+  if (action === 'reactivate') {
+    const id = searchParams.get('id');
+    if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+    const data = await redis.hgetall(`gemini:key:${id}`);
+    if (!data) return NextResponse.json({ error: 'Key not found' }, { status: 404 });
+    await redis.hset(`gemini:key:${id}`, { status: 'healthy', failure_count: 0, cooldown_until: 0 });
+    await redis.zadd('gemini:key_pool', { score: 100, member: id });
+    return NextResponse.json({ success: true, status: 'healthy' });
+  }
+
   if (action !== 'activate-all') {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   }

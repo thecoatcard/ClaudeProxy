@@ -26,10 +26,24 @@ function normalizeType(rawType: any): { type: string; nullable?: boolean } {
 function convertSchema(schema: any): any {
   if (!schema || typeof schema !== 'object') return { type: 'STRING' };
 
-  // Flatten oneOf/anyOf/allOf by picking the first branch — Gemini has no union.
+  // Flatten oneOf/anyOf/allOf by picking the first non-null branch — Gemini has no union.
+  // BUG-004 FIX: Before picking a branch, scan all branches for a null type entry.
+  // If found, set nullable: true on the merged schema so optional fields are preserved.
+  const allBranches: any[] = schema.oneOf || schema.anyOf || schema.allOf || [];
   const branch = schema.oneOf?.[0] ?? schema.anyOf?.[0] ?? schema.allOf?.[0];
   if (branch && typeof branch === 'object') {
-    return convertSchema({ ...schema, ...branch, oneOf: undefined, anyOf: undefined, allOf: undefined });
+    const hasNullBranch = allBranches.some(
+      (b: any) => b?.type === 'null'
+        || (Array.isArray(b?.type) && b.type.some((t: any) => String(t).toLowerCase() === 'null'))
+    );
+    return convertSchema({
+      ...schema,
+      ...branch,
+      nullable: branch.nullable || schema.nullable || hasNullBranch || undefined,
+      oneOf: undefined,
+      anyOf: undefined,
+      allOf: undefined,
+    });
   }
 
   // `const` is equivalent to a single-value enum
@@ -81,11 +95,16 @@ function convertSchema(schema: any): any {
   return result;
 }
 
+import { isWebSearchTool } from '../tools/web-search';
+
 export function transformToolsToGemini(tools: any[], originalNameMap?: Map<string, string>) {
   if (!tools || tools.length === 0) return undefined;
 
   const declarations = tools
-    .filter(t => t && typeof t.name === 'string')
+    // Anthropic native server-side tools (e.g. web_search) have no `name` field
+    // and are NOT converted to Gemini FunctionDeclarations — they are handled by
+    // the search-executor after the Gemini call returns.
+    .filter(t => t && typeof t.name === 'string' && !isWebSearchTool(t))
     .map(tool => {
       const parameters = convertSchema(tool.input_schema || { type: 'object', properties: {} });
       const sanitizedName = tool.name.replace(/[^a-zA-Z0-9_]/g, '_');
