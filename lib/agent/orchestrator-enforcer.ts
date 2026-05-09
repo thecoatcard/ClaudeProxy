@@ -286,6 +286,66 @@ export async function runOrchestratedExecution(
   return mergeResult.output;
 }
 
+/**
+ * Phase 6: Resume orchestrated execution after an overload recovery.
+ *
+ * Unlike runOrchestratedExecution, this only re-executes tasks that are
+ * still PENDING or FAILED (not COMPLETED). This preserves completed
+ * subagent work and avoids restarting the entire orchestration.
+ */
+export async function resumeOrchestratedExecution(
+  ctx: OrchestratorContext
+): Promise<string | null> {
+  if (!ctx.orchestratorEnabled || ctx.subagentTasks.length === 0) return null;
+
+  // Load current task states from Redis
+  const liveTasks = await getSubagentTasksByParent(ctx.parentId);
+  if (liveTasks.length === 0) return runOrchestratedExecution(ctx);
+
+  // Filter to only tasks that still need execution
+  const remainingTasks = liveTasks.filter(
+    (t) => t.status === 'PENDING' || t.status === 'FAILED'
+  );
+
+  if (remainingTasks.length === 0) {
+    logOrchestrator('subagent-completed', {
+      parentId: ctx.parentId,
+      action: 'resume-all-already-completed',
+    });
+    // All tasks already done — just merge
+    const allTasks = liveTasks;
+    // Build a synthetic scheduler result from completed tasks
+    const schedulerResult = await scheduleSubagentTasks(allTasks);
+    const mergeResult = mergeSubagentOutputs(allTasks, schedulerResult);
+    await finalizeOrchestration(ctx, mergeResult.sourceTaskIds, mergeResult.output);
+    return mergeResult.output;
+  }
+
+  logOrchestrator('orchestrator-status', {
+    action: 'resume',
+    parentId: ctx.parentId,
+    remainingTasks: remainingTasks.length,
+    completedTasks: liveTasks.length - remainingTasks.length,
+  });
+
+  // Re-run only remaining tasks
+  const schedulerResult = await scheduleSubagentTasks(remainingTasks);
+
+  logOrchestrator('subagent-completed', {
+    parentId: ctx.parentId,
+    resumed: true,
+    completed: schedulerResult.completed.length,
+    failed: schedulerResult.failed.length,
+    skipped: schedulerResult.skipped.length,
+  });
+
+  // Merge ALL tasks (completed + newly completed)
+  const mergeResult = mergeSubagentOutputs(liveTasks, schedulerResult);
+  await finalizeOrchestration(ctx, mergeResult.sourceTaskIds, mergeResult.output);
+
+  return mergeResult.output;
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------

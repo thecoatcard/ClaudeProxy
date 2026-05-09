@@ -12,6 +12,14 @@ import {
   createCachedContent,
   isCacheSupported,
 } from './cache-manager';
+import {
+  isOverloadError as classifyOverload,
+  isRecoverableError,
+  recoverFromOverload,
+  compactBodyForOverload,
+  detectTokenPressure,
+  computeOverloadBackoff,
+} from './recovery/overload-recovery';
 
 // Models that can't see images. We strip inlineData/fileData parts before
 // sending to avoid a round-trip 400.
@@ -183,7 +191,28 @@ export async function executeWithRetry(
     const keyObj = await getHealthiestKeyObj(userId);
 
     if (!keyObj) {
+      // Phase 1: Classify as recoverable — attempt key rotation before throwing
+      const recoveryResult = await recoverFromOverload({
+        currentModel: currentInternalModel,
+        currentKeyId: 'none',
+        triedModels: overloadedModels,
+        attempt,
+        body: geminiBody,
+        userId,
+      });
+      if (recoveryResult.recovered && recoveryResult.newKeyId) {
+        console.info(`[retry] No key available — recovery rotated to key ${recoveryResult.newKeyId}`);
+        await sleep(recoveryResult.backoffMs);
+        continue;
+      }
       throw new Error('overloaded_error'); // will be mapped to 529
+    }
+
+    // Phase 7: Proactive token pressure detection — compact before overload
+    const pressure = detectTokenPressure(geminiBody);
+    if (pressure.high && attempt === 1) {
+      console.info(`[retry] High token pressure detected (${pressure.estimatedTokens} est tokens) — compacting proactively`);
+      geminiBody = compactBodyForOverload(geminiBody);
     }
 
     // thoughtSignatures are only valid for the model that produced them.
@@ -262,27 +291,47 @@ export async function executeWithRetry(
       }
 
       if (res.status === 503 || res.status >= 500) {
-        await reportKeyFailure(keyObj.id, 'server');
+        // Phase 2: Use overload recovery pipeline instead of raw fallback
+        const recovery = await recoverFromOverload({
+          currentModel: currentInternalModel,
+          currentKeyId: keyObj.id,
+          triedModels: overloadedModels,
+          attempt,
+          body: geminiBody,
+          userId,
+        });
+
         overloadedModels.add(currentInternalModel);
 
-        // Rotate immediately to the next model — there's no point retrying the
-        // same overloaded model a second time on a different key; it's the model
-        // tier that's under load, not the key.
-        if (fallbackIndex < fallbacks.length) {
+        // Phase 3: Compact if recovery says so
+        if (recovery.compacted) {
+          geminiBody = compactBodyForOverload(geminiBody);
+        }
+
+        // Phase 5: Model fallback from recovery pipeline
+        if (recovery.newModel) {
+          console.warn(`[routing] Recovery fallback: ${currentInternalModel} -> ${recovery.newModel} (status=${res.status})`);
+          currentInternalModel = recovery.newModel;
+          // Also advance fallbackIndex past this model if it's in our chain
+          while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
+            fallbackIndex++;
+          }
+          if (fallbackIndex < fallbacks.length) fallbackIndex++;
+        } else if (fallbackIndex < fallbacks.length) {
           const prev = currentInternalModel;
           currentInternalModel = fallbacks[fallbackIndex++];
           console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_overload status=${res.status})`);
         }
 
         // Fast-exit: every model in the chain has now returned 503 at least once.
-        // It's a regional model-side outage — burning more retries won't help.
         if (overloadedModels.size === 1 + fallbacks.length) {
           console.warn(`[retry] All ${overloadedModels.size} models in chain overloaded — failing fast after ${attempt} attempt(s).`);
           break;
         }
 
         lastError = { status: res.status };
-        await sleep(computeBackoffMs(attempt));
+        // Phase 8: Overload-specific backoff (2s → 5s → 10s)
+        await sleep(computeOverloadBackoff(attempt));
         continue;
       }
 
@@ -295,10 +344,26 @@ export async function executeWithRetry(
         const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error|service is currently unavailable/i.test(msg));
         
         if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
-          await reportKeyFailure(keyObj.id, 'server');
+          // Use recovery pipeline for body-parse path too
+          const recovery = await recoverFromOverload({
+            currentModel: currentInternalModel,
+            currentKeyId: keyObj.id,
+            triedModels: overloadedModels,
+            attempt,
+            body: geminiBody,
+            userId,
+          });
+
           overloadedModels.add(currentInternalModel);
 
-          if (fallbackIndex < fallbacks.length) {
+          if (recovery.compacted) {
+            geminiBody = compactBodyForOverload(geminiBody);
+          }
+
+          if (recovery.newModel) {
+            console.warn(`[routing] Recovery fallback: ${currentInternalModel} -> ${recovery.newModel} (reason=server_error status=${res.status})`);
+            currentInternalModel = recovery.newModel;
+          } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
             currentInternalModel = fallbacks[fallbackIndex++];
             console.warn(`[routing] Fallback switch: ${prev} -> ${currentInternalModel} (reason=server_error status=${res.status})`);
@@ -310,7 +375,7 @@ export async function executeWithRetry(
           }
 
           lastError = { status: res.status, message: msg };
-          await sleep(computeBackoffMs(attempt));
+          await sleep(computeOverloadBackoff(attempt));
           continue;
         }
 
@@ -401,6 +466,25 @@ export async function executeWithRetry(
       await rememberLastWorkingModel(userId, anthropicModel, currentInternalModel, modelMap.routeVersion);
       return res;
     } catch (err: any) {
+      // Phase 1: Classify overload errors as recoverable — don't hard throw
+      if (err.message === 'overloaded_error' && attempt < maxRetries) {
+        const recovery = await recoverFromOverload({
+          currentModel: currentInternalModel,
+          currentKeyId: keyObj.id,
+          triedModels: overloadedModels,
+          attempt,
+          body: geminiBody,
+          userId,
+        });
+        if (recovery.recovered) {
+          if (recovery.compacted) geminiBody = compactBodyForOverload(geminiBody);
+          if (recovery.newModel) currentInternalModel = recovery.newModel;
+          lastError = err;
+          await sleep(recovery.backoffMs);
+          continue;
+        }
+        throw err; // recovery exhausted — rethrow
+      }
       if (err.message === 'overloaded_error') throw err;
       
       // If it's a 400 (likely safety or bad request), try one more time with a fallback model

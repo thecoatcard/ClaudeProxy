@@ -29,7 +29,7 @@ jest.mock('../lib/redis', () => {
 });
 
 import { buildRequestFingerprint, checkOrchestrationDedup, registerOrchestrationFingerprint } from '../lib/agent/orchestrator-lock';
-import { createOrchestrationRecord, createSubagentTask as _unused } from '../lib/agent/orchestrator-state';
+import { createOrchestrationRecord } from '../lib/agent/orchestrator-state';
 import { createSubagentTask, saveSubagentTask } from '../lib/agent/subagent-memory';
 import { setFingerprintParent, getFingerprintParent } from '../lib/agent/orchestrator-state';
 
