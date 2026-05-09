@@ -56,6 +56,26 @@ export interface BackgroundTask {
   startedAt: string;
 }
 
+export interface SubagentTask {
+  id: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  owner: string;
+  filesTouched: string[];
+  dependencies: string[];
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface DependencyRecord {
+  name: string;
+  detectedVersion: string | null;
+  requestedVersion: string | null;
+  /** Source of the version information. */
+  source: 'package_json' | 'install_output' | 'import_error' | 'user_mention' | 'lock_file';
+  lastSeen: string;
+}
+
 export interface ToolChainEntry {
   /** Tool name that was called. */
   tool: string;
@@ -66,20 +86,33 @@ export interface ToolChainEntry {
 }
 
 export interface OperationalState {
-  version: 2;
+  version: 3;
   conversationId: string;
   shell_type: ShellType;
   environment_type: EnvironmentType;
   shell_capability: ShellCapability;
   interactive_supported: boolean;
+  /** Absolute workspace root (VS Code workspace folder or git root). */
+  workspace_root: string | null;
+  /** Active working directory from the last cd / cwd signal. */
+  current_working_root: string | null;
+  /** Legacy alias — same as workspace_root. Kept for guidance compatibility. */
   known_project_root: string | null;
   /** Map of path → ArtifactRecord. Key is the path string. */
   known_artifacts: Record<string, ArtifactRecord>;
+  /** Confirmed directories (created or listed). */
+  known_directories: string[];
   active_background_tasks: BackgroundTask[];
   /** Slug patterns the model should never retry (e.g. "interactive_shadcn_init"). */
   blocked_patterns: string[];
+  /** Patterns that were previously blocked but are now resolved. */
+  resolved_patterns: string[];
   known_failures: FailureRecord[];
   successful_patterns: string[];
+  /** name → DependencyRecord. Tracks detected package versions. */
+  dependency_versions: Record<string, DependencyRecord>;
+  /** Subagent tasks assigned during this conversation. */
+  active_subagent_tasks: SubagentTask[];
   tool_chain_state: ToolChainEntry[];
   updatedAt: string;
 }
@@ -93,18 +126,24 @@ const DEFAULT_SHELL_CAPABILITY: ShellCapability = {
 
 export function defaultOperationalState(conversationId: string): OperationalState {
   return {
-    version: 2,
+    version: 3,
     conversationId,
     shell_type: 'unknown',
     environment_type: 'unknown',
     shell_capability: { ...DEFAULT_SHELL_CAPABILITY },
     interactive_supported: false,
+    workspace_root: null,
+    current_working_root: null,
     known_project_root: null,
     known_artifacts: {},
+    known_directories: [],
     active_background_tasks: [],
     blocked_patterns: [],
+    resolved_patterns: [],
     known_failures: [],
     successful_patterns: [],
+    dependency_versions: {},
+    active_subagent_tasks: [],
     tool_chain_state: [],
     updatedAt: new Date().toISOString(),
   };
@@ -272,6 +311,75 @@ function detectProjectRoot(text: string): string | null {
   return null;
 }
 
+// ─── CWD detection ────────────────────────────────────────────────────────────
+
+const CWD_PATTERNS: RegExp[] = [
+  /(?:^|\n)\s*(?:PS|C:|D:)\s+([A-Za-z]:[\\/][^\n>]+?)\s*[>$#]/m,
+  /cwd[:=]\s*["'`]?([^\s"'`\n,]+)/i,
+  /current directory(?:\s+is)?:\s*["'`]?([^\s"'`\n]+)/i,
+  /changed to directory[:\s]+["'`]?([^\s"'`\n]+)/i,
+  /Cwd:\s*["'`]?([^\s"'`\n]+)/,
+];
+
+export function detectCwdFromText(text: string): string | null {
+  for (const re of CWD_PATTERNS) {
+    const m = re.exec(text);
+    if (m?.[1]) return m[1].trim().replace(/['"`;,]+$/, '');
+  }
+  return null;
+}
+
+// ─── Dependency version detection ─────────────────────────────────────────────
+
+const INSTALL_SUCCESS_RE = /added\s+\d+\s+packages?|successfully\s+installed/i;
+const DEP_LINE_RE = /^[\s+\-~]+([a-z@][a-z0-9/_-]*)@([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[a-z0-9.-]+)?)/gim;
+const PKG_AT_VERSION_RE = /["']?([a-z@][a-z0-9/_.-]*)["']?\s*:\s*["'][~^]?([0-9]+\.[0-9]+[^"']*?)["']/g;
+const IMPORT_ERROR_PKG_RE = /cannot find module ["']([^"']+)["']|module ["']([^"']+)["'] not found/i;
+
+function extractDependencyVersions(
+  toolName: string,
+  toolInput: any,
+  resultText: string,
+  isError: boolean,
+): Array<{ name: string; version: string | null; source: DependencyRecord['source'] }> {
+  const found: Array<{ name: string; version: string | null; source: DependencyRecord['source'] }> = [];
+  const inputStr = typeof toolInput?.command === 'string' ? toolInput.command : '';
+  const isInstallCmd = /npm\s+i(?:nstall)?\b|yarn\s+add\b|pnpm\s+add\b|pip\s+install\b/i.test(inputStr);
+
+  // npm/yarn install output: "+ prisma@7.0.0" or "- prisma@7.0.0" lines
+  if (isInstallCmd && !isError && INSTALL_SUCCESS_RE.test(resultText)) {
+    let m: RegExpExecArray | null;
+    DEP_LINE_RE.lastIndex = 0;
+    while ((m = DEP_LINE_RE.exec(resultText)) !== null) {
+      if (m[1] && m[2]) found.push({ name: m[1], version: m[2], source: 'install_output' });
+    }
+  }
+
+  // package.json reads: "prisma": "7.0.0"
+  const inputJSON = JSON.stringify(toolInput ?? '');
+  const isPackageJson = /package\.json/i.test(inputJSON);
+  if (!isError && isPackageJson && resultText.includes('"dependencies"')) {
+    let m: RegExpExecArray | null;
+    PKG_AT_VERSION_RE.lastIndex = 0;
+    while ((m = PKG_AT_VERSION_RE.exec(resultText)) !== null) {
+      if (m[1] && m[2] && !m[1].startsWith('//')) {
+        found.push({ name: m[1], version: m[2].replace(/[^0-9a-z.\-]/gi, ''), source: 'package_json' });
+      }
+    }
+  }
+
+  // Import / module-not-found errors
+  if (isError && resultText) {
+    const errMatch = IMPORT_ERROR_PKG_RE.exec(resultText);
+    if (errMatch) {
+      const pkg = (errMatch[1] ?? errMatch[2]).split('/')[0];
+      found.push({ name: pkg, version: null, source: 'import_error' });
+    }
+  }
+
+  return found.slice(0, 30);
+}
+
 // ─── Background task detection ────────────────────────────────────────────────
 
 const BACKGROUND_TASK_PATTERNS = [
@@ -381,10 +489,39 @@ export function updateStateFromMessages(state: OperationalState, messages: any[]
           }
         }
 
-        // Project root detection
-        if (!updated.known_project_root && resultText) {
+        // Project root + workspace root + CWD detection
+        if (resultText) {
           const root = detectProjectRoot(resultText);
-          if (root) updated.known_project_root = root;
+          if (root) {
+            if (!updated.known_project_root) updated.known_project_root = root;
+            if (!updated.workspace_root) updated.workspace_root = root;
+          }
+          const cwd = detectCwdFromText(resultText);
+          if (cwd) updated.current_working_root = cwd;
+        }
+
+        // Directory tracking from ls/list tool results
+        if (!isError && /list|ls|dir|readdir/i.test(toolName)) {
+          const dirPath = typeof toolInput?.path === 'string' ? toolInput.path : null;
+          if (dirPath && !updated.known_directories.includes(dirPath)) {
+            updated.known_directories = [...updated.known_directories.slice(-49), dirPath];
+          }
+        }
+
+        // Dependency version detection
+        const depUpdates = extractDependencyVersions(toolName, toolInput, resultText, isError);
+        for (const dep of depUpdates) {
+          const existing = updated.dependency_versions[dep.name];
+          updated.dependency_versions = {
+            ...updated.dependency_versions,
+            [dep.name]: {
+              name: dep.name,
+              detectedVersion: dep.version ?? existing?.detectedVersion ?? null,
+              requestedVersion: existing?.requestedVersion ?? dep.version,
+              source: dep.source,
+              lastSeen: now,
+            },
+          };
         }
 
         // Failure pattern recording
@@ -437,7 +574,7 @@ const OP_STATE_MAX_FAILURES = 20;
 const OP_STATE_MAX_TASKS = 10;
 
 export function operationalStateKey(conversationId: string): string {
-  return `opstate:v2:${conversationId}`;
+  return `opstate:v3:${conversationId}`;
 }
 
 export interface OperationalStateStore {
@@ -453,7 +590,7 @@ export async function loadOperationalState(
     const raw = await store.get(operationalStateKey(conversationId));
     if (!raw) return defaultOperationalState(conversationId);
     const parsed = JSON.parse(raw);
-    if (parsed?.version !== 2 || parsed?.conversationId !== conversationId) {
+    if (parsed?.version !== 3 || parsed?.conversationId !== conversationId) {
       return defaultOperationalState(conversationId);
     }
     return parsed as OperationalState;
@@ -471,13 +608,23 @@ function trimState(state: OperationalState): OperationalState {
     const sorted = artifacts.sort((a, b) => b[1].lastSeen.localeCompare(a[1].lastSeen));
     trimmedArtifacts = Object.fromEntries(sorted.slice(0, OP_STATE_MAX_ARTIFACTS));
   }
+  // Trim dependency versions — keep the 50 most-recently-seen.
+  const depEntries = Object.entries(state.dependency_versions);
+  const trimmedDeps = depEntries.length > 50
+    ? Object.fromEntries(depEntries.sort((a, b) => b[1].lastSeen.localeCompare(a[1].lastSeen)).slice(0, 50))
+    : state.dependency_versions;
+
   return {
     ...state,
     known_artifacts: trimmedArtifacts,
+    known_directories: (state.known_directories ?? []).slice(-50),
     known_failures: state.known_failures.slice(-OP_STATE_MAX_FAILURES),
     active_background_tasks: state.active_background_tasks.slice(-OP_STATE_MAX_TASKS),
+    active_subagent_tasks: (state.active_subagent_tasks ?? []).slice(-20),
     tool_chain_state: state.tool_chain_state.slice(-20),
     successful_patterns: state.successful_patterns.slice(-20),
+    resolved_patterns: (state.resolved_patterns ?? []).slice(-20),
+    dependency_versions: trimmedDeps,
   };
 }
 
@@ -497,10 +644,12 @@ export async function saveOperationalState(
 
 /** Build a compact system instruction fragment from the current operational state. */
 export function buildOperationalGuidance(state: OperationalState): string {
+  const hasNewFields = !!state.workspace_root || Object.keys(state.dependency_versions ?? {}).length > 0;
   if (state.shell_type === 'unknown' && state.environment_type === 'unknown'
     && Object.keys(state.known_artifacts).length === 0
     && state.blocked_patterns.length === 0
-    && state.active_background_tasks.length === 0) {
+    && state.active_background_tasks.length === 0
+    && !hasNewFields) {
     return '';
   }
 
@@ -517,9 +666,14 @@ export function buildOperationalGuidance(state: OperationalState): string {
     if (caps.length) lines.push(`  Capabilities: ${caps.join(', ')}`);
   }
 
-  // Project root
-  if (state.known_project_root) {
+  // Workspace root / CWD
+  if (state.workspace_root) {
+    lines.push(`Workspace root: ${state.workspace_root}`);
+  } else if (state.known_project_root) {
     lines.push(`Project root: ${state.known_project_root}`);
+  }
+  if (state.current_working_root && state.current_working_root !== (state.workspace_root ?? state.known_project_root)) {
+    lines.push(`Current working directory: ${state.current_working_root}`);
   }
 
   // Known artifacts (only exists/missing, skip failed_create details)
@@ -533,6 +687,35 @@ export function buildOperationalGuidance(state: OperationalState): string {
     .slice(0, 10);
   if (existingFiles.length) lines.push(`Known existing files/dirs: ${existingFiles.join(', ')}`);
   if (missingFiles.length) lines.push(`Known missing files/dirs: ${missingFiles.join(', ')}`);
+
+  // Known directories
+  if ((state.known_directories ?? []).length > 0) {
+    lines.push(`Confirmed directories: ${state.known_directories.slice(0, 10).join(', ')}`);
+  }
+
+  // Dependency versions
+  const depKeys = Object.keys(state.dependency_versions ?? {});
+  if (depKeys.length > 0) {
+    const withVersion = depKeys
+      .filter(k => state.dependency_versions[k].detectedVersion)
+      .slice(0, 10)
+      .map(k => `${k}@${state.dependency_versions[k].detectedVersion}`);
+    if (withVersion.length) lines.push(`Detected dependency versions: ${withVersion.join(', ')}`);
+    const missingPkgs = depKeys
+      .filter(k => state.dependency_versions[k].source === 'import_error')
+      .slice(0, 5);
+    if (missingPkgs.length) lines.push(`Missing/uninstalled packages: ${missingPkgs.join(', ')}`);
+  }
+
+  // Active subagent tasks
+  const pendingTasks = (state.active_subagent_tasks ?? []).filter(t => t.status !== 'completed' && t.status !== 'failed');
+  if (pendingTasks.length > 0) {
+    lines.push('Active subagent tasks:');
+    for (const t of pendingTasks.slice(0, 5)) {
+      lines.push(`  - [${t.status.toUpperCase()}] ${t.description} (owner: ${t.owner})`);
+      if (t.filesTouched.length) lines.push(`    Files: ${t.filesTouched.slice(0, 3).join(', ')}`);
+    }
+  }
 
   // Active background tasks
   const running = state.active_background_tasks.filter(t => t.status === 'running');
@@ -558,6 +741,11 @@ export function buildOperationalGuidance(state: OperationalState): string {
     for (const f of recentFailures.slice(0, 5)) {
       lines.push(`  - ${f.description} (${f.count}× failed)`);
     }
+  }
+
+  // Resolved patterns
+  if ((state.resolved_patterns ?? []).length > 0) {
+    lines.push(`Previously resolved: ${state.resolved_patterns.slice(0, 5).join(', ')}`);
   }
 
   // Shell-specific warnings

@@ -1,6 +1,35 @@
 # TEST_RESULTS.md
 
+## Behavior System Upgrade — Test Run (Phases 5–9)
+
+**46 tests | 0 failures | 14 suites**
+
+```
+npx tsx --test tests/contradiction-detector.test.ts tests/dependency-compatibility.test.ts tests/web-recovery.test.ts tests/gemma-helper.test.ts
+```
+
+```
+ℹ tests 46  |  ℹ pass 46  |  ℹ fail 0  |  ℹ duration_ms 3192
+```
+
+TypeScript: `npx tsc --noEmit` → zero errors.
+
+---
+
 ## Dashboard Refactor — Test Run (Phase 5)
+
+**61 tests | 0 failures | 16 suites**
+
+```
+npx tsx --test tests/dashboard-api-keys.test.ts tests/dashboard-auth-keys.test.ts tests/dashboard-routing.test.ts tests/dashboard-metrics.test.ts
+```
+
+```
+ℹ tests 61  |  ℹ pass 61  |  ℹ fail 0  |  ℹ duration_ms 2252
+```
+
+TypeScript: `npx tsc --noEmit` → zero errors.
+
 
 **61 tests | 0 failures | 16 suites**
 

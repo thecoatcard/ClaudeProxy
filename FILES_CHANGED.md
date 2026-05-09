@@ -2,7 +2,95 @@
 
 ---
 
-## Session: Web Search + Operational Context (current)
+## Session: Behavior System Upgrade — Phases 1–9
+
+### New Files
+
+- **lib/context/operational-state.ts** — Upgraded to v3 (new types: SubagentTask, DependencyRecord; new fields: workspace_root, current_working_root, known_directories, dependency_versions, resolved_patterns, active_subagent_tasks; new functions: detectCwdFromText, extractDependencyVersions).
+
+- **lib/agent/artifact-verifier.ts** — Verifies artifact existence from OperationalState before write/build operations. Types: ArtifactConfidence. Functions: verifyArtifact, buildVerificationGuidance, extractPathsForVerification.
+
+- **lib/agent/background-task-tracker.ts** — Enforces task ordering — background tasks (npm install, docker build) must complete before dependent operations. Functions: checkTaskBlockers, buildDependencyGuidance, registerBackgroundTask.
+
+- **lib/agent/dependency-compatibility.ts** — Detects known-breaking package versions (Prisma 7, Tailwind v4, Next 15, etc.) before install. 10-entry registry, risk levels, safe version suggestions.
+
+- **lib/agent/web-recovery.ts** — Error classification + official-docs search query generation. 11 error classes, repeat-aware search triggering, priority domain routing.
+
+- **lib/agent/contradiction-detector.ts** — A→B→A oscillation loop detection across message history. Tracks opposing operations (add/remove, install/uninstall, write/delete) on the same target.
+
+- **lib/reasoning/gemma-helper.ts** (new directory `lib/reasoning/`) — Gemma 4 lightweight reasoning helper. Tasks: compress_state, analyze_error, plan_recovery, check_dependency, explain_contradiction. 8-second timeout, graceful failure.
+
+- **tests/contradiction-detector.test.ts** — 13 tests covering loop detection and guidance generation.
+
+- **tests/dependency-compatibility.test.ts** — 17 tests covering version parsing, risk flagging, safe versions.
+
+- **tests/web-recovery.test.ts** — 16 tests covering error classification and search query generation.
+
+- **tests/gemma-helper.test.ts** — 9 tests covering module exports and graceful failure behavior.
+
+- **OPERATIONAL_CONTEXT_V2_REPORT.md** — v3 schema, new types, detection functions, Redis key change.
+
+- **WEB_RECOVERY_REPORT.md** — Error class registry, detection logic, integration points.
+
+- **DEPENDENCY_COMPATIBILITY_REPORT.md** — Breaking change registry, detection logic, test coverage.
+
+### Modified Files
+
+- **lib/agent/behavior-auditor.ts** — Integrated 3 new checks (7, 8, 9): contradiction detection, dependency compatibility scanning, web recovery guidance. Added 4 new diagnostics fields: contradictionDetected, contradictionLoops, dependencyRisks, webRecoveryTriggered. Helper functions: extractInstallCommands, extractToolErrors, buildErrorRepeatMap.
+
+---
+
+## Session: Web Search + Operational Context
+
+### New Files
+
+- **lib/tools/web-search.ts** — Anthropic web_search tool compatibility layer for Gemini backend:
+  `isWebSearchTool`, `partitionWebSearchTools`, `WebSearchConfig`, `WEB_SEARCH_FUNCTION_DECLARATION`,
+  `executeWebSearch`, `braveSearch`, `tavilySearch`, `serpApiSearch`,
+  `normalizeSearchResults`, `buildSearchFunctionResponse`.
+
+- **lib/tools/search-executor.ts** — Multi-turn Gemini search loop:
+  `runWithWebSearch` (up to 5 turns), `injectWebSearchTool`, `removeWebSearchDeclaration`.
+
+- **lib/context/operational-state.ts** — Persistent operational context memory (Redis):
+  `OperationalState` schema (version 2), shell/artifact/failure/background-task detection,
+  `updateStateFromMessages`, `loadOperationalState`, `saveOperationalState`,
+  `buildOperationalGuidance`, `operationalStateKey`, `defaultOperationalState`.
+
+- **tests/web-search.test.ts** — 24 unit tests for web search layer.
+
+- **tests/operational-context.test.ts** — 20 unit tests for operational state system.
+
+- **WEB_SEARCH_SUPPORT_REPORT.md** — Architecture, provider config, streaming behaviour, env vars.
+
+- **OPERATIONAL_CONTEXT_REPORT.md** — Schema, detection rules, guidance format, Redis key structure.
+
+### Modified Files
+
+- **lib/transformers/tools.ts** — Filters `web_search` from Gemini FunctionDeclarations.
+
+- **lib/transformers/request.ts** — Returns `{geminiBody, webSearchConfig}`; wires operational state
+  load/update/inject/save; adds opStateStore Redis adapter; imports web-search and operational-state.
+
+- **app/api/v1/messages/route.ts** — Non-streaming web search path via `runWithWebSearch`.
+
+- **lib/transformers/stream.ts** — Streaming web search pre-execution; synthetic SSE emission.
+
+---
+
+## Session: Prior work (abbreviated)
+
+## Added
+
+- lib/agent/process-supervisor.ts
+- tests/process-supervisor.test.ts
+- PROCESS_SUPERVISOR_REPORT.md
+
+## Modified
+
+- lib/agent/behavior-auditor.ts
+  - Integrated long-running process assessment, interactive command guard.
+
 
 ### New Files
 

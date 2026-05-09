@@ -5,10 +5,15 @@
 // Pure, edge-runtime safe. The only side-effect is a console.warn on detection.
 //
 // Checks performed (in priority order, highest first):
-//   1. Loop detector       — identical failed tool calls (blocks retries)
-//   2. Completion gate     — premature "done" claim against failed tools
-//   3. Path guard          — structural path problems in recent tool inputs
-//   4. Spec validator      — unaddressed numbered requirements in system/task text
+//   1. Loop detector           — identical failed tool calls (blocks retries)
+//   2. Completion gate         — premature "done" claim against failed tools
+//   3. Path guard              — structural path problems in recent tool inputs
+//   4. Spec validator          — unaddressed numbered requirements in system/task text
+//   5. Long-running process    — dev server startup state tracking
+//   6. Interactive commands    — TTY-blocking CLI wizards
+//   7. Contradiction detection — A→B→A oscillation loops
+//   8. Dependency compat       — known-breaking version installs
+//   9. Web recovery            — error patterns requiring official docs
 
 import { detectFailureLoop } from '../transformers/loop-detector';
 import { classifyFailure, formatStrategy } from './retry-strategy';
@@ -18,6 +23,9 @@ import { validateSpec } from './spec-validator';
 import { buildAdaptiveBehaviorReminder } from '../transformers/adaptive-guidance';
 import { assessLongRunningProcessHistory } from './process-supervisor';
 import { detectInteractiveCommandsInHistory, buildInteractiveCommandGuidance } from './interactive-command-guard';
+import { detectContradiction } from './contradiction-detector';
+import { checkInstallCompatibility } from './dependency-compatibility';
+import { classifyAndRecover, requiresWebSearch } from './web-recovery';
 
 export interface BehaviorAuditResult {
   hasGuidance: boolean;
@@ -31,6 +39,10 @@ export interface BehaviorAuditResult {
     longRunningProcessDetected: boolean;
     longRunningProcessState: 'STARTED' | 'FAILED' | 'UNKNOWN' | 'NONE';
     interactiveCommandsDetected: number;
+    contradictionDetected: boolean;
+    contradictionLoops: number;
+    dependencyRisks: number;
+    webRecoveryTriggered: boolean;
   };
 }
 
@@ -49,6 +61,10 @@ export async function runBehaviorAudit(
     longRunningProcessDetected: false,
     longRunningProcessState: 'NONE',
     interactiveCommandsDetected: 0,
+    contradictionDetected: false,
+    contradictionLoops: 0,
+    dependencyRisks: 0,
+    webRecoveryTriggered: false,
   };
 
   // 1. Loop detection (highest priority — replaces previous standalone call).
@@ -133,10 +149,97 @@ export async function runBehaviorAudit(
   const adaptiveReminder = buildAdaptiveBehaviorReminder(internalModel, guidanceParts.length > 0);
   if (adaptiveReminder) guidanceParts.push(adaptiveReminder);
 
+  // 7. Contradiction detection — A→B→A oscillation loops.
+  const contradictionResult = detectContradiction(messages);
+  if (contradictionResult.detected) {
+    diagnostics.contradictionDetected = true;
+    diagnostics.contradictionLoops = contradictionResult.loops.length;
+    if (contradictionResult.guidance) guidanceParts.push(contradictionResult.guidance);
+    console.warn(
+      `[behavior-auditor] contradiction loops: ${contradictionResult.loops.length} loop(s) detected`,
+    );
+  }
+
+  // 8. Dependency compatibility check — scan recent install commands.
+  const recentInstallCmds = extractInstallCommands(messages.slice(-30));
+  for (const cmd of recentInstallCmds) {
+    const compatResult = checkInstallCompatibility(cmd);
+    if (compatResult.hasRisks) {
+      diagnostics.dependencyRisks += compatResult.risks.length;
+      if (compatResult.guidance) guidanceParts.push(compatResult.guidance);
+    }
+  }
+  if (diagnostics.dependencyRisks > 0) {
+    console.warn(`[behavior-auditor] dependency risks: ${diagnostics.dependencyRisks} package(s)`);
+  }
+
+  // 9. Web recovery — scan recent error tool results.
+  const recentErrors = extractToolErrors(messages.slice(-15));
+  const errorRepeatMap = buildErrorRepeatMap(messages.slice(-30));
+  for (const { errorText, toolInput } of recentErrors) {
+    const repeats = errorRepeatMap.get(errorText.slice(0, 80)) ?? 1;
+    if (requiresWebSearch(errorText) || repeats >= 2) {
+      const recoveryResult = classifyAndRecover(errorText, toolInput, repeats);
+      if (recoveryResult.shouldSearch && recoveryResult.guidance) {
+        diagnostics.webRecoveryTriggered = true;
+        guidanceParts.push(recoveryResult.guidance);
+        console.warn(
+          `[behavior-auditor] web recovery triggered: class=${recoveryResult.errorClass} repeats=${repeats}`,
+        );
+        break; // one recovery guidance per turn is enough
+      }
+    }
+  }
+
   const guidance = guidanceParts.join('\n');
   return {
     hasGuidance: guidance.length > 0,
     guidance,
     diagnostics,
   };
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function extractInstallCommands(messages: any[]): string[] {
+  const cmds: string[] = [];
+  const installRe = /(?:npm\s+install|npm\s+i|yarn\s+add|pnpm\s+add)\s+[^;|\n]{5,}/i;
+  for (const msg of messages) {
+    if (!Array.isArray(msg?.content)) continue;
+    for (const block of msg.content) {
+      if (block?.type !== 'tool_use') continue;
+      const command = typeof block.input?.command === 'string' ? block.input.command : '';
+      if (installRe.test(command)) cmds.push(command.slice(0, 300));
+    }
+  }
+  return cmds;
+}
+
+function extractToolErrors(messages: any[]): Array<{ errorText: string; toolInput?: any }> {
+  const errors: Array<{ errorText: string; toolInput?: any }> = [];
+  for (const msg of messages) {
+    if (msg?.role !== 'user' || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block?.type !== 'tool_result') continue;
+      const content = Array.isArray(block.content) ? block.content : [];
+      for (const part of content) {
+        if (typeof part?.text === 'string' && part.text.length > 20) {
+          // Check for error signals
+          if (/error|failed|cannot|not found|exit code [^0]/i.test(part.text)) {
+            errors.push({ errorText: part.text.slice(0, 600) });
+          }
+        }
+      }
+    }
+  }
+  return errors.slice(0, 5); // check at most 5 recent errors
+}
+
+function buildErrorRepeatMap(messages: any[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const { errorText } of extractToolErrors(messages)) {
+    const key = errorText.slice(0, 80);
+    map.set(key, (map.get(key) ?? 0) + 1);
+  }
+  return map;
 }
