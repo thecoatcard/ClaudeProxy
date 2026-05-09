@@ -1,0 +1,115 @@
+// CompletionGate — detect premature "task complete" claims in message history.
+//
+// The gateway sees the full message history before each request. If an
+// assistant turn contains a completion signal ("Done", "All tasks complete",
+// "I've finished", etc.) but the tool call record shows unverified or failed
+// operations, the model may be declaring victory prematurely. We inject a
+// warning into systemInstruction so the model does not do this again.
+//
+// Pure functions, no I/O, no Node APIs. Edge-runtime safe.
+
+import { verifyAllToolResults } from './verification-engine';
+
+export interface CompletionGateResult {
+  prematureCompletion: boolean;
+  guidance: string;
+  unverifiedClaims: string[];    // text excerpts that look like completion signals
+  failedToolCount: number;
+  uncertainToolCount: number;
+}
+
+// Patterns in assistant text that signal the agent believes the task is done.
+// We match near the end of a message to avoid false positives from e.g.
+// "I will create a done.txt file" mid-turn.
+const COMPLETION_SIGNAL_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\ball (tasks?|steps?|items?|requirements?)\s+(are\s+)?(complete|done|finished|accomplished)/i, label: 'all tasks complete' },
+  { pattern: /\btask(s)?\s+(is|are|have been)\s+(complete|done|finished)/i, label: 'task done' },
+  { pattern: /\b(everything\s+is\s+|all\s+is\s+)(done|complete|finished|in\s+order)/i, label: 'everything done' },
+  { pattern: /\b(the\s+)?implementation\s+is\s+(complete|done|finished)/i, label: 'implementation complete' },
+  { pattern: /\bi(\'ve|\s+have)\s+(completed?|finished?|done)\s+(all|the|every)/i, label: 'i have completed all' },
+  { pattern: /\byou\s+(should\s+now\s+)?(have|see|find)\s+(a\s+working|the\s+complete|all\s+the\s+required)/i, label: 'you should now have' },
+  { pattern: /\bsetup\s+is\s+(complete|done|ready)/i, label: 'setup complete' },
+  { pattern: /^(done|complete|finished)[.!]?\s*$/im, label: '"done" standalone' },
+];
+
+function extractText(content: any): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((b: any) => (b?.type === 'text' ? b.text : ''))
+    .filter(Boolean)
+    .join(' ');
+}
+
+function findCompletionSignals(text: string): string[] {
+  const signals: string[] = [];
+  for (const { pattern, label } of COMPLETION_SIGNAL_PATTERNS) {
+    if (pattern.test(text)) signals.push(label);
+  }
+  return signals;
+}
+
+export function detectPrematureCompletion(messages: any[]): CompletionGateResult {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { prematureCompletion: false, guidance: '', unverifiedClaims: [], failedToolCount: 0, uncertainToolCount: 0 };
+  }
+
+  // Scan the LAST assistant message for completion signals. Earlier ones may be
+  // intermediate summaries — we only care about the most recent claim.
+  let lastAssistantText = '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') {
+      lastAssistantText = extractText(messages[i].content);
+      break;
+    }
+  }
+
+  const signals = findCompletionSignals(lastAssistantText);
+  if (signals.length === 0) {
+    return { prematureCompletion: false, guidance: '', unverifiedClaims: [], failedToolCount: 0, uncertainToolCount: 0 };
+  }
+
+  // There is a completion signal. Now check if the tool record supports it.
+  const allResults = verifyAllToolResults(messages);
+  const failedCount = allResults.filter(r => r.verdict === 'failure').length;
+  const uncertainCount = allResults.filter(r => r.verdict === 'uncertain').length;
+
+  // If there are NO tool calls at all with a success verdict, the claim is very suspicious.
+  // If there are FAILED tools at the time of claiming done, block.
+  if (failedCount === 0 && allResults.filter(r => r.verdict === 'success').length > 0) {
+    // All observed tools succeeded — claim looks legitimate.
+    return { prematureCompletion: false, guidance: '', unverifiedClaims: signals, failedToolCount: 0, uncertainToolCount: uncertainCount };
+  }
+
+  if (failedCount === 0 && allResults.length === 0) {
+    // Claimed done without any tool calls — might be a text-only task, don't block.
+    return { prematureCompletion: false, guidance: '', unverifiedClaims: signals, failedToolCount: 0, uncertainToolCount: 0 };
+  }
+
+  // There are either failures or all results are uncertain — the claim is premature.
+  const guidance = [
+    '',
+    '---',
+    '[GATEWAY COMPLETION GATE] A completion claim was detected in the previous assistant turn, but the tool execution record shows problems:',
+    failedCount > 0 ? `  • ${failedCount} tool call(s) failed (errors detected in tool_result content).` : '',
+    uncertainCount > 0 ? `  • ${uncertainCount} tool result(s) are ambiguous (could not confirm success).` : '',
+    '',
+    'Completion criterion: do NOT claim the task is done until:',
+    '  1. Every required tool call produced a result with no error signals.',
+    '  2. If a tool failed, a corrective action was taken and a successful retry is in the record.',
+    '  3. You can cite specific tool results as evidence for each claimed outcome.',
+    '',
+    `Detected completion signals: [${signals.join(', ')}]`,
+    'If the task genuinely is complete, provide explicit evidence (e.g. "The write tool returned success for X; the bash tool exited without error for Y").',
+    '---',
+    '',
+  ].filter(line => line !== '').join('\n');
+
+  return {
+    prematureCompletion: true,
+    guidance,
+    unverifiedClaims: signals,
+    failedToolCount: failedCount,
+    uncertainToolCount: uncertainCount,
+  };
+}
