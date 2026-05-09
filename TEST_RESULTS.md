@@ -3,36 +3,31 @@
 ## Commands
 
 - npx tsc --noEmit
-- npx tsx --test tests/ai-compactor.test.ts tests/context-compaction.test.ts
-- npx tsx --test tests/behavioral-tests.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts tests/ai-compactor.test.ts
+- npx tsx --test tests/process-supervisor.test.ts
+- npx tsx --test tests/behavioral-tests.ts tests/process-supervisor.test.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts tests/ai-compactor.test.ts
 
 ## Outcome
 
 - TypeScript check: PASS
-- Test suites: 13
-- Total tests: 74
-- Passed: 74
+- Test suites: 14
+- Total tests: 89
+- Passed: 89
 - Failed: 0
 
-## New Coverage Added
+## Process Supervisor Coverage
 
-### AI compactor persistence
-
-- summary normalization to required `[COMPACTED MEMORY BLOCK]` schema
-- compacted metadata persistence fields and reload path
-- marker hydration from stored semantic summary by `(conversation_id, compacted_range)`
-
-### Regression coverage retained
-
-- translator behavior suites remain green
-- tool structure fidelity remains green
-- context continuity compaction remains green
-- model-adaptive policy suites remain green
+- multi-language long-running command detection works
+- startup log semantics analyzed correctly
+- startup success signals override non-zero exit semantics for dev servers
+- port fallback + ready signals classified as startup success
+- guidance encourages non-blocking interval monitoring
+- environment-aware termination guidance produced for Git Bash, PowerShell/CMD, Unix/WSL
+- generic ecosystem support validated
 
 ## Notable Runtime Notes
 
-- Some Redis metadata writes in isolated tests still log `fetch failed` in offline context; this is expected and non-fatal.
+- Existing offline Redis metadata logs (`fetch failed`) may still appear in unrelated translator tests and are non-fatal in local/offline test contexts.
 
 ## Final Status
 
-Part A/Part B implementation changes compile and all relevant suites pass.
+Process supervisor implementation compiles and all requested tests/regressions pass.

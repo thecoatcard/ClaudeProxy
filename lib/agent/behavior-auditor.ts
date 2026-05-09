@@ -16,6 +16,7 @@ import { detectPrematureCompletion } from './completion-gate';
 import { inspectHistoryPaths, buildPathGuidance } from './path-guard';
 import { validateSpec } from './spec-validator';
 import { buildAdaptiveBehaviorReminder } from '../transformers/adaptive-guidance';
+import { assessLongRunningProcessHistory } from './process-supervisor';
 
 export interface BehaviorAuditResult {
   hasGuidance: boolean;
@@ -26,6 +27,8 @@ export interface BehaviorAuditResult {
     prematureCompletion: boolean;
     pathIssues: number;
     unaddressedRequirements: number;
+    longRunningProcessDetected: boolean;
+    longRunningProcessState: 'STARTED' | 'FAILED' | 'UNKNOWN' | 'NONE';
   };
 }
 
@@ -35,12 +38,14 @@ export async function runBehaviorAudit(
   internalModel?: string,
 ): Promise<BehaviorAuditResult> {
   const guidanceParts: string[] = [];
-  const diagnostics = {
+  const diagnostics: BehaviorAuditResult['diagnostics'] = {
     loopDetected: false,
     loopRepeats: 0,
     prematureCompletion: false,
     pathIssues: 0,
     unaddressedRequirements: 0,
+    longRunningProcessDetected: false,
+    longRunningProcessState: 'NONE',
   };
 
   // 1. Loop detection (highest priority — replaces previous standalone call).
@@ -95,6 +100,19 @@ export async function runBehaviorAudit(
       diagnostics.unaddressedRequirements = unaddressed;
       if (specResult.guidance) guidanceParts.push(specResult.guidance);
     }
+  }
+
+  // 5. Long-running process supervisor — detect dev/server commands and
+  // classify startup status from tool_result logs.
+  const processAssessment = assessLongRunningProcessHistory(messages);
+  if (processAssessment.foundLongRunningCommand) {
+    diagnostics.longRunningProcessDetected = true;
+    diagnostics.longRunningProcessState = processAssessment.lastAnalysis?.state || 'UNKNOWN';
+    if (processAssessment.guidance) guidanceParts.push(processAssessment.guidance);
+    console.warn(
+      `[behavior-auditor] long-running process: state=${diagnostics.longRunningProcessState}` +
+      ` env=${processAssessment.environment}`,
+    );
   }
 
   const adaptiveReminder = buildAdaptiveBehaviorReminder(internalModel, guidanceParts.length > 0);

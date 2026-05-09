@@ -2,30 +2,22 @@
 
 ## Added
 
-- lib/compactor/ai-compactor.ts
-  - New persistent semantic compactor module.
-  - Adds compacted-range marker helpers, Redis save/load for compacted metadata, marker hydration, and chunked AI summary generation.
-  - Persists compacted objects with fields: `conversation_id`, `compacted_range`, `summary`, `timestamp`.
+- lib/agent/process-supervisor.ts
+  - New generic long-running process detector and output analyzer for behavior-layer guidance.
+  - Adds multi-ecosystem command intent detection and classification (`LONG_RUNNING_PROCESS`).
+  - Adds startup output classification (`STARTED` / `FAILED` / `UNKNOWN`) with success-over-failure-over-exit-code priority.
+  - Adds port-fallback recovery handling and environment-aware termination guidance.
+  - Adds history assessment for interval-monitoring guidance injection.
 
-- tests/ai-compactor.test.ts
-  - New tests for compacted memory block normalization, metadata persistence, and marker hydration behavior.
+- tests/process-supervisor.test.ts
+  - New tests covering detection, output classification, port fallback semantics, and environment-aware kill guidance.
 
-- AI_COMPACTOR_REPORT.md
-  - Implementation summary for Part B semantic compactor changes.
-
-- BASH_RESTRICTION_AUDIT.md
-  - Part A bash restriction classification and relaxation recommendations.
+- PROCESS_SUPERVISOR_REPORT.md
+  - Implementation and validation report for process supervisor behavior.
 
 ## Modified
 
-- lib/transformers/compaction.ts
-  - Switched AI compactor integration to `lib/compactor/ai-compactor.ts`.
-  - Added support for `conversationId` and compacted-range TTL.
-  - Stores summary per compacted range in Redis.
-  - Emits `[COMPACTED MEMORY BLOCK]` formatted content with marker metadata.
-  - Preserves existing heuristic fallback when AI compaction is unavailable.
-
-- lib/transformers/request.ts
-  - Adds conversation-id derivation for compaction persistence.
-  - Hydrates compacted markers before compaction so future requests can restore semantic summaries.
-  - Passes `conversationId` and TTL into compaction options.
+- lib/agent/behavior-auditor.ts
+  - Integrated long-running process assessment into behavior auditing pipeline.
+  - Injects guidance for background execution + 30-second log monitoring policy.
+  - Adds diagnostics fields for long-running process detection and current startup state.
