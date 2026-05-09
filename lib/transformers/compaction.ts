@@ -1,7 +1,13 @@
 /**
  * Message history compaction logic for the CoatCard AI Gateway.
  */
-import { generateSemanticSummary, generateChunkedSummary } from './ai-compactor';
+import {
+  buildCompactedRangeId,
+  buildStoredSummaryMessage,
+  COMPACTED_MARKER_SENTINEL,
+  generateChunkedSummary,
+  saveCompactedSummary,
+} from '../compactor/ai-compactor';
 
 export interface CompactionOptions {
   maxMessages?: number;
@@ -14,6 +20,8 @@ export interface CompactionOptions {
   // If provided, used to call AI for semantic summarization
   apiKey?: string;
   model?: string;
+  conversationId?: string;
+  compactedRangeTtlSeconds?: number;
 }
 
 export interface CompactionResult {
@@ -91,11 +99,11 @@ export const SUMMARY_SENTINEL = '<!-- compacted:v1 -->';
  */
 function isCompactedSummary(message: any): boolean {
   if (typeof message?.content === 'string') {
-    return message.content.includes(SUMMARY_SENTINEL);
+    return message.content.includes(SUMMARY_SENTINEL) || message.content.includes(COMPACTED_MARKER_SENTINEL);
   }
   if (Array.isArray(message?.content)) {
     return message.content.some(
-      (b: any) => b?.type === 'text' && typeof b.text === 'string' && b.text.includes(SUMMARY_SENTINEL)
+      (b: any) => b?.type === 'text' && typeof b.text === 'string' && (b.text.includes(SUMMARY_SENTINEL) || b.text.includes(COMPACTED_MARKER_SENTINEL))
     );
   }
   return false;
@@ -332,6 +340,8 @@ export async function compactMessagesDetailed(
     rollingSummary = '',
     summaryCharBudget = DEFAULT_OPTIONS.summaryCharBudget!,
     failureAnchorDepth = DEFAULT_OPTIONS.failureAnchorDepth!,
+    conversationId = '',
+    compactedRangeTtlSeconds = Number(process.env.CONTEXT_COMPACTED_RANGE_TTL || 86400),
   } = options;
 
   const estimatedTokensBefore = estimateTokens(messages);
@@ -415,9 +425,14 @@ export async function compactMessagesDetailed(
     summary = buildOperationalHeuristicSummary(freshTurns, rollingSummary, summaryCharBudget);
   }
 
-  // 4. Insert Summary while maintaining role alternation.
-  // Stamp the sentinel so future passes can identify and skip this message.
-  const summaryContent = `${SUMMARY_SENTINEL}\n[CONTEXT SUMMARY]\n${summary}\n[END SUMMARY]`;
+  // 4. Persist compacted range metadata and emit a sentinel-backed block.
+  const rangeStart = firstPartEnd;
+  const rangeEnd = Math.max(firstPartEnd, lastPartStart - 1);
+  const rangeId = buildCompactedRangeId(freshTurns, rangeStart, rangeEnd);
+  if (conversationId && summary) {
+    await saveCompactedSummary(conversationId, rangeId, summary, compactedRangeTtlSeconds).catch(() => {});
+  }
+  const summaryContent = buildStoredSummaryMessage(rangeId, summary || rollingSummary || 'N/A');
   
   // Already-compacted summaries are promoted into firstPart so they survive
   // every subsequent compaction cycle without ever being re-summarized.

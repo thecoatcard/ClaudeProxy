@@ -10,6 +10,7 @@ import {
 } from '../tool-archive';
 import { runBehaviorAudit } from '../agent/behavior-auditor';
 import { getAdaptiveCompactionPolicy } from './adaptive-compaction-policy';
+import { hydrateCompactedMarkers } from '../compactor/ai-compactor';
 
 // Per-model max output token ceilings (Gemini rejects values above these).
 // Per-model max output token ceilings (Gemini rejects values above these).
@@ -78,6 +79,22 @@ function deriveSummaryKey(anthropicReq: any, userId?: string): string {
   return `context:summary:${stableHash(anchor)}`;
 }
 
+function deriveConversationId(anthropicReq: any, userId?: string): string {
+  const explicitId = anthropicReq?.metadata?.conversation_id
+    || anthropicReq?.conversation_id
+    || anthropicReq?.session_id
+    || anthropicReq?.thread_id;
+
+  if (typeof explicitId === 'string' && explicitId.trim()) {
+    return explicitId.trim();
+  }
+
+  const systemText = typeof anthropicReq?.system === 'string' ? anthropicReq.system : '';
+  const firstUser = (anthropicReq?.messages || []).find((msg: any) => msg?.role === 'user');
+  const anchor = `${userId || 'anon'}|${systemText.slice(0, 400)}|${extractText(firstUser?.content).slice(0, 400)}`;
+  return `anon-${stableHash(anchor)}`;
+}
+
 function getCompactionTargetTokens(internalModel?: string): number {
   if (!internalModel) return DEFAULT_COMPACTION_TARGET_TOKENS;
   if (internalModel.includes('lite')) return LITE_COMPACTION_TARGET_TOKENS;
@@ -127,6 +144,7 @@ export async function transformRequestToGemini(
 ) {
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
+  const conversationId = deriveConversationId(anthropicReq, userId);
   const baseKeepLastN = Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20);
   const compactionPolicy = getAdaptiveCompactionPolicy(
     internalModel,
@@ -136,6 +154,8 @@ export async function transformRequestToGemini(
   );
 
   if (Array.isArray(anthropicReq.messages)) {
+    anthropicReq.messages = await hydrateCompactedMarkers(anthropicReq.messages, conversationId).catch(() => anthropicReq.messages);
+
     // Pipeline initial metadata lookups to save RTT
     const [rollingSummary, systemKey] = await Promise.all([
       redis.get<string>(summaryKey).catch(() => ''),
@@ -152,6 +172,8 @@ export async function transformRequestToGemini(
       failureAnchorDepth: compactionPolicy.failureAnchorDepth,
       apiKey: systemKey?.key,
       model: 'gemma-4-31b-it',
+      conversationId,
+      compactedRangeTtlSeconds: SUMMARY_TTL_SECONDS,
     });
     anthropicReq.messages = compaction.messages;
 

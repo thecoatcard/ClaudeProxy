@@ -3,51 +3,36 @@
 ## Commands
 
 - npx tsc --noEmit
-- npx tsx --test tests/behavioral-tests.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts
+- npx tsx --test tests/ai-compactor.test.ts tests/context-compaction.test.ts
+- npx tsx --test tests/behavioral-tests.ts tests/tool-structure.test.ts tests/context-compaction.test.ts tests/model-adaptive.test.ts tests/ai-compactor.test.ts
 
 ## Outcome
 
 - TypeScript check: PASS
-- Test suites: 12
-- Total tests: 71
-- Passed: 71
+- Test suites: 13
+- Total tests: 74
+- Passed: 74
 - Failed: 0
 
-## Adaptive Coverage Added
+## New Coverage Added
 
-### Model-adaptive policies
+### AI compactor persistence
 
-- profile selection differs by model family
-- strong models use lighter loop intervention
-- weaker models use stronger loop intervention
-- strong context models compact later
-- weaker context models preserve more recent turns and deeper failure anchoring
-- guidance strength changes by model capability
-- action-text recovery aggressiveness changes by model capability
+- summary normalization to required `[COMPACTED MEMORY BLOCK]` schema
+- compacted metadata persistence fields and reload path
+- marker hydration from stored semantic summary by `(conversation_id, compacted_range)`
 
-## Key Coverage Added
+### Regression coverage retained
 
-### Tool structure
+- translator behavior suites remain green
+- tool structure fidelity remains green
+- context continuity compaction remains green
+- model-adaptive policy suites remain green
 
-- functionCall survives normal translation flow
-- functionCall survives retry-preparation signature stripping path
-- functionCall survives fallback-preparation path
-- action-text is recovered into structured tool_use
-- recoverable `[Action: ...]` does not leak to visible text
+## Notable Runtime Notes
 
-### Context compaction
-
-- preserves unfinished tasks in compacted context summary
-- preserves failed tool history (either retained or summarized)
-- preserves active pending tool chain near compaction boundary
-- preserves current working goal
-- preserves latest working state
-
-## Notable Runtime Notes During Tests
-
-- Metadata persistence helper logged retry failures for Redis writes in isolated unit tests (`fetch failed`), which is expected in offline test contexts.
-- Recovery logs were emitted from response recovery path, confirming parser execution.
+- Some Redis metadata writes in isolated tests still log `fetch failed` in offline context; this is expected and non-fatal.
 
 ## Final Status
 
-All requested translator-behavior and compaction tests passed with no type errors.
+Part A/Part B implementation changes compile and all relevant suites pass.
