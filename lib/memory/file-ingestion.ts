@@ -158,10 +158,15 @@ export function shouldIgnore(relativePath: string): boolean {
   );
 }
 
+/** Lock/generated files that should never be embedded (even if extension is eligible) */
+const LOCK_FILE_PATTERNS = ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'Cargo.lock', 'poetry.lock', 'Pipfile.lock', 'composer.lock', 'Gemfile.lock'];
+
 /**
  * Check if a file extension is eligible for embedding.
  */
 export function isEligibleExtension(filePath: string): boolean {
+  const basename = path.basename(filePath);
+  if (LOCK_FILE_PATTERNS.includes(basename)) return false;
   const ext = path.extname(filePath).toLowerCase();
   return INCLUDE_EXTENSIONS.has(ext);
 }

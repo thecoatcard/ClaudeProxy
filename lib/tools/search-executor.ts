@@ -12,7 +12,7 @@
 // Edge-runtime safe — no Node APIs, no filesystem.
 
 import {
-  executeWebSearch,
+  executeWebSearchSafe,
   buildSearchFunctionResponse,
   WEB_SEARCH_FUNCTION_DECLARATION,
   type WebSearchConfig,
@@ -68,7 +68,7 @@ export async function runWithWebSearch(
       searchCalls.map(async (part: any) => {
         const query = String(part.functionCall.args?.query ?? '');
         searchUses++;
-        return executeWebSearch(query, webSearchConfig);
+        return executeWebSearchSafe(query, webSearchConfig);
       }),
     );
 

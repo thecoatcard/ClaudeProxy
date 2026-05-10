@@ -4,14 +4,21 @@
  * Parallel model racing — for overload-sensitive requests, race multiple models
  * simultaneously. First healthy response wins, others are cancelled.
  *
- * Use case: when a primary model is likely overloaded, don't wait for serial
- * fallback. Instead, fire requests to 2-3 models in parallel and take whichever
- * responds first with a valid result.
+ * Dynamic model racing by task type:
+ *   CHAT             → off  (single model, too cheap to race)
+ *   HEALTH_CHECK     → off
+ *   COMPACTION       → off  (background)
+ *   LIGHT_CODING     → 2 models
+ *   HEAVY_CODING     → 3 models
+ *   REASONING        → off  (gemma primary — race only on failure, not default)
+ *   WEB_SEARCH       → 2 models
+ *   overload         → enable (any task type becomes 2-3 model race)
  */
 
 import { getHealthiestKeyObj, reportKeyFailure, recordKeyUsage } from '../key-manager';
 import { callGemini } from '../gemini-adapter';
 import { logInfo, logWarn } from '../logging/event-logger';
+import { getTaskModelChain, type TaskType } from '../routing/task-router';
 
 export interface ModelRaceResult {
   response: Response;
@@ -28,6 +35,51 @@ const DEFAULT_RACE_MODELS = [
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
+
+// ---------------------------------------------------------------------------
+// Dynamic model race config by task type
+// ---------------------------------------------------------------------------
+
+export interface ModelRaceConfig {
+  /** Whether model racing is enabled for this task type */
+  enabled: boolean;
+  /** Number of models to race (taken from head of task chain) */
+  modelCount: number;
+}
+
+/**
+ * Get the dynamic model race config for a given task type.
+ *
+ * REASONING uses Gemma primary — racing Gemma vs Gemini defeats the purpose.
+ * CHAT and HEALTH_CHECK are too cheap to race.
+ * HEAVY_CODING benefits most from racing (highest latency sensitivity).
+ */
+export function getDynamicModelRaceConfig(taskType: TaskType, isOverload = false): ModelRaceConfig {
+  if (isOverload) return { enabled: true, modelCount: 3 };
+
+  switch (taskType) {
+    case 'CHAT':
+    case 'HEALTH_CHECK':
+    case 'COMPACTION':
+    case 'REASONING':
+      return { enabled: false, modelCount: 1 };
+    case 'LIGHT_CODING':
+    case 'WEB_SEARCH':
+      return { enabled: true, modelCount: 2 };
+    case 'HEAVY_CODING':
+      return { enabled: true, modelCount: 3 };
+    default:
+      return { enabled: false, modelCount: 1 };
+  }
+}
+
+/**
+ * Get the models to use for a racing config, pulled from the task's chain.
+ */
+export function getModelsForRace(taskType: TaskType, count: number): string[] {
+  const chain = getTaskModelChain(taskType);
+  return chain.slice(0, count);
+}
 
 /**
  * Race multiple models in parallel with independent keys.

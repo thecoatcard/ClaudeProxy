@@ -95,21 +95,12 @@ export function detectPrematureCompletion(messages: any[]): CompletionGateResult
 
   // There are either failures or all results are uncertain — the claim is premature.
   const guidance = [
-    '',
     '---',
-    '[GATEWAY COMPLETION GATE] A completion claim was detected in the previous assistant turn, but the tool execution record shows problems:',
-    failedCount > 0 ? `  • ${failedCount} tool call(s) failed (errors detected in tool_result content).` : '',
-    uncertainCount > 0 ? `  • ${uncertainCount} tool result(s) are ambiguous (could not confirm success).` : '',
-    '',
-    'Completion criterion: do NOT claim the task is done until:',
-    '  1. Every required tool call produced a result with no error signals.',
-    '  2. If a tool failed, a corrective action was taken and a successful retry is in the record.',
-    '  3. You can cite specific tool results as evidence for each claimed outcome.',
-    '',
-    `Detected completion signals: [${signals.join(', ')}]`,
-    'If the task genuinely is complete, provide explicit evidence (e.g. "The write tool returned success for X; the bash tool exited without error for Y").',
+    `[COMPLETION GATE] Completion claimed but ${failedCount > 0 ? `${failedCount} tool(s) failed` : ''}${uncertainCount > 0 ? ` ${uncertainCount} uncertain` : ''}. Do NOT claim done until all required tools succeeded with evidence.`,
+    failedCount > 0 ? `• ${failedCount} tool call(s) failed.` : '',
+    uncertainCount > 0 ? `• ${uncertainCount} result(s) ambiguous.` : '',
+    'Cite specific tool results as evidence before claiming completion.',
     '---',
-    '',
   ].filter(line => line !== '').join('\n');
 
   return {

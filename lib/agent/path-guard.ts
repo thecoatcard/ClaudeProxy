@@ -107,23 +107,11 @@ export function buildPathGuidance(issues: PathIssue[]): string {
   if (issues.length === 0) return '';
 
   const lines = [
-    '',
     '---',
-    `[GATEWAY PATH GUARD] ${issues.length} path issue(s) detected in recent tool calls:`,
+    `[PATH] ${issues.length} path issue(s): ${issues.map(i => i.description).join('; ')}`,
+    '• No mixed slashes. No ../. No empty paths. Keep shell metacharacters out of path fields.',
+    '---',
   ];
-
-  for (const issue of issues) {
-    lines.push(`  • ${issue.description}`);
-  }
-
-  lines.push('');
-  lines.push('Before every file or directory operation:');
-  lines.push('  1. Use only forward slashes or only backslashes — never mix them.');
-  lines.push('  2. Never use "../" sequences to navigate above your working root.');
-  lines.push('  3. Empty path parameters cause ENOENT — verify the value is set before use.');
-  lines.push('  4. Shell metacharacters in path values should be moved to argument fields, not path fields.');
-  lines.push('---');
-  lines.push('');
 
   return lines.join('\n');
 }

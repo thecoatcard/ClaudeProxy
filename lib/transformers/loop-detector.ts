@@ -174,20 +174,13 @@ export function detectFailureLoop(messages: any[], internalModel?: string): Loop
         if (entry.count >= policy.minRepeats) {
           const alt = entry.pair;
           const guidance = [
-            '',
             '---',
-            `[GATEWAY LOOP DETECTOR] Tool \`${alt.name}\` has failed ${entry.count} times (alternating with other tools). This is a non-consecutive loop pattern — DO NOT retry the same call.`,
-            '',
-            'Required next step:',
-            '1. Read ALL recent error messages carefully to understand the combined pattern.',
-            '2. Your current strategy is not working — try a fundamentally different approach.',
-            '3. If dependencies between tool calls are cycling, break the cycle: resolve the root blocker first.',
-            '4. If you cannot proceed, stop and report the blocker in plain text to the user.',
-            '',
-            `Last error for this tool: ${alt.errorText.slice(0, 240) || '(empty)'}`,
+            `[LOOP] \`${alt.name}\` failed ${entry.count}× (non-consecutive). DO NOT retry the same call.`,
+            '• Try a fundamentally different approach. Break the root blocker first.',
+            '• If blocked: stop calling tools and report to the user.',
+            `Error: ${alt.errorText.slice(0, 160) || '(empty)'}`,
             policy.extraGuidance,
             '---',
-            '',
           ].join('\n');
 
           return {
@@ -207,21 +200,14 @@ export function detectFailureLoop(messages: any[], internalModel?: string): Loop
   }
 
   const guidance = [
-    '',
     '---',
-    `[GATEWAY LOOP DETECTOR] The previous ${runCount} attempts to call tool \`${lastFailed.name}\` with the same arguments all failed with an error. DO NOT repeat the identical call.`,
-    '',
-    'Required next step:',
-    '1. Read the error message carefully and identify the root cause.',
-    '2. Verify your assumptions before retrying — e.g. if a path is missing, list the parent directory first; if a command was not found, check the working directory or use an alternative tool.',
-    '3. Change at least one parameter, the tool itself, or the strategy. An identical retry will produce an identical failure.',
-    '4. If the error indicates a missing prerequisite (directory, file, dependency), create or locate it first via a different tool call.',
-    '5. If you cannot determine a corrective action, stop calling tools and report the blocker in plain text to the user.',
-    '',
-    `Last error observed: ${lastFailed.errorText.slice(0, 240) || '(empty)'}`,
+    `[LOOP] \`${lastFailed.name}\` failed ${runCount}× with the same args. DO NOT repeat the identical call.`,
+    '• Identify the root cause. Change the tool, args, or strategy.',
+    '• If a prerequisite is missing, create/locate it via a different tool first.',
+    '• If blocked: stop and report to the user.',
+    `Error: ${lastFailed.errorText.slice(0, 160) || '(empty)'}`,
     policy.extraGuidance,
     '---',
-    '',
   ].join('\n');
 
   return {

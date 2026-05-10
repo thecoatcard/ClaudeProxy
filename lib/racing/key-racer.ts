@@ -7,11 +7,60 @@
  * This eliminates serial key retry latency (was: try key1 → fail → backoff →
  * try key2 → fail → backoff → try key3). Now: race key1/key2/key3 in parallel,
  * first healthy response wins.
+ *
+ * Dynamic key count (by task type):
+ *   CHAT / HEALTH_CHECK  → 1 key (cheap, no need to race)
+ *   LIGHT_CODING         → 2 keys
+ *   HEAVY_CODING         → 2-3 keys
+ *   OVERLOAD_RECOVERY    → 3 keys (max parallelism)
  */
 
 import { getHealthiestKeyObj, reportKeyFailure, recordKeyUsage } from '../key-manager';
 import { callGemini } from '../gemini-adapter';
 import { logInfo, logWarn } from '../logging/event-logger';
+import type { TaskType } from '../routing/task-router';
+
+export interface KeyRaceResult {
+  response: Response;
+  keyId: string;
+  latencyMs: number;
+  racedKeys: number;
+  winnerId: string;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic key count by task type
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the number of keys to race in parallel for a given task type.
+ *
+ * Rules:
+ *   CHAT / HEALTH_CHECK  → 1  (trivial — no racing overhead)
+ *   COMPACTION           → 1  (background task)
+ *   LIGHT_CODING         → 2  (moderate latency benefit)
+ *   HEAVY_CODING         → 3  (latency critical)
+ *   REASONING            → 2  (gemma primary — race only if overloaded)
+ *   WEB_SEARCH           → 2  (already has 8s timeout, moderate racing)
+ *   overload             → 3  (maximum racing for recovery)
+ */
+export function getDynamicKeyCount(taskType: TaskType, isOverload = false): number {
+  if (isOverload) return 3;
+  switch (taskType) {
+    case 'CHAT':
+    case 'HEALTH_CHECK':
+    case 'COMPACTION':
+      return 1;
+    case 'LIGHT_CODING':
+    case 'REASONING':
+    case 'WEB_SEARCH':
+      return 2;
+    case 'HEAVY_CODING':
+      return 3;
+    default:
+      return 1;
+  }
+}
 
 export interface KeyRaceResult {
   response: Response;

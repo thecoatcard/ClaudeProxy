@@ -347,6 +347,38 @@ export async function executeWebSearch(
   };
 }
 
+/** Hard global timeout for the entire web search (all providers combined). */
+const GLOBAL_SEARCH_TIMEOUT_MS = Number(process.env.WEB_SEARCH_GLOBAL_TIMEOUT_MS ?? 8000);
+
+/**
+ * Execute a web search with a hard global timeout.
+ *
+ * If the search does not complete within GLOBAL_SEARCH_TIMEOUT_MS (default 8s),
+ * returns a partial/empty SearchResponse immediately so the model call can proceed.
+ * This prevents a slow/unresponsive search provider from blocking the full request.
+ *
+ * Partial results are allowed — if some providers responded before timeout, their
+ * results are returned. If none responded, ok=false with a timeout error message.
+ */
+export async function executeWebSearchSafe(
+  query: string,
+  config?: WebSearchConfig,
+): Promise<SearchResponse> {
+  const timeoutPromise: Promise<SearchResponse> = new Promise((resolve) => {
+    setTimeout(() => {
+      resolve({
+        results: [],
+        query: query ?? '',
+        provider: 'timeout',
+        ok: false,
+        error: `Web search global timeout after ${GLOBAL_SEARCH_TIMEOUT_MS}ms — continuing without search results`,
+      });
+    }, GLOBAL_SEARCH_TIMEOUT_MS);
+  });
+
+  return Promise.race([executeWebSearch(query, config), timeoutPromise]);
+}
+
 // ─── Result normalisation → Anthropic tool_result format ─────────────────────
 
 /**

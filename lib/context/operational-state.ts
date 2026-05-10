@@ -653,7 +653,7 @@ export function buildOperationalGuidance(state: OperationalState): string {
     return '';
   }
 
-  const lines: string[] = ['', '---', '[GATEWAY OPERATIONAL CONTEXT]'];
+  const lines: string[] = ['---', '[CTX]'];
 
   // Shell & environment
   if (state.shell_type !== 'unknown') {
@@ -759,6 +759,6 @@ export function buildOperationalGuidance(state: OperationalState): string {
     lines.push('WARNING: Interactive stdin not supported. Always use non-interactive flags for CLI tools.');
   }
 
-  lines.push('---', '');
+  lines.push('---');
   return lines.join('\n');
 }

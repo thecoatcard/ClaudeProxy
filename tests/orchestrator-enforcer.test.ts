@@ -66,14 +66,14 @@ describe('prepareOrchestration', () => {
     const body = makeBody('add authentication system');
     const { enrichedBody } = await prepareOrchestration(body, 'user-1');
     expect(typeof enrichedBody.system).toBe('string');
-    expect((enrichedBody.system as string)).toContain('coordinator');
+    expect((enrichedBody.system as string)).toContain('COORDINATOR');
   });
 
   test('existing system prompt is preserved and extended', async () => {
     const body = { ...makeBody('create dashboard'), system: 'You are a helpful AI.' };
     const { enrichedBody } = await prepareOrchestration(body, 'user-1');
     expect((enrichedBody.system as string)).toContain('You are a helpful AI.');
-    expect((enrichedBody.system as string)).toContain('coordinator');
+    expect((enrichedBody.system as string)).toContain('COORDINATOR');
   });
 
   test('explicit override "use subagents" → orchestrator enabled', async () => {

@@ -73,23 +73,7 @@ const MODEL_ASSIGNMENTS = {
  * prompt.  This shapes the model's behaviour without exposing implementation
  * details to the end user.
  */
-const ORCHESTRATOR_SYSTEM_INJECTION = `
-
-<orchestrator_mode>
-You are operating as the **coordinator** for this task.
-
-Before taking any direct action you MUST:
-1. Decompose the task into discrete sub-tasks.
-2. Assign each sub-task to the most appropriate subagent model.
-3. Execute sub-tasks in dependency order (parallelise where safe).
-4. Verify the output of each completed sub-task before proceeding.
-5. Merge all sub-task results into a coherent final answer.
-
-Never continue in single linear mode for multi-step or multi-file work.
-Always prefer parallelism over sequential execution when there are no
-data dependencies between steps.
-</orchestrator_mode>
-`.trim();
+const ORCHESTRATOR_SYSTEM_INJECTION = `[COORDINATOR] Decompose into sub-tasks. Assign to best model. Execute in dependency order; parallelize safe tasks. Verify each result. Merge into final answer.`.trim();
 
 // ---------------------------------------------------------------------------
 // Types

@@ -183,26 +183,16 @@ export function buildInteractiveCommandGuidance(detections: InteractiveCommandDe
   if (detections.length === 0) return '';
 
   const lines: string[] = [
-    '',
     '---',
-    `[GATEWAY INTERACTIVE COMMAND GUARD] ${detections.length} interactive CLI wizard command(s) detected in recent tool calls.`,
-    'These commands block indefinitely waiting for keyboard input from a TTY. They cannot be used without non-interactive flags.',
-    '',
+    `[INTERACTIVE] ${detections.length} wizard CLI(s) detected — these block on TTY input. Always use non-interactive flags.`,
   ];
 
   for (const d of detections) {
-    lines.push(`Command: \`${d.command.slice(0, 120)}\``);
-    lines.push(`  Problem: ${d.reason}`);
-    lines.push(`  Fix: Use non-interactive flags → ${d.recommendedFlags}`);
-    lines.push('');
+    lines.push(`  \`${d.command.slice(0, 80)}\` → ${d.recommendedFlags}`);
   }
 
-  lines.push('Rules for interactive CLI tools:');
-  lines.push('  1. ALWAYS include non-interactive/headless flags (--yes, --defaults, --CI, etc.) before running.');
-  lines.push('  2. If no headless flag exists, create the config file manually instead of running the CLI.');
-  lines.push('  3. Never run a wizard CLI without all required arguments pre-specified.');
+  lines.push('If no headless flag exists, create config files manually instead of running the CLI.');
   lines.push('---');
-  lines.push('');
 
   return lines.join('\n');
 }

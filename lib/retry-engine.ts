@@ -23,8 +23,8 @@ import {
 } from './recovery/overload-recovery';
 import { logInfo, logWarn, logError } from './logging/event-logger';
 import { errorOneLiner } from './logging/error-summarizer';
-import { raceKeys } from './racing/key-racer';
-import { raceModels } from './racing/model-racer';
+import { raceKeys, getDynamicKeyCount } from './racing/key-racer';
+import { raceModels, getDynamicModelRaceConfig } from './racing/model-racer';
 import { startTimer } from './metrics/performance-tracker';
 import { withTimeout, MODEL_CALL_TIMEOUT, REQUEST_TIMEOUT } from './runtime/response-watchdog';
 
@@ -201,7 +201,7 @@ export async function executeWithRetry(
   // Phase 0: Parallel key racing — fire multiple keys simultaneously on
   // primary model. If one responds 2xx, return immediately (skips serial loop).
   // -----------------------------------------------------------------------
-  const KEY_RACE_COUNT = Number(process.env.KEY_RACE_COUNT || 1);
+  const KEY_RACE_COUNT = getDynamicKeyCount(modelMap.taskType ?? 'LIGHT_CODING');
   if (KEY_RACE_COUNT > 1) {
     const keyRaceTimer = startTimer();
     const keyRaceResult = await withTimeout(
@@ -235,12 +235,12 @@ export async function executeWithRetry(
   // Phase 0b: Parallel model racing — if key race failed/overloaded,
   // race fallback models simultaneously before falling back to serial loop.
   // -----------------------------------------------------------------------
-  const MODEL_RACE_ENABLED = process.env.MODEL_RACE_ENABLED === 'true';
-  if (MODEL_RACE_ENABLED && fallbacks.length > 0) {
+  const modelRaceConfig = getDynamicModelRaceConfig(modelMap.taskType ?? 'LIGHT_CODING');
+  if (modelRaceConfig.enabled && fallbacks.length > 0) {
     const modelRaceTimer = startTimer();
     const modelRaceResult = await withTimeout(
       raceModels({
-        models: [primaryModel, ...fallbacks.slice(0, 2)],
+        models: [primaryModel, ...fallbacks.slice(0, modelRaceConfig.modelCount - 1)],
         body: geminiBody,
         stream,
         userId,
@@ -568,6 +568,8 @@ export async function executeWithRetry(
     } catch (err: any) {
       // Phase 1: Classify overload errors as recoverable — don't hard throw
       if (err.message === 'overloaded_error' && attempt < maxRetries) {
+        // Track this model as overloaded so recovery doesn't return it again
+        overloadedModels.add(currentInternalModel);
         const recovery = await recoverFromOverload({
           currentModel: currentInternalModel,
           currentKeyId: keyObj.id,
@@ -579,6 +581,11 @@ export async function executeWithRetry(
         if (recovery.recovered) {
           if (recovery.compacted) geminiBody = compactBodyForOverload(geminiBody);
           if (recovery.newModel) currentInternalModel = recovery.newModel;
+          // Fast-exit: all available models exhausted
+          if (overloadedModels.size >= Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE)) {
+            logError('OVERLOAD', `All ${overloadedModels.size} models overloaded (stream) — failing fast after ${attempt} attempt(s)`);
+            throw err;
+          }
           lastError = err;
           await sleep(recovery.backoffMs);
           continue;

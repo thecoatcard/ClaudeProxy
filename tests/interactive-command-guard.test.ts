@@ -127,7 +127,7 @@ describe('buildInteractiveCommandGuidance', () => {
   it('includes detected command in guidance', () => {
     const d = detectInteractiveCommand('npx shadcn@latest init')!;
     const g = buildInteractiveCommandGuidance([d]);
-    assert.ok(g.includes('GATEWAY INTERACTIVE COMMAND GUARD'));
+    assert.ok(g.includes('INTERACTIVE'));
     assert.ok(g.includes('shadcn'));
     assert.ok(g.includes('--yes'));
   });

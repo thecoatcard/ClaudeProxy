@@ -127,20 +127,11 @@ export function buildSpecGuidance(requirements: Requirement[]): string {
   if (unaddressed.length === 0) return '';
 
   const lines = [
-    '',
     '---',
-    `[GATEWAY SPEC VALIDATOR] ${unaddressed.length} of ${requirements.length} task requirements appear unaddressed:`,
+    `[SPEC] ${unaddressed.length}/${requirements.length} requirement(s) unaddressed: ${unaddressed.map(r => `${r.index}.${r.text.slice(0, 60)}`).join(' | ')}`,
+    'Complete missing items before claiming done.',
+    '---',
   ];
-
-  for (const req of unaddressed) {
-    lines.push(`  ${req.index}. ${req.text}`);
-  }
-
-  lines.push('');
-  lines.push('Do not claim task completion until all listed requirements have a corresponding verified action.');
-  lines.push('Complete the missing items above before responding with a summary or "done".');
-  lines.push('---');
-  lines.push('');
 
   return lines.join('\n');
 }

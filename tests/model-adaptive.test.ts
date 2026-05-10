@@ -63,7 +63,7 @@ describe('model adaptive policies', () => {
     const weakReminder = buildAdaptiveBehaviorReminder('gemma-4-31b-it', true);
 
     assert.ok(strongReminder.length < weakReminder.length);
-    assert.ok(/Use structured tool calls only\./.test(weakReminder));
+    assert.ok(weakReminder.includes('POLICY'));
   });
 
   it('action recovery policy is aggressive for weaker models and minimal for stronger ones', () => {

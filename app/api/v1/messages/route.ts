@@ -157,14 +157,15 @@ export async function POST(req: Request) {
             }
           } catch (e) {
             log.error('STREAM', errorOneLiner(e, 'stream-transform'));
-            await incrementErrorCount({ model, userToken: token });
+            incrementErrorCount({ model, userToken: token }).catch(() => {}); // non-blocking
             safeEnqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
             clearInterval(pingInterval);
             streamClosed = true;
             try { controller.close(); } catch {}
-            await recordLatency(Date.now() - startTime);
-            await recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token });
+            // Fire-and-forget — stream is already closed, client has all data
+            recordLatency(Date.now() - startTime).catch(() => {});
+            recordTokens(usageRef.inputTokens, usageRef.outputTokens, { model, userToken: token }).catch(() => {});
             log.info('STREAM', 'Stream completed', { duration: Date.now() - streamStart });
             logActivity({
               ts: Date.now(),
@@ -224,8 +225,9 @@ export async function POST(req: Request) {
       }
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames, internalModel);
 
-      await recordLatency(Date.now() - startTime);
-      await recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token });
+      // Fire-and-forget telemetry — must not block the response path
+      recordLatency(Date.now() - startTime).catch(() => {});
+      recordTokens(anthropicRes.usage.input_tokens, anthropicRes.usage.output_tokens, { model, userToken: token }).catch(() => {});
       log.info('ACTIVITY', 'Request completed', { duration: Date.now() - startTime });
       logRequest({
         model,
@@ -260,7 +262,7 @@ export async function POST(req: Request) {
       return NextResponse.json(anthropicRes);
     }
   } catch (err: any) {
-    await incrementErrorCount({ model, userToken: token });
+    incrementErrorCount({ model, userToken: token }).catch(() => {}); // non-blocking
     const anthropicErr = transformError(err);
     return NextResponse.json(anthropicErr, { status: anthropicErr.error.type === 'overloaded_error' ? 529 : (err.status || 500) });
   }

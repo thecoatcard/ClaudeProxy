@@ -209,7 +209,132 @@ export class RedisVectorStore {
     return entries;
   }
 
-  // ─── Migration ──────────────────────────────────────────────────────────────
+  /**
+   * Purge entries older than maxAgeMs that have not been re-embedded.
+   * Useful for cleaning up stale embeddings after files are deleted.
+   *
+   * @param maxAgeMs - Maximum age in milliseconds (default: 8 days)
+   * @returns Number of entries removed
+   */
+  async purgeStaleEntries(maxAgeMs = 8 * 86_400 * 1000): Promise<number> {
+    const entries = await this.allEntries();
+    const cutoff = Date.now() - maxAgeMs;
+    let removed = 0;
+
+    const stale = entries.filter(
+      (e) => (e.metadata.embeddedAt ?? 0) < cutoff
+    );
+
+    if (stale.length === 0) return 0;
+
+    const r = redis as any;
+    const idxKey = indexKey(this.wsId);
+    try {
+      const pl = r.pipeline();
+      for (const entry of stale) {
+        pl.del(entryKey(this.wsId, entry.id));
+        pl.srem(idxKey, entry.id);
+      }
+      await pl.exec();
+      removed = stale.length;
+    } catch {
+      // Fallback: sequential
+      for (const entry of stale) {
+        await this.remove(entry.id);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  /**
+   * Apply an incremental diff to the vector store:
+   * - Renamed entries: update their ID/metadata without re-embedding
+   * - Deleted entries: remove from store
+   *
+   * Returns counts of actions taken.
+   */
+  async applyIncrementalDiff(diff: {
+    deleted: string[];
+    renamed: Array<{ oldPath: string; newPath: string }>;
+  }): Promise<{ deleted: number; renamed: number }> {
+    let deleted = 0;
+    let renamed = 0;
+
+    // Process renames: update entry ID and metadata
+    for (const { oldPath, newPath } of diff.renamed) {
+      const oldId = `file:${oldPath}`;
+      const newId = `file:${newPath}`;
+      const existing = await this.get(oldId);
+      if (existing) {
+        const updated = {
+          ...existing,
+          id: newId,
+          metadata: {
+            ...existing.metadata,
+            title: newPath,
+          },
+        };
+        await this.insert(updated);
+        await this.remove(oldId);
+        renamed++;
+      }
+    }
+
+    // Process deletes: remove entries from store
+    const r = redis as any;
+    const idxKey = indexKey(this.wsId);
+    const toDelete = diff.deleted
+      .map((p) => `file:${p}`)
+      .filter(Boolean);
+
+    if (toDelete.length > 0) {
+      try {
+        const pl = r.pipeline();
+        for (const id of toDelete) {
+          pl.del(entryKey(this.wsId, id));
+          pl.srem(idxKey, id);
+        }
+        await pl.exec();
+        deleted = toDelete.length;
+      } catch {
+        for (const id of toDelete) {
+          await this.remove(id);
+          deleted++;
+        }
+      }
+    }
+
+    return { deleted, renamed };
+  }
+
+  /**
+   * Check embedding freshness: returns the fraction of entries that
+   * have been embedded within the last `freshnessWindowMs` milliseconds.
+   * A value < 0.5 means more than half the index is stale.
+   */
+  async checkFreshness(freshnessWindowMs = 24 * 60 * 60 * 1000): Promise<{
+    total: number;
+    fresh: number;
+    stale: number;
+    freshnessRatio: number;
+  }> {
+    const entries = await this.allEntries();
+    const cutoff = Date.now() - freshnessWindowMs;
+    const fresh = entries.filter((e) => (e.metadata.embeddedAt ?? 0) >= cutoff).length;
+    const stale = entries.length - fresh;
+    return {
+      total: entries.length,
+      fresh,
+      stale,
+      freshnessRatio: entries.length === 0 ? 1 : fresh / entries.length,
+    };
+  }
+
+  /**
+   * Migration ─────────────────────────────────────────────────────────────────
+   */
 
   /**
    * Import entries from a local vectors.json file into Redis.
