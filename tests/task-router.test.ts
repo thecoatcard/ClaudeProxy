@@ -101,7 +101,8 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'COMPACTION');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemma-4-26b-a4b-it');
+    assert.equal(chain[0], 'gemini-2.5-flash-lite');
+    assert.ok(chain.includes('gemma-4-26b-a4b-it'), 'Gemma should still be in the compaction chain as fallback');
   });
 
   test('trivial greeting routes to CHAT', () => {

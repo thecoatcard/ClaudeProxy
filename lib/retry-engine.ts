@@ -251,6 +251,11 @@ export async function executeWithRetry(
   let stripThinking = false;
   let skipCache = false;
   let lastCacheHash: string | null = null;
+  // Tracks whether we already gave a free retry for a thought_signature 400.
+  // Only the first occurrence of this config-level error is exempt from the
+  // attempt counter — subsequent occurrences burn an attempt normally so we
+  // never get stuck retrying the same model forever.
+  let thinkingStrippedFreeRetryUsed = false;
   const clearStickyRoute = () => forgetLastWorkingModel(userId, anthropicModel, modelMap.routeVersion);
   // Tracks distinct models that returned 503 — when all chain models are
   // exhausted we break early instead of burning remaining retries on models
@@ -662,7 +667,15 @@ export async function executeWithRetry(
             stripThinking = true;
             logWarn('RETRY', `thought_signature 400 on ${currentInternalModel} — disabling thinking`);
             lastError = { status: 400, message: msg };
-            await sleep(computeBackoffMs(attempt));
+            // Don't charge an attempt for this config-level fix — the retry will
+            // use the same model with thinking stripped. We only grant one free
+            // retry per request so the engine can't spin on repeated 400s.
+            if (!thinkingStrippedFreeRetryUsed) {
+              thinkingStrippedFreeRetryUsed = true;
+              attempt--; // the loop's attempt++ cancels this out — net: same attempt index
+            }
+            const remainingBudgetMs = REQUEST_TIMEOUT - requestTimer.elapsed();
+            if (remainingBudgetMs > 3_000) await sleep(computeBackoffMs(attempt));
             continue;
           }
 
@@ -728,7 +741,10 @@ export async function executeWithRetry(
             metadata: { fromModel: prev, toModel: currentInternalModel, status: 503, attempt },
           });
           lastError = err;
-          await sleep(computeOverloadBackoff(attempt));
+          // Skip long backoff when budget is low — give the new model a fair attempt
+          const budgetRemaining503 = REQUEST_TIMEOUT - requestTimer.elapsed();
+          const backoff503 = budgetRemaining503 < 10_000 ? 0 : computeOverloadBackoff(attempt);
+          if (backoff503 > 0) await sleep(backoff503);
           continue;
         }
       }
@@ -760,7 +776,10 @@ export async function executeWithRetry(
             throw err;
           }
           lastError = err;
-          await sleep(recovery.backoffMs);
+          // Skip long backoff when budget is critically low — give the fallback model a fair attempt
+          const budgetRemainingOverload = REQUEST_TIMEOUT - requestTimer.elapsed();
+          const backoffOverload = budgetRemainingOverload < 10_000 ? 0 : recovery.backoffMs;
+          if (backoffOverload > 0) await sleep(backoffOverload);
           continue;
         }
         throw err; // recovery exhausted — rethrow
@@ -812,7 +831,10 @@ export async function executeWithRetry(
         }
 
         lastError = err;
-        await sleep(recovery.backoffMs || computeOverloadBackoff(attempt));
+        // Skip long backoff when budget is critically low — give the fallback model a fair attempt
+        const budgetRemainingTimeout = REQUEST_TIMEOUT - requestTimer.elapsed();
+        const backoffTimeout = budgetRemainingTimeout < 10_000 ? 0 : (recovery.backoffMs || computeOverloadBackoff(attempt));
+        if (backoffTimeout > 0) await sleep(backoffTimeout);
         continue;
       }
       throw err;

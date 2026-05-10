@@ -67,11 +67,13 @@ const CHAT_CHAIN = [
   'gemini-flash-lite-latest',
 ];
 
-/** Context compaction (summarise large histories) → Gemma small (efficient) */
+/** Context compaction (summarise large histories) → fast Gemini lite, Gemma as last resort */
 const COMPACTION_CHAIN = [
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-2.5-flash',
   'gemma-4-26b-a4b-it',
   'gemma-4-31b-it',
-  'gemini-2.5-flash',
 ];
 
 /** Web search tasks → fast model to avoid compounding latency */

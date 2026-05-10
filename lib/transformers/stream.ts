@@ -514,6 +514,17 @@ export async function* transformStream(
       yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
     }
 
+    // When the model returns 0 tokens with no tool use, inject a visible
+    // placeholder so the client does not silently hang waiting for content.
+    // This surfaces the empty response to the user rather than leaving the
+    // conversation in an unrecoverable stall state.
+    if (finalOutputTokens === 0 && !sawToolUse && !inContentBlock) {
+      const idx = contentBlockIndex + (inContentBlock || inToolCall || inThinking ? 1 : 0);
+      yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'text', text: '' } })}\n\n`;
+      yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: '[Model returned an empty response. Please retry.]' } })}\n\n`;
+      yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`;
+    }
+
     // Determine stop reason.
     // MAX_TOKENS overrides tool_use: the model was cut off mid-response, so
     // emitting 'tool_use' would mislead Claude Code into thinking tool execution
