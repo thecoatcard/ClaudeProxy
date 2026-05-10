@@ -20,8 +20,17 @@ import {
   buildOperationalGuidance,
   type OperationalStateStore,
 } from '../context/operational-state';
+import {
+  applyCanonicalEmergencyState,
+  loadEmergencyCompactionState,
+} from '../context/emergency-compactor';
 import { logInfo } from '../logging/event-logger';
 export type { WebSearchConfig };
+
+export interface GatewayRequestContext {
+  conversationId: string;
+  summaryKey: string;
+}
 
 // Redis store adapter for operational state.
 const opStateStore: OperationalStateStore = {
@@ -155,10 +164,11 @@ export async function transformRequestToGemini(
   originalToolNames?: Map<string, string>,
   userId?: string,
   requestId?: string,
-): Promise<{ geminiBody: any; webSearchConfig: WebSearchConfig | null }> {
+): Promise<{ geminiBody: any; webSearchConfig: WebSearchConfig | null; requestContext: GatewayRequestContext }> {
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
   const conversationId = deriveConversationId(anthropicReq, userId);
+  const requestContext: GatewayRequestContext = { conversationId, summaryKey };
   const baseKeepLastN = Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20);
   const compactionPolicy = getAdaptiveCompactionPolicy(
     internalModel,
@@ -168,6 +178,20 @@ export async function transformRequestToGemini(
   );
 
   if (Array.isArray(anthropicReq.messages)) {
+    const emergencyState = await loadEmergencyCompactionState(conversationId).catch(() => null);
+    if (emergencyState) {
+      anthropicReq.messages = applyCanonicalEmergencyState(anthropicReq.messages, emergencyState);
+      logInfo('COMPACTION', 'REQUEST_REWRITTEN', {
+        requestId,
+        metadata: {
+          conversationId,
+          source: 'emergency-state',
+          compactionCount: emergencyState.compactionCount,
+          messageCount: anthropicReq.messages.length,
+        },
+      });
+    }
+
     const hydrateStart = Date.now();
     anthropicReq.messages = await hydrateCompactedMarkers(anthropicReq.messages, conversationId).catch(() => anthropicReq.messages);
     logInfo('RETRIEVAL', 'Compacted marker hydration completed', {
@@ -618,5 +642,5 @@ export async function transformRequestToGemini(
     { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
   ];
 
-  return { geminiBody: result, webSearchConfig };
+  return { geminiBody: result, webSearchConfig, requestContext };
 }

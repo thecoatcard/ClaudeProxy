@@ -44,7 +44,8 @@ export interface KeyRaceResult {
  *   WEB_SEARCH           → 2  (already has 8s timeout, moderate racing)
  *   overload             → 3  (maximum racing for recovery)
  */
-export function getDynamicKeyCount(taskType: TaskType, isOverload = false): number {
+export function getDynamicKeyCount(taskType: TaskType, isOverload = false, racingEnabled = false): number {
+  if (!racingEnabled) return 1;
   if (isOverload) return 3;
   switch (taskType) {
     case 'CHAT':

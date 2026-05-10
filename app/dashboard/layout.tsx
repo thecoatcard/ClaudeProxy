@@ -33,7 +33,7 @@ function LoginModal({ onSuccess, onClose }: LoginModalProps) {
     e.preventDefault();
     setBusy(true);
     setErr('');
-    const res = await fetch('/api/auth/login', {
+    const res = await fetch('/api/admin/session/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -98,7 +98,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const [showLogin, setShowLogin] = useState(false);
 
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch('/api/admin/session/logout', { method: 'POST' });
     refresh();
   };
 

@@ -27,6 +27,11 @@ import { raceKeys, getDynamicKeyCount } from './racing/key-racer';
 import { raceModels, getDynamicModelRaceConfig } from './racing/model-racer';
 import { startTimer } from './metrics/performance-tracker';
 import { withTimeout, MODEL_CALL_TIMEOUT, REQUEST_TIMEOUT } from './runtime/response-watchdog';
+import {
+  performEmergencyCompaction,
+  type EmergencyCompactionRequestContext,
+} from './context/emergency-compactor';
+import { getAdminSystemSettings } from './admin-settings';
 
 // Models that can't see images. We strip inlineData/fileData parts before
 // sending to avoid a round-trip 400.
@@ -65,7 +70,7 @@ function stripImagesFromBody(body: any): any {
   };
 }
 
-export function stripThoughtSignatures(body: any): any {
+export function stripThoughtSignatures(body: any, removeFunctionCallSignatures = false): any {
   if (!body || !Array.isArray(body.contents)) return body;
   return {
     ...body,
@@ -73,11 +78,7 @@ export function stripThoughtSignatures(body: any): any {
       ...c,
       parts: Array.isArray(c.parts)
         ? c.parts.map((p: any) => {
-            // ONLY strip thoughtSignature from thought TEXT parts (parts with thought:true or text only).
-            // functionCall parts MUST keep their thoughtSignature — removing it while
-            // thinkingConfig is active causes a 400 "missing thought_signature" error.
-            // Non-thinking models silently ignore the extra field, so keeping it is safe.
-            if (p && 'thoughtSignature' in p && !p.functionCall) {
+            if (p && 'thoughtSignature' in p && (removeFunctionCallSignatures || !p.functionCall)) {
               const { thoughtSignature, ...rest } = p;
               return rest;
             }
@@ -96,6 +97,22 @@ function computeBackoffMs(attempt: number): number {
   const base = Math.min(1500, 120 * Math.pow(2, Math.max(0, attempt - 1)));
   const jitter = Math.floor(Math.random() * 120);
   return base + jitter;
+}
+
+function getFastPathRaceTimeoutMs(): number {
+  const configured = Number(process.env.FAST_PATH_RACE_TIMEOUT || 3500);
+  return Math.max(1000, Math.min(configured, MODEL_CALL_TIMEOUT));
+}
+
+function getAttemptModelCallTimeoutMs(taskType: string | undefined, attempt: number): number {
+  const normalizedTask = taskType ?? 'LIGHT_CODING';
+  if (normalizedTask === 'CHAT' || normalizedTask === 'HEALTH_CHECK') {
+    return Math.min(MODEL_CALL_TIMEOUT, 8_000);
+  }
+  if (attempt > 1) {
+    return Math.min(MODEL_CALL_TIMEOUT, 10_000);
+  }
+  return MODEL_CALL_TIMEOUT;
 }
 
 async function rememberLastWorkingModel(
@@ -172,9 +189,11 @@ export async function executeWithRetry(
   userId?: string,
   routePlan?: ModelRoute,
   requestId?: string,
+  requestContext?: EmergencyCompactionRequestContext,
 ) {
   const isThinkingRequested = !!geminiBody.generationConfig?.thinkingConfig;
   const modelMap = routePlan || await getModelMapping(anthropicModel, { thinkingEnabled: isThinkingRequested, userId });
+  const systemSettings = await getAdminSystemSettings();
   const fallbacks = Array.isArray(modelMap.fallback) ? modelMap.fallback : (modelMap.fallback ? [modelMap.fallback] : []);
   const configuredRetries = Number(process.env.MAX_RETRIES || 3);
   const maxRetries = Math.min(Math.max(configuredRetries, (fallbacks.length * 2) + 2), 12);
@@ -195,13 +214,47 @@ export async function executeWithRetry(
   // for all subsequent attempts. Null = use the value already in geminiBody.
   let maxOutputTokensOverride: number | null = null;
 
+  const maybeEmergencyCompact = async (reason: { status?: number; message?: string }, attempt: number) => {
+    if (!classifyOverload(reason)) return false;
+    logWarn('OVERLOAD', 'OVERLOAD_DETECTED', {
+      requestId,
+      metadata: {
+        attempt,
+        model: currentInternalModel,
+        status: reason.status,
+        message: reason.message,
+      },
+    });
+    const compacted = await performEmergencyCompaction(geminiBody, {
+      ...requestContext,
+      requestId,
+      userId,
+    });
+    if (!compacted.compacted) {
+      return compacted.hardFallback;
+    }
+    geminiBody = compacted.body;
+    skipCache = true;
+    if (lastCacheHash) {
+      await deleteCache(lastCacheHash).catch(() => {});
+      lastCacheHash = null;
+    }
+    return true;
+  };
+
   const requestTimer = startTimer();
+
+  const initialPressure = detectTokenPressure(geminiBody);
+  if (initialPressure.high) {
+    logInfo('COMPACTION', `High token pressure before fast path (${initialPressure.estimatedTokens} est tokens) — shrinking middle turns before racing`);
+    geminiBody = compactBodyForOverload(geminiBody);
+  }
 
   // -----------------------------------------------------------------------
   // Phase 0: Parallel key racing — fire multiple keys simultaneously on
   // primary model. If one responds 2xx, return immediately (skips serial loop).
   // -----------------------------------------------------------------------
-  const KEY_RACE_COUNT = getDynamicKeyCount(modelMap.taskType ?? 'LIGHT_CODING');
+  const KEY_RACE_COUNT = getDynamicKeyCount(modelMap.taskType ?? 'LIGHT_CODING', false, systemSettings.racingEnabled);
   if (KEY_RACE_COUNT > 1) {
     const keyRaceTimer = startTimer();
     const keyRaceResult = await withTimeout(
@@ -212,7 +265,7 @@ export async function executeWithRetry(
         keyCount: KEY_RACE_COUNT,
         userId,
       }),
-      MODEL_CALL_TIMEOUT + 2_000,
+      getFastPathRaceTimeoutMs(),
       'keyRace',
     ).catch(() => null);
     if (keyRaceResult?.response.ok) {
@@ -235,7 +288,7 @@ export async function executeWithRetry(
   // Phase 0b: Parallel model racing — if key race failed/overloaded,
   // race fallback models simultaneously before falling back to serial loop.
   // -----------------------------------------------------------------------
-  const modelRaceConfig = getDynamicModelRaceConfig(modelMap.taskType ?? 'LIGHT_CODING');
+  const modelRaceConfig = getDynamicModelRaceConfig(modelMap.taskType ?? 'LIGHT_CODING', false, systemSettings.racingEnabled);
   if (modelRaceConfig.enabled && fallbacks.length > 0) {
     const modelRaceTimer = startTimer();
     const modelRaceResult = await withTimeout(
@@ -249,7 +302,7 @@ export async function executeWithRetry(
           return b;
         },
       }),
-      MODEL_CALL_TIMEOUT + 2_000,
+      getFastPathRaceTimeoutMs(),
       'modelRace',
     ).catch(() => null);
     if (modelRaceResult?.response.ok) {
@@ -309,13 +362,14 @@ export async function executeWithRetry(
     // thoughtSignatures are only valid for the model that produced them.
     // If we fall back to a different model (or a previous 400 hinted at a
     // signature mismatch), strip them to avoid INVALID_ARGUMENT errors.
-    let bodyForThisAttempt = (currentInternalModel !== primaryModel || stripSigs)
-      ? stripThoughtSignatures(geminiBody)
+    const needsFullThoughtReset = currentInternalModel !== primaryModel || stripThinking;
+    let bodyForThisAttempt = (currentInternalModel !== primaryModel || stripSigs || stripThinking)
+      ? stripThoughtSignatures(geminiBody, needsFullThoughtReset)
       : geminiBody;
 
-    // If a previous attempt hit a 400 related to thinking (budget/unsupported),
-    // strip thinking config for the next attempt.
-    if (stripThinking && bodyForThisAttempt.generationConfig?.thinkingConfig) {
+    // Thought state cannot survive a model switch. Reset it on any fallback model,
+    // and also after a prior 400 that pointed to thinking/signature mismatch.
+    if (needsFullThoughtReset && bodyForThisAttempt.generationConfig?.thinkingConfig) {
       const { thinkingConfig, ...restGenConfig } = bodyForThisAttempt.generationConfig;
       bodyForThisAttempt = {
         ...bodyForThisAttempt,
@@ -367,7 +421,7 @@ export async function executeWithRetry(
       const modelCallStart = Date.now();
       const res = await withTimeout(
         callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream),
-        MODEL_CALL_TIMEOUT,
+        getAttemptModelCallTimeoutMs(modelMap.taskType, attempt),
         `callGemini(${currentInternalModel})`,
       );
       logInfo('MODEL_CALL', 'Gemini model call completed', {
@@ -386,12 +440,50 @@ export async function executeWithRetry(
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, 'ratelimit');
+        overloadedModels.add(currentInternalModel);
+        await maybeEmergencyCompact({ status: 429, message: 'rate limit' }, attempt);
+
+        const recovery = await recoverFromOverload({
+          currentModel: currentInternalModel,
+          currentKeyId: keyObj.id,
+          triedModels: overloadedModels,
+          attempt,
+          body: geminiBody,
+          userId,
+        });
+
+        if (recovery.newModel) {
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: 429, attempt },
+          });
+          currentInternalModel = recovery.newModel;
+          while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
+            fallbackIndex++;
+          }
+          if (fallbackIndex < fallbacks.length) fallbackIndex++;
+        } else if (fallbackIndex < fallbacks.length) {
+          const prev = currentInternalModel;
+          currentInternalModel = fallbacks[fallbackIndex++];
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: prev, toModel: currentInternalModel, status: 429, attempt },
+          });
+        }
+
+        if (overloadedModels.size >= Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE)) {
+          logError('OVERLOAD', `All ${overloadedModels.size} models overloaded after 429 — failing fast after ${attempt} attempt(s)`);
+          break;
+        }
+
         lastError = { status: 429 };
-        await sleep(computeBackoffMs(attempt));
+        await sleep(recovery.backoffMs || computeOverloadBackoff(attempt));
         continue;
       }
 
       if (res.status === 503 || res.status >= 500) {
+        await maybeEmergencyCompact({ status: res.status, message: 'capacity_error' }, attempt);
+
         // Phase 2: Use overload recovery pipeline instead of raw fallback
         const recovery = await recoverFromOverload({
           currentModel: currentInternalModel,
@@ -403,15 +495,12 @@ export async function executeWithRetry(
         });
 
         overloadedModels.add(currentInternalModel);
-
-        // Phase 3: Compact if recovery says so
-        if (recovery.compacted) {
-          geminiBody = compactBodyForOverload(geminiBody);
-        }
-
         // Phase 5: Model fallback from recovery pipeline
         if (recovery.newModel) {
-          logWarn('OVERLOAD', `Recovery fallback: ${currentInternalModel} → ${recovery.newModel} (status=${res.status})`);
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: res.status, attempt },
+          });
           currentInternalModel = recovery.newModel;
           // Also advance fallbackIndex past this model if it's in our chain
           while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
@@ -421,7 +510,10 @@ export async function executeWithRetry(
         } else if (fallbackIndex < fallbacks.length) {
           const prev = currentInternalModel;
           currentInternalModel = fallbacks[fallbackIndex++];
-          logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (server_overload status=${res.status})`);
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: prev, toModel: currentInternalModel, status: res.status, attempt },
+          });
         }
 
         // Fast-exit: every model in the chain has now returned 503 at least once.
@@ -447,6 +539,8 @@ export async function executeWithRetry(
         const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
         
         if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
+          await maybeEmergencyCompact({ status: res.status, message: msg || 'capacity_error' }, attempt);
+
           // Use recovery pipeline for body-parse path too
           const recovery = await recoverFromOverload({
             currentModel: currentInternalModel,
@@ -458,18 +552,19 @@ export async function executeWithRetry(
           });
 
           overloadedModels.add(currentInternalModel);
-
-          if (recovery.compacted) {
-            geminiBody = compactBodyForOverload(geminiBody);
-          }
-
           if (recovery.newModel) {
-            logWarn('RECOVERY', `Recovery fallback: ${currentInternalModel} → ${recovery.newModel} (server_error status=${res.status})`);
+            logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+              requestId,
+              metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: res.status, attempt },
+            });
             currentInternalModel = recovery.newModel;
           } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
             currentInternalModel = fallbacks[fallbackIndex++];
-            logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (server_error status=${res.status})`);
+            logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+              requestId,
+              metadata: { fromModel: prev, toModel: currentInternalModel, status: res.status, attempt },
+            });
           }
 
           const totalAvailableModels2 = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
@@ -567,9 +662,10 @@ export async function executeWithRetry(
       return res;
     } catch (err: any) {
       // Phase 1: Classify overload errors as recoverable — don't hard throw
-      if (err.message === 'overloaded_error' && attempt < maxRetries) {
+      if (classifyOverload({ status: err.status, message: err.message }) && attempt < maxRetries) {
         // Track this model as overloaded so recovery doesn't return it again
         overloadedModels.add(currentInternalModel);
+        await maybeEmergencyCompact({ status: err.status ?? 529, message: err.message ?? 'overloaded_error' }, attempt);
         const recovery = await recoverFromOverload({
           currentModel: currentInternalModel,
           currentKeyId: keyObj.id,
@@ -579,8 +675,13 @@ export async function executeWithRetry(
           userId,
         });
         if (recovery.recovered) {
-          if (recovery.compacted) geminiBody = compactBodyForOverload(geminiBody);
-          if (recovery.newModel) currentInternalModel = recovery.newModel;
+          if (recovery.newModel) {
+            logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+              requestId,
+              metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: err.status ?? 529, attempt },
+            });
+            currentInternalModel = recovery.newModel;
+          }
           // Fast-exit: all available models exhausted
           if (overloadedModels.size >= Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE)) {
             logError('OVERLOAD', `All ${overloadedModels.size} models overloaded (stream) — failing fast after ${attempt} attempt(s)`);
@@ -592,7 +693,7 @@ export async function executeWithRetry(
         }
         throw err; // recovery exhausted — rethrow
       }
-      if (err.message === 'overloaded_error') throw err;
+      if (classifyOverload({ status: err.status, message: err.message })) throw err;
       
       // If it's a 400 (likely safety or bad request), try one more time with a fallback model
       if (err.status === 400 && fallbackIndex < fallbacks.length) {
@@ -604,10 +705,41 @@ export async function executeWithRetry(
         continue;
       }
 
-      if (err.name === 'AbortError' || err.message?.includes('timeout')) {
+      if (err.name === 'AbortError' || err.message?.includes('Timeout:')) {
         await reportKeyFailure(keyObj.id, 'server');
+        overloadedModels.add(currentInternalModel);
+        await maybeEmergencyCompact({ status: 504, message: err.message ?? 'capacity_error timeout' }, attempt);
+
+        const recovery = await recoverFromOverload({
+          currentModel: currentInternalModel,
+          currentKeyId: keyObj.id,
+          triedModels: overloadedModels,
+          attempt,
+          body: geminiBody,
+          userId,
+        });
+
+        if (recovery.newModel) {
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: 504, attempt },
+          });
+          currentInternalModel = recovery.newModel;
+          while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
+            fallbackIndex++;
+          }
+          if (fallbackIndex < fallbacks.length) fallbackIndex++;
+        } else if (fallbackIndex < fallbacks.length) {
+          const prev = currentInternalModel;
+          currentInternalModel = fallbacks[fallbackIndex++];
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: prev, toModel: currentInternalModel, status: 504, attempt },
+          });
+        }
+
         lastError = err;
-        await sleep(computeBackoffMs(attempt));
+        await sleep(recovery.backoffMs || computeOverloadBackoff(attempt));
         continue;
       }
       throw err;

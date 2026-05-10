@@ -9,6 +9,11 @@ export function extractToken(req: Request): string | null {
 }
 
 export async function validateUserKey(token: string): Promise<boolean> {
+  const masterKey = process.env.MASTER_API_KEY;
+  if (masterKey && token === masterKey) {
+    return true;
+  }
+
   const keyObj = await redis.hgetall(`user:key:${token}`);
   if (!keyObj || keyObj.status !== 'active') {
     return false;

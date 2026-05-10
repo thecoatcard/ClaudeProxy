@@ -518,3 +518,25 @@
 - `docs/TELEMETRY_ISOLATION_REPORT.md`
 - `docs/TOKEN_OVERHEAD_REPORT.md`
 - `docs/PERFORMANCE_VALIDATION_REPORT.md`
+
+---
+
+## Session: Overload-Aware Emergency Compaction
+
+### New Files
+
+- `lib/context/emergency-compactor.ts` — emergency overload compaction engine; rewrites active Gemini payload, persists canonical compacted state, reapplies it on later requests
+- `tests/emergency-compaction.test.ts` — overload compaction coverage: immediate rewrite, future canonical rewrite, second compaction, third hard fallback, continuity preservation
+- `docs/EMERGENCY_COMPACTION_REPORT.md` — feature report and validated success criteria
+
+### Modified Files
+
+- `lib/retry-engine.ts` — overload branches now detect `529` / `overloaded_error` / `capacity_error`, trigger emergency compaction immediately, invalidate stale cache state, and log `OVERLOAD_DETECTED` + `FALLBACK_MODEL_SELECTED`
+- `lib/transformers/request.ts` — loads persisted emergency compaction state and replaces expanded raw history with canonical compacted context before normal hydration/compaction
+- `lib/transformers/stream.ts` — threads emergency compaction request context into streaming retry execution
+- `app/api/v1/messages/route.ts` — threads emergency compaction request context into non-streaming retry execution
+- `lib/recovery/overload-recovery.ts` — overload classifier now recognizes `529` + `capacity_error`; fallback chain updated to `gemini-2.5-flash → gemini-3-flash-preview → gemini-3.1-flash-lite-preview → gemini-flash-latest`
+- `tests/overload-recovery.test.ts` — added `529` / `capacity_error` assertions and updated exhausted fallback chain expectation
+- `tests/fallback-overload.test.ts` — updated final fallback expectation to `gemini-flash-latest`
+- `docs/OVERLOAD_RECOVERY_REPORT.md` — refreshed for emergency compaction architecture and new fallback chain
+- `docs/TEST_RESULTS.md` — updated to final validated counts: `75/75` suites, `811/811` tests

@@ -18,7 +18,7 @@ import { errorOneLiner } from '@/lib/logging/error-summarizer';
 
 // Node.js runtime required: ioredis uses TCP sockets unavailable in Edge.
 export const runtime = 'nodejs';
-export const maxDuration = 300; // Increase timeout to 5 minutes
+export const maxDuration = 2700; // Allow long-running agentic sessions up to 45 minutes
 
 /** Headers Claude Code (and other Anthropic SDKs) inject that must be forwarded
  *  or silently ignored. We do NOT propagate them to Gemini — they're consumed
@@ -206,7 +206,7 @@ export async function POST(req: Request) {
       const toolSchemas = new Map<string, any>();
       const originalToolNames = new Map<string, string>();
       const transformStart = Date.now();
-      const { geminiBody, webSearchConfig } = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token, requestId);
+      const { geminiBody, webSearchConfig, requestContext } = await transformRequestToGemini(body, toolIdMap, toolSchemas, internalModel, originalToolNames, token, requestId);
       log.info('ACTIVITY', 'Request transformed', { duration: Date.now() - transformStart });
 
       let geminiRes: any;
@@ -220,7 +220,7 @@ export async function POST(req: Request) {
           callGemini: (b) => callGemini(internalModel, apiKey, b, false),
         });
       } else {
-        const res = await executeWithRetry(model, geminiBody, false, token, modelMap, requestId);
+        const res = await executeWithRetry(model, geminiBody, false, token, modelMap, requestId, requestContext);
         geminiRes = await res.json();
       }
       const anthropicRes = await transformGeminiToAnthropic(geminiRes, model, toolIdMap, toolSchemas, originalToolNames, internalModel);

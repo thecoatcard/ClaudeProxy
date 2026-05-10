@@ -11,40 +11,46 @@ import { getTaskModelChain } from '../lib/routing/task-router';
 import type { TaskType } from '../lib/routing/task-router';
 
 describe('getDynamicModelRaceConfig — model race config per task type', () => {
+  test('racing is disabled by default', () => {
+    const cfg = getDynamicModelRaceConfig('HEAVY_CODING');
+    assert.equal(cfg.enabled, false);
+    assert.equal(cfg.modelCount, 1);
+  });
+
   test('CHAT → racing disabled', () => {
-    const cfg = getDynamicModelRaceConfig('CHAT');
+    const cfg = getDynamicModelRaceConfig('CHAT', false, true);
     assert.equal(cfg.enabled, false);
   });
 
   test('HEALTH_CHECK → racing disabled', () => {
-    const cfg = getDynamicModelRaceConfig('HEALTH_CHECK');
+    const cfg = getDynamicModelRaceConfig('HEALTH_CHECK', false, true);
     assert.equal(cfg.enabled, false);
   });
 
   test('COMPACTION → racing disabled', () => {
-    const cfg = getDynamicModelRaceConfig('COMPACTION');
+    const cfg = getDynamicModelRaceConfig('COMPACTION', false, true);
     assert.equal(cfg.enabled, false);
   });
 
   test('REASONING → racing disabled (Gemma primary — racing defeats purpose)', () => {
-    const cfg = getDynamicModelRaceConfig('REASONING');
+    const cfg = getDynamicModelRaceConfig('REASONING', false, true);
     assert.equal(cfg.enabled, false);
   });
 
   test('LIGHT_CODING → 2-model race', () => {
-    const cfg = getDynamicModelRaceConfig('LIGHT_CODING');
+    const cfg = getDynamicModelRaceConfig('LIGHT_CODING', false, true);
     assert.equal(cfg.enabled, true);
     assert.equal(cfg.modelCount, 2);
   });
 
   test('WEB_SEARCH → 2-model race', () => {
-    const cfg = getDynamicModelRaceConfig('WEB_SEARCH');
+    const cfg = getDynamicModelRaceConfig('WEB_SEARCH', false, true);
     assert.equal(cfg.enabled, true);
     assert.equal(cfg.modelCount, 2);
   });
 
   test('HEAVY_CODING → 3-model race', () => {
-    const cfg = getDynamicModelRaceConfig('HEAVY_CODING');
+    const cfg = getDynamicModelRaceConfig('HEAVY_CODING', false, true);
     assert.equal(cfg.enabled, true);
     assert.equal(cfg.modelCount, 3);
   });
@@ -52,7 +58,7 @@ describe('getDynamicModelRaceConfig — model race config per task type', () => 
   test('overload flag enables 3-model race for all task types', () => {
     const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH'];
     for (const t of taskTypes) {
-      const cfg = getDynamicModelRaceConfig(t, true);
+      const cfg = getDynamicModelRaceConfig(t, true, true);
       assert.equal(cfg.enabled, true, `Expected enabled=true for ${t} on overload`);
       assert.equal(cfg.modelCount, 3, `Expected modelCount=3 for ${t} on overload`);
     }
@@ -102,7 +108,7 @@ describe('model race — all models stay within allowed pool', () => {
 
   for (const taskType of taskTypes) {
     test(`${taskType} race models all in allowed pool`, () => {
-      const cfg = getDynamicModelRaceConfig(taskType, true);
+      const cfg = getDynamicModelRaceConfig(taskType, true, true);
       const models = getModelsForRace(taskType, cfg.modelCount);
       for (const m of models) {
         assert.ok(ALLOWED.has(m), `${m} not in allowed pool`);

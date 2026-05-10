@@ -4,6 +4,7 @@
  * Tests that trivial chat messages route to lite models and skip orchestrator.
  */
 
+import { getModelMapping } from '@/lib/model-router';
 import { classifyTaskType, getTaskModelChain } from '@/lib/routing/task-router';
 
 function makeBody(userMessage: string) {
@@ -29,6 +30,15 @@ describe('Trivial Routing', () => {
     expect(chain[0]).toBe('gemini-2.5-flash-lite');
     expect(chain).not.toContain('gemini-2.5-flash');
     expect(chain).not.toContain('gemma-4-31b-it');
+  });
+
+  test('Claude trivial chat prioritizes lite route before base mapping', async () => {
+    const route = await getModelMapping('claude-sonnet-4-5', {
+      requestBody: makeBody('hi'),
+    });
+
+    expect(route.taskType).toBe('CHAT');
+    expect(route.primary).toBe('gemini-2.5-flash-lite');
   });
 
   test('health check only triggers on explicit health keywords', () => {

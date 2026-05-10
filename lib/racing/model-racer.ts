@@ -54,7 +54,8 @@ export interface ModelRaceConfig {
  * CHAT and HEALTH_CHECK are too cheap to race.
  * HEAVY_CODING benefits most from racing (highest latency sensitivity).
  */
-export function getDynamicModelRaceConfig(taskType: TaskType, isOverload = false): ModelRaceConfig {
+export function getDynamicModelRaceConfig(taskType: TaskType, isOverload = false, racingEnabled = false): ModelRaceConfig {
+  if (!racingEnabled) return { enabled: false, modelCount: 1 };
   if (isOverload) return { enabled: true, modelCount: 3 };
 
   switch (taskType) {

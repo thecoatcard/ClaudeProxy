@@ -6,6 +6,7 @@ import { useAuth } from '@/components/auth-provider';
 type SystemData = {
   redis?: { ok: boolean; latencyMs?: number };
   keyPool?: { healthy: number; cooldown: number; disabled: number; revoked: number; total: number };
+  settings?: { racingEnabled: boolean };
 };
 
 const ACTIONS = [
@@ -87,6 +88,24 @@ export default function SystemPage() {
     await fetchStatus();
   };
 
+  const toggleRacing = async () => {
+    const enabled = !(data?.settings?.racingEnabled ?? false);
+    setBusy('toggle-racing');
+    const res = await fetch('/api/admin/system', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'update-settings', racingEnabled: enabled }),
+    });
+    setBusy(null);
+    if (!res.ok) {
+      toast.err('Failed to update racing setting.');
+      return;
+    }
+    const payload = await res.json();
+    toast.ok(payload.message || `Racing ${enabled ? 'enabled' : 'disabled'}.`);
+    await fetchStatus();
+  };
+
   if (loading) {
     return (
       <div className="dashboard-page">
@@ -106,6 +125,7 @@ export default function SystemPage() {
   }
 
   const kp = data?.keyPool;
+  const racingEnabled = data?.settings?.racingEnabled ?? false;
 
   return (
     <div className="dashboard-page">
@@ -160,6 +180,31 @@ export default function SystemPage() {
             <span className="muted-text">Unavailable</span>
           )}
         </article>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2 className="section-title">Runtime Routing</h2>
+          <span className="muted-text" style={{ fontSize: 12 }}>Racing is disabled by default and can be changed live.</span>
+        </div>
+        <div className="action-card">
+          <div className="action-card-info">
+            <div className="action-card-title">Parallel Key / Model Racing</div>
+            <div className="action-card-desc">
+              {racingEnabled
+                ? 'Enabled. Fast-path key/model races run before serial fallback recovery.'
+                : 'Disabled. Requests start in serial mode and only use fallback recovery.'}
+            </div>
+          </div>
+          <button
+            className={`btn btn-sm ${racingEnabled ? 'btn-warn' : 'btn-ok'}`}
+            onClick={toggleRacing}
+            disabled={busy === 'toggle-racing'}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            {busy === 'toggle-racing' ? '…' : racingEnabled ? 'Disable Racing' : 'Enable Racing'}
+          </button>
+        </div>
       </section>
 
       {/* Action cards */}

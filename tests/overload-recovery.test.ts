@@ -62,12 +62,20 @@ describe('isOverloadError', () => {
     expect(isOverloadError({ status: 503, message: 'Service unavailable' })).toBe(true);
   });
 
+  test('detects 529 status', () => {
+    expect(isOverloadError({ status: 529, message: 'overloaded_error' })).toBe(true);
+  });
+
   test('detects resource_exhausted', () => {
     expect(isOverloadError('resource_exhausted: quota exceeded')).toBe(true);
   });
 
   test('detects rate limit', () => {
     expect(isOverloadError('rate limit exceeded for this model')).toBe(true);
+  });
+
+  test('detects capacity_error', () => {
+    expect(isOverloadError('capacity_error')).toBe(true);
   });
 
   test('does not detect normal 400', () => {
@@ -86,6 +94,10 @@ describe('isRecoverableError', () => {
 
   test('429 is recoverable', () => {
     expect(isRecoverableError({ status: 429 })).toBe(true);
+  });
+
+  test('529 is recoverable', () => {
+    expect(isRecoverableError({ status: 529 })).toBe(true);
   });
 
   test('503 is recoverable', () => {
@@ -110,7 +122,7 @@ describe('getNextFallbackModel', () => {
       'gemini-2.5-flash',
       'gemini-3-flash-preview',
       'gemini-3.1-flash-lite-preview',
-      'gemma-4-31b-it',
+      'gemini-flash-latest',
     ]);
     const next = getNextFallbackModel('gemini-2.5-flash', tried);
     expect(next).toBeNull();
@@ -118,7 +130,7 @@ describe('getNextFallbackModel', () => {
 });
 
 describe('compactBodyForOverload', () => {
-  test('compacts body with many messages', () => {
+  test('compacts body with many messages while preserving the first prompt and active tail', () => {
     const contents = Array.from({ length: 20 }, (_, i) => ({
       role: i % 2 === 0 ? 'user' : 'model',
       parts: [{ text: `Message ${i}: ${'x'.repeat(100)}` }],
@@ -126,7 +138,10 @@ describe('compactBodyForOverload', () => {
     const body = { contents };
     const compacted = compactBodyForOverload(body);
     expect(compacted.contents.length).toBeLessThan(contents.length);
-    expect(compacted.contents.length).toBe(7); // 2 head + 1 compacted + 4 tail
+    expect(compacted.contents.length).toBe(8); // 1 head + 1 compacted + 6 tail
+    expect(compacted.contents[0]).toEqual(contents[0]);
+    expect(compacted.contents.at(-1)).toEqual(contents.at(-1));
+    expect(compacted.contents[1].parts[0].text).toContain('opening prompt is preserved');
   });
 
   test('does not compact short body', () => {
@@ -166,22 +181,22 @@ describe('detectTokenPressure', () => {
 });
 
 describe('computeOverloadBackoff', () => {
-  test('attempt 1 returns ~500ms', () => {
+  test('attempt 1 returns a fast failover delay', () => {
     const ms = computeOverloadBackoff(1);
-    expect(ms).toBeGreaterThanOrEqual(500);
-    expect(ms).toBeLessThan(1000);
+    expect(ms).toBeGreaterThanOrEqual(150);
+    expect(ms).toBeLessThan(450);
   });
 
-  test('attempt 2 returns ~1s', () => {
+  test('attempt 2 returns a short cooldown', () => {
     const ms = computeOverloadBackoff(2);
-    expect(ms).toBeGreaterThanOrEqual(1000);
-    expect(ms).toBeLessThan(1500);
+    expect(ms).toBeGreaterThanOrEqual(400);
+    expect(ms).toBeLessThan(700);
   });
 
-  test('attempt 3+ returns ~2s', () => {
+  test('attempt 3+ stays under roughly 1.2s', () => {
     const ms = computeOverloadBackoff(3);
-    expect(ms).toBeGreaterThanOrEqual(2000);
-    expect(ms).toBeLessThan(2500);
+    expect(ms).toBeGreaterThanOrEqual(900);
+    expect(ms).toBeLessThan(1200);
   });
 });
 
@@ -197,7 +212,7 @@ describe('recoverFromOverload', () => {
     });
     expect(result.recovered).toBe(true);
     expect(result.newModel).toBeTruthy();
-    expect(result.backoffMs).toBeGreaterThanOrEqual(500);
+    expect(result.backoffMs).toBeGreaterThanOrEqual(150);
   });
 
   test('recovery returns recovered=false when all models exhausted', async () => {
@@ -214,7 +229,7 @@ describe('recoverFromOverload', () => {
         'gemini-2.5-flash',
         'gemini-3-flash-preview',
         'gemini-3.1-flash-lite-preview',
-        'gemma-4-31b-it',
+        'gemini-flash-latest',
       ]),
       attempt: 4,
       body: { contents: [] },

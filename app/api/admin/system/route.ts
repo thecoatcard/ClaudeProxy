@@ -16,6 +16,7 @@ import { NextResponse } from 'next/server';
 import { validateAdminKey } from '@/lib/auth';
 import { redis } from '@/lib/redis';
 import { clearActivity } from '@/lib/activity';
+import { getAdminSystemSettings, updateAdminSystemSettings } from '@/lib/admin-settings';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +51,7 @@ async function handleHealthCheck() {
   return {
     redis: { ok: redisOk, latencyMs },
     keyPool: { total: ids.length, healthy, cooldown, revoked, disabled },
+    settings: await getAdminSystemSettings(),
     ts: Date.now(),
   };
 }
@@ -170,6 +172,11 @@ export async function POST(req: Request) {
     case 'clear-activity': {
       await clearActivity();
       return NextResponse.json({ ok: true, data: { cleared: true } });
+    }
+    case 'update-settings': {
+      const racingEnabled = body?.racingEnabled === true;
+      const settings = await updateAdminSystemSettings({ racingEnabled });
+      return NextResponse.json({ ok: true, data: { settings }, message: `Racing ${settings.racingEnabled ? 'enabled' : 'disabled'}.` });
     }
     default:
       return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });

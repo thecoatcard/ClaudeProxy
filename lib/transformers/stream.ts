@@ -72,10 +72,12 @@ export async function* transformStream(
     // now averted because we've already sent the headers and initial chunks.
     let geminiReq: any;
     let webSearchConfig: import('./request').WebSearchConfig | null = null;
+    let requestContext: import('./request').GatewayRequestContext | undefined;
     try {
       const transformed = await transformRequestToGemini(anthropicBody, toolIdMap, toolSchemas, internalModel, originalToolNames, token, requestId);
       geminiReq = transformed.geminiBody;
       webSearchConfig = transformed.webSearchConfig;
+      requestContext = transformed.requestContext;
     } catch (e: any) {
       console.error("Request transformation failed", e);
       yield `event: error\ndata: ${JSON.stringify({
@@ -139,7 +141,7 @@ export async function* transformStream(
 
     let res: Response;
     try {
-      res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan, requestId);
+      res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan, requestId, requestContext);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
       const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";

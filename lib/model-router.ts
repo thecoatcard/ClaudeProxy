@@ -339,7 +339,12 @@ export async function getModelMapping(
     }
   }
 
-  const taskFirst = task.type === 'REASONING' || task.type === 'COMPACTION';
+  const taskFirst =
+    task.type === 'REASONING' ||
+    task.type === 'COMPACTION' ||
+    task.type === 'CHAT' ||
+    task.type === 'HEALTH_CHECK' ||
+    task.type === 'WEB_SEARCH';
 
   // Source-of-truth priority:
   // Redis/local/hardcoded configured route remains first for normal traffic.

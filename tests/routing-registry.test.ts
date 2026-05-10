@@ -26,6 +26,10 @@ class FakeRedis {
   }
 }
 
+function makeTaskBody(text: string) {
+  return { messages: [{ role: 'user', content: text }] };
+}
+
 afterEach(async () => {
   await __resetRoutingTestAdapters();
 });
@@ -46,7 +50,9 @@ describe('routing registry precedence', () => {
     }));
     await fake.set('models:registry:version', '9');
 
-    const mapping = await getModelMapping('claude-sonnet-4-5', { requestBody: { messages: [] } });
+    const mapping = await getModelMapping('claude-sonnet-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     assert.equal(mapping.routingSource, 'redis');
     assert.equal(mapping.routeVersion, '9');
     assert.equal(mapping.primary, 'gemini-3-flash-preview');
@@ -56,13 +62,17 @@ describe('routing registry precedence', () => {
     const fake = new FakeRedis();
     await __setRoutingTestAdapters({ redisClient: fake, localRegistry: null });
 
-    const before = await getModelMapping('claude-haiku-4-5', { requestBody: { messages: [] } });
+    const before = await getModelMapping('claude-haiku-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
 
     await saveRoutingRegistry({
       'claude-haiku-4-5': { primary: 'gemini-flash-latest', fallback: ['gemini-2.5-flash-lite'] },
     });
 
-    const after = await getModelMapping('claude-haiku-4-5', { requestBody: { messages: [] } });
+    const after = await getModelMapping('claude-haiku-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     assert.notEqual(after.primary, before.primary);
     assert.equal(after.primary, 'gemini-flash-latest');
     assert.equal(after.routingSource, 'redis');

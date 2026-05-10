@@ -25,6 +25,10 @@ class FakeRedis {
   }
 }
 
+function makeTaskBody(text: string) {
+  return { messages: [{ role: 'user', content: text }] };
+}
+
 afterEach(async () => {
   await __resetRoutingTestAdapters();
 });
@@ -39,7 +43,9 @@ describe('routing cache invalidation', () => {
     }));
     await fake.set('models:registry:version', '1');
 
-    const first = await getModelMapping('claude-sonnet-4-5', { requestBody: { messages: [] } });
+    const first = await getModelMapping('claude-sonnet-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     assert.equal(first.routeVersion, '1');
 
     await fake.set('models:registry', JSON.stringify({
@@ -50,7 +56,9 @@ describe('routing cache invalidation', () => {
     const reloaded = await forceReloadRouting();
     assert.equal(reloaded.version, '2');
 
-    const second = await getModelMapping('claude-sonnet-4-5', { requestBody: { messages: [] } });
+    const second = await getModelMapping('claude-sonnet-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     assert.equal(second.primary, 'gemini-3-flash-preview');
     assert.equal(second.routeVersion, '2');
   });
@@ -59,7 +67,9 @@ describe('routing cache invalidation', () => {
     const fake = new FakeRedis();
     await __setRoutingTestAdapters({ redisClient: fake, localRegistry: null });
 
-    const before = await getModelMapping('claude-opus-4-5', { requestBody: { messages: [] } });
+    const before = await getModelMapping('claude-opus-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     const initialVersion = before.routeVersion ?? '0';
 
     const diag = await saveRoutingRegistry({
@@ -69,7 +79,9 @@ describe('routing cache invalidation', () => {
       },
     });
 
-    const after = await getModelMapping('claude-opus-4-5', { requestBody: { messages: [] } });
+    const after = await getModelMapping('claude-opus-4-5', {
+      requestBody: makeTaskBody('Refactor the authentication module'),
+    });
     assert.equal(diag.source, 'redis');
     assert.notEqual(diag.version, initialVersion);
     assert.equal(after.primary, 'gemini-3-flash-preview');

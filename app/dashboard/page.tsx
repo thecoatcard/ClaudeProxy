@@ -9,6 +9,13 @@ import { useAuth } from '@/components/auth-provider';
 
 type KeyRow = { id: string; status?: string };
 type UserKeyRow = { token: string; status?: string };
+type SystemResponse = {
+  data?: {
+    settings?: {
+      racingEnabled?: boolean;
+    };
+  };
+};
 type StatsResponse = {
   requests: number; errors: number; avgLatency: number;
   totalTokens: number; inputTokens: number; outputTokens: number;
@@ -35,20 +42,26 @@ export default function DashboardOverviewPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [providerKeys, setProviderKeys] = useState<KeyRow[]>([]);
   const [userKeys, setUserKeys] = useState<UserKeyRow[]>([]);
+  const [racingEnabled, setRacingEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (isAuthenticated === null) return; // still checking
     if (!isAuthenticated) { setLoading(false); return; }
     (async () => {
-      const [sRes, kRes, uRes] = await Promise.all([
+      const [sRes, kRes, uRes, systemRes] = await Promise.all([
         fetch('/api/admin/stats', { cache: 'no-store' }),
         fetch('/api/admin/keys', { cache: 'no-store' }),
         fetch('/api/admin/user-keys', { cache: 'no-store' }),
+        fetch('/api/admin/system', { cache: 'no-store' }),
       ]);
       if (sRes.ok) setStats(await sRes.json());
       if (kRes.ok) setProviderKeys((await kRes.json()).keys || []);
       if (uRes.ok) setUserKeys(((await uRes.json()).userKeys || []).filter((k: UserKeyRow) => k.status !== 'revoked'));
+      if (systemRes.ok) {
+        const systemData = await systemRes.json() as SystemResponse;
+        setRacingEnabled(systemData.data?.settings?.racingEnabled === true);
+      }
       setLoading(false);
     })();
   }, [isAuthenticated]);
@@ -189,6 +202,11 @@ export default function DashboardOverviewPage() {
           <p className="kpi-label">Active Gateway Keys</p>
           <p className="kpi-value">{fmt(userKeys.length)}</p>
           <p className="kpi-subtle">Issued to clients. Revoked excluded.</p>
+        </article>
+        <article className={`kpi-card ${racingEnabled ? 'kpi-card-warn' : 'kpi-card-ok'}`}>
+          <p className="kpi-label">Parallel Racing</p>
+          <p className="kpi-value">{racingEnabled ? 'On' : 'Off'}</p>
+          <p className="kpi-subtle">Live runtime setting from System Controls.</p>
         </article>
         <article className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <p className="kpi-label">Quick Actions</p>

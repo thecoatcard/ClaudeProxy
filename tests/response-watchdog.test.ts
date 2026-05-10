@@ -74,7 +74,7 @@ describe('Timeout constants', () => {
     expect(WEB_SEARCH_TIMEOUT).toBe(8_000);
   });
 
-  test('REQUEST_TIMEOUT defaults to 240s', () => {
-    expect(REQUEST_TIMEOUT).toBe(240_000);
+  test('REQUEST_TIMEOUT defaults to 45 minutes', () => {
+    expect(REQUEST_TIMEOUT).toBe(2_700_000);
   });
 });

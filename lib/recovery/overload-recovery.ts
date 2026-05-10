@@ -27,8 +27,10 @@ export function isOverloadError(errorOrMessage: string | { status?: number; mess
     ? errorOrMessage.toLowerCase()
     : ((errorOrMessage.message ?? '') + ' ' + (errorOrMessage.status ?? '')).toLowerCase();
   return (
+    msg.includes('529') ||
     msg.includes('overloaded') ||
     msg.includes('overload_error') ||
+    msg.includes('capacity_error') ||
     msg.includes('resource_exhausted') ||
     msg.includes('503') ||
     msg.includes('rate limit') ||
@@ -41,7 +43,7 @@ export function isOverloadError(errorOrMessage: string | { status?: number; mess
 export function isRecoverableError(errorOrMessage: string | { status?: number; message?: string }): boolean {
   if (isOverloadError(errorOrMessage)) return true;
   const status = typeof errorOrMessage === 'object' ? errorOrMessage.status : undefined;
-  return status === 429 || status === 503 || status === 502 || status === 500;
+  return status === 429 || status === 529 || status === 503 || status === 502 || status === 500;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +54,7 @@ const OVERLOAD_FALLBACK_CHAIN: string[] = [
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
-  'gemma-4-31b-it',
+  'gemini-flash-latest',
 ];
 
 /** Total number of distinct models in the recovery fallback chain. */
@@ -164,22 +166,29 @@ export function compactBodyForOverload(body: any): any {
   const contents = body.contents;
   if (contents.length <= 4) return body; // too short to compact
 
-  // Keep first 2 messages (system context) + last 4 messages (active context)
-  // Summarize the middle as "[compacted for overload recovery]"
-  const head = contents.slice(0, 2);
-  const tail = contents.slice(-4);
+  // Keep the original opening prompt verbatim and preserve the active tail.
+  // Under overload we aggressively drop the middle 60%+ of turns so the next
+  // retry has a materially smaller payload while still retaining the current task.
+  const headCount = 1;
+  const tailCount = Math.min(Math.max(Math.ceil(contents.length * 0.3), 4), 8);
+  const keptCount = Math.min(contents.length, headCount + tailCount);
+  const removedCount = contents.length - keptCount;
+  if (removedCount <= 0) return body;
+
+  const head = contents.slice(0, headCount);
+  const tail = contents.slice(contents.length - tailCount);
   const compactedMiddle = [{
     role: 'user',
     parts: [{
-      text: `[${contents.length - 6} earlier messages compacted for overload recovery. ` +
-            `Key context preserved in first and last messages.]`,
+      text: `[${removedCount} earlier messages compacted for overload recovery. ` +
+            `The original opening prompt is preserved verbatim and the newest active turns are kept intact.]`,
     }],
   }];
 
   logRecovery('compaction', {
     originalMessages: contents.length,
     compactedMessages: head.length + compactedMiddle.length + tail.length,
-    removedMessages: contents.length - 6,
+    removedMessages: removedCount,
   });
 
   return {
@@ -197,7 +206,7 @@ export function compactBodyForOverload(body: any): any {
  * Pattern: 500ms → 1s → 2s → cap (prioritize model rotation over waiting).
  */
 export function computeOverloadBackoff(attempt: number): number {
-  const delays = [500, 1000, 2000];
+  const delays = [150, 400, 900];
   const base = delays[Math.min(attempt - 1, delays.length - 1)] ?? 2000;
   const jitter = Math.floor(Math.random() * 300);
   return base + jitter;

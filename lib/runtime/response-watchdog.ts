@@ -22,8 +22,8 @@ export const WEB_SEARCH_TIMEOUT = Number(process.env.WEB_SEARCH_TIMEOUT || 8_000
 /** Hard timeout for model fallback selection (ms) */
 export const FALLBACK_TIMEOUT = Number(process.env.FALLBACK_TIMEOUT || 5_000);
 
-/** Hard timeout for entire request (ms) — must be under server maxDuration */
-export const REQUEST_TIMEOUT = Number(process.env.REQUEST_TIMEOUT || 240_000);
+/** Hard timeout for entire request (ms) — default supports 40+ minute agentic runs */
+export const REQUEST_TIMEOUT = Number(process.env.REQUEST_TIMEOUT || 2_700_000);
 
 /** If no progress for this many ms, trigger recovery */
 export const STALL_DETECTION_MS = Number(process.env.STALL_DETECTION_MS || 15_000);

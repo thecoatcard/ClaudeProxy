@@ -52,9 +52,9 @@ describe('model fallback on overload', () => {
 
     tried.add('gemini-3.1-flash-lite-preview');
     const m3 = getNextFallbackModel('gemini-2.5-flash', tried);
-    expect(m3).toBe('gemma-4-31b-it');
+    expect(m3).toBe('gemini-flash-latest');
 
-    tried.add('gemma-4-31b-it');
+    tried.add('gemini-flash-latest');
     const m4 = getNextFallbackModel('gemini-2.5-flash', tried);
     expect(m4).toBeNull();
   });
