@@ -27,8 +27,9 @@ export const ARCHIVE_THRESHOLD_CHARS = Number(process.env.TOOL_ARCHIVE_THRESHOLD
 // Keep 3 so the model always has 3 turns of live context.
 export const ARCHIVE_KEEP_RECENT = Number(process.env.TOOL_ARCHIVE_KEEP_RECENT || 3);
 
-// Redis TTL for archived outputs (seconds). 30 min covers active sessions.
-const ARCHIVE_TTL_SECONDS = Number(process.env.TOOL_ARCHIVE_TTL || 1800);
+// Redis TTL for archived outputs (seconds).
+// 90 min (5400 s) covers the full 45-min maxDuration agentic sessions with headroom.
+const ARCHIVE_TTL_SECONDS = Number(process.env.TOOL_ARCHIVE_TTL || 5400);
 
 // ── Hash ──────────────────────────────────────────────────────────────────────
 /**

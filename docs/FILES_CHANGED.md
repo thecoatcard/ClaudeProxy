@@ -2,6 +2,25 @@
 
 ---
 
+## Context Isolation Fix — Hydration Leakage Fix
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `lib/context/hydration-guard.ts` | Multi-gate hydration safety layer (all gate logic, pure functions) |
+| `tests/context-isolation.test.ts` | 20 tests covering all hydration gates |
+| `docs/CONTEXT_ISOLATION_REPORT.md` | Full architecture report |
+| `docs/HYDRATION_FIX_REPORT.md` | Phase-by-phase fix report |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `lib/transformers/request.ts` | Wired hydration guard before emergency state, marker hydration, rolling summary, and operational state injection. Imported `operationalStateKey`, `extractWorkspaceRootFromSystem`, guard functions. |
+
+---
+
 ## Task 13 — Gateway Stabilization
 
 - `app/api/v1/messages/route.ts` — Removed live orchestrator prepare/run/finalize calls; added request-scoped auth, routing, transform, stream, and completion timings.

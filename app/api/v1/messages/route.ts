@@ -136,18 +136,23 @@ export async function POST(req: Request) {
       const streamStart = Date.now();
       const transformIterator = transformStream(body, model, internalModel, token, usageRef, modelMap, requestId);
 
+      // Hoist these refs outside ReadableStream so the cancel() handler
+      // (called by the platform on client disconnect) can clear them without
+      // reaching into the start() closure.
+      let pingInterval: ReturnType<typeof setInterval> | null = null;
+      let streamClosed = false;
+
       const streamBody = new ReadableStream({
         async start(controller) {
           // Guard flag: set to true when the client disconnects or the stream ends.
           // All enqueue calls are gated on this to prevent ECONNRESET / ERR_INVALID_STATE.
-          let streamClosed = false;
 
           const safeEnqueue = (chunk: Uint8Array) => {
             if (streamClosed) return;
             try { controller.enqueue(chunk); } catch { streamClosed = true; }
           };
 
-          const pingInterval = setInterval(() => {
+          pingInterval = setInterval(() => {
             safeEnqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
           }, 5000);
 
@@ -160,7 +165,7 @@ export async function POST(req: Request) {
             incrementErrorCount({ model, userToken: token }).catch(() => {}); // non-blocking
             safeEnqueue(new TextEncoder().encode(`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Stream failed"}}\n\n`));
           } finally {
-            clearInterval(pingInterval);
+            if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
             streamClosed = true;
             try { controller.close(); } catch {}
             // Fire-and-forget — stream is already closed, client has all data
@@ -184,10 +189,11 @@ export async function POST(req: Request) {
           }
         },
         // Called by the runtime when the client closes the connection early.
+        // Clears the ping interval immediately instead of waiting for the next
+        // safeEnqueue failure to propagate the closed flag.
         cancel() {
-          // The closed flag is scoped inside start(); the ping interval will clear
-          // itself naturally when the stream ends. Nothing to do here explicitly —
-          // the guard in safeEnqueue will block any further writes.
+          streamClosed = true;
+          if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
         }
       });
 
@@ -198,6 +204,7 @@ export async function POST(req: Request) {
           'Connection': 'keep-alive',
           'X-Accel-Buffering': 'no',
           'Anthropic-Version': '2023-06-01', // Forward the version header
+          'X-Request-Id': requestId,          // Correlate client errors with server logs
         }
       });
     } else {

@@ -208,5 +208,62 @@ describe('classifyFromBehavior', () => {
     );
     assert.equal(result.type, 'LIGHT_CODING');
   });
+
+  // ── Long-session promotion tests ──────────────────────────────────────────
+
+  test('short session (≤15 messages) with code → LIGHT_CODING (no promotion)', () => {
+    const result = classifyFromBehavior(
+      { toolCount: 1, toolVariety: 1, codeDensity: 1, executionDensity: 0,
+        multiFile: false, architectureSignal: false, explicitReasoning: false,
+        webSearch: false, messageLength: 50, messageCount: 10 },
+      false
+    );
+    assert.equal(result.type, 'LIGHT_CODING');
+  });
+
+  test('long session (>15 messages) with code → promoted to HEAVY_CODING', () => {
+    const result = classifyFromBehavior(
+      { toolCount: 1, toolVariety: 1, codeDensity: 1, executionDensity: 0,
+        multiFile: false, architectureSignal: false, explicitReasoning: false,
+        webSearch: false, messageLength: 50, messageCount: 16 },
+      false
+    );
+    assert.equal(result.type, 'HEAVY_CODING');
+    assert.equal(result.reason, 'long-session-promotion');
+  });
+
+  test('long session (30 messages) single tool → promoted to HEAVY_CODING', () => {
+    const result = classifyFromBehavior(
+      { toolCount: 1, toolVariety: 1, codeDensity: 0, executionDensity: 0,
+        multiFile: false, architectureSignal: false, explicitReasoning: false,
+        webSearch: false, messageLength: 30, messageCount: 30 },
+      false
+    );
+    assert.equal(result.type, 'HEAVY_CODING');
+    assert.equal(result.reason, 'long-session-promotion');
+  });
+
+  test('long session without coding signals → not promoted (stays HEAVY default)', () => {
+    // No tools, no code → falls to default HEAVY_CODING before promotion check
+    const result = classifyFromBehavior(
+      { toolCount: 0, toolVariety: 0, codeDensity: 0, executionDensity: 0,
+        multiFile: false, architectureSignal: false, explicitReasoning: false,
+        webSearch: false, messageLength: 20, messageCount: 20 },
+      false
+    );
+    // Already HEAVY_CODING by default — promotion doesn't change the type, just validates
+    assert.equal(result.type, 'HEAVY_CODING');
+  });
+
+  test('messageCount missing (undefined) → defaults to 0 → no promotion', () => {
+    const result = classifyFromBehavior(
+      { toolCount: 1, toolVariety: 1, codeDensity: 1, executionDensity: 0,
+        multiFile: false, architectureSignal: false, explicitReasoning: false,
+        webSearch: false, messageLength: 30 },
+      false
+    );
+    // messageCount undefined → ?? 0 → no promotion → LIGHT_CODING
+    assert.equal(result.type, 'LIGHT_CODING');
+  });
 });
 

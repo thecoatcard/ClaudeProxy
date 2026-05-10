@@ -34,3 +34,44 @@
 - TypeScript: 0 errors
 - Jest: 75/75 suites, 811/811 tests
 - Emergency compaction validated end-to-end
+
+---
+
+## Context Isolation Fix — 2026-05-10
+
+**Run:** `npx jest tests/context-isolation.test.ts --no-coverage`
+
+### New Tests: 20/20 passed
+
+| Test | Verdict |
+|------|---------|
+| New workspace with stored workspace → blocks | ✓ HYDRATION_SKIPPED_WORKSPACE_MISMATCH |
+| Same workspace + "continue" → allows | ✓ HYDRATION_APPROVED |
+| /clear in messages → blocks | ✓ HYDRATION_SKIPPED_CLEAR_RESET |
+| Trivial "hi" → blocks | ✓ HYDRATION_SKIPPED_LOW_CONTINUITY |
+| Trivial "hello" → blocks | ✓ HYDRATION_SKIPPED_LOW_CONTINUITY |
+| "continue" → allows | ✓ HYDRATION_APPROVED |
+| "resume the previous task" → allows | ✓ HYDRATION_APPROVED |
+| "hey" (trivial) → blocks | ✓ HYDRATION_SKIPPED_LOW_CONTINUITY |
+| Established session + same workspace → approved | ✓ HYDRATION_APPROVED |
+| Established session + /clear → blocked | ✓ HYDRATION_SKIPPED_CLEAR_RESET |
+| Established session + workspace mismatch → blocked | ✓ HYDRATION_SKIPPED_WORKSPACE_MISMATCH |
+| v2 marker detection | ✓ |
+| v1 marker detection | ✓ |
+| No marker → false | ✓ |
+| Claude Code workspacePath extraction | ✓ |
+| Cwd field extraction | ✓ |
+| No workspace info → null | ✓ |
+| Windows path normalisation | ✓ |
+| Multi-turn (> 3 messages) → approved | ✓ HYDRATION_APPROVED |
+| Both workspace roots null → does not block | ✓ HYDRATION_APPROVED |
+
+### Full Regression Suite
+
+```
+Test Suites: 66 passed, 66 total
+Tests:       689 passed, 689 total
+TypeScript:  0 errors
+```
+
+Zero regressions.

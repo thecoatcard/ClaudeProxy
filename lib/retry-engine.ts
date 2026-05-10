@@ -19,6 +19,7 @@ import {
   compactBodyForOverload,
   detectTokenPressure,
   computeOverloadBackoff,
+  waitBeforeAllModelsExhausted,
   RECOVERY_CHAIN_SIZE,
 } from './recovery/overload-recovery';
 import { logInfo, logWarn, logError } from './logging/event-logger';
@@ -124,7 +125,21 @@ async function rememberLastWorkingModel(
   if (!userId) return;
   try {
     const stickyKey = buildStickyRouteKey(userId, anthropicModel, routeVersion ?? '0');
-    await redis.set(stickyKey, internalModel, { ex: 1800 });
+    await redis.set(stickyKey, internalModel, { ex: 3600 }); // 60 min — covers full agentic session
+  } catch {
+    // Best-effort only.
+  }
+}
+
+async function forgetLastWorkingModel(
+  userId: string | undefined,
+  anthropicModel: string,
+  routeVersion?: string,
+) {
+  if (!userId) return;
+  try {
+    const stickyKey = buildStickyRouteKey(userId, anthropicModel, routeVersion ?? '0');
+    await redis.del(stickyKey);
   } catch {
     // Best-effort only.
   }
@@ -206,6 +221,7 @@ export async function executeWithRetry(
   let stripThinking = false;
   let skipCache = false;
   let lastCacheHash: string | null = null;
+  const clearStickyRoute = () => forgetLastWorkingModel(userId, anthropicModel, modelMap.routeVersion);
   // Tracks distinct models that returned 503 — when all chain models are
   // exhausted we break early instead of burning remaining retries on models
   // that are confirmed overloaded. This cuts worst-case latency from ~25s to ~8s.
@@ -440,51 +456,33 @@ export async function executeWithRetry(
 
       if (res.status === 429) {
         await reportKeyFailure(keyObj.id, 'ratelimit');
-        overloadedModels.add(currentInternalModel);
-        await maybeEmergencyCompact({ status: 429, message: 'rate limit' }, attempt);
-
-        const recovery = await recoverFromOverload({
-          currentModel: currentInternalModel,
-          currentKeyId: keyObj.id,
-          triedModels: overloadedModels,
-          attempt,
-          body: geminiBody,
-          userId,
-        });
-
-        if (recovery.newModel) {
-          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
-            requestId,
-            metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: 429, attempt },
-          });
-          currentInternalModel = recovery.newModel;
-          while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
-            fallbackIndex++;
-          }
-          if (fallbackIndex < fallbacks.length) fallbackIndex++;
-        } else if (fallbackIndex < fallbacks.length) {
-          const prev = currentInternalModel;
-          currentInternalModel = fallbacks[fallbackIndex++];
-          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
-            requestId,
-            metadata: { fromModel: prev, toModel: currentInternalModel, status: 429, attempt },
-          });
-        }
-
-        if (overloadedModels.size >= Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE)) {
-          logError('OVERLOAD', `All ${overloadedModels.size} models overloaded after 429 — failing fast after ${attempt} attempt(s)`);
-          break;
-        }
-
         lastError = { status: 429 };
-        await sleep(recovery.backoffMs || computeOverloadBackoff(attempt));
+        await sleep(computeBackoffMs(attempt));
         continue;
       }
 
-      if (res.status === 503 || res.status >= 500) {
+      if (res.status === 503) {
+        overloadedModels.add(currentInternalModel);
+        if (fallbackIndex < fallbacks.length) {
+          const prev = currentInternalModel;
+          await clearStickyRoute();
+          currentInternalModel = fallbacks[fallbackIndex++];
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: prev, toModel: currentInternalModel, status: 503, attempt },
+          });
+        } else {
+          logError('OVERLOAD', `No fallback model left after 503 on ${currentInternalModel}`);
+          break;
+        }
+        lastError = { status: 503 };
+        await sleep(computeOverloadBackoff(attempt));
+        continue;
+      }
+
+      if (res.status >= 500) {
         await maybeEmergencyCompact({ status: res.status, message: 'capacity_error' }, attempt);
 
-        // Phase 2: Use overload recovery pipeline instead of raw fallback
         const recovery = await recoverFromOverload({
           currentModel: currentInternalModel,
           currentKeyId: keyObj.id,
@@ -495,20 +493,20 @@ export async function executeWithRetry(
         });
 
         overloadedModels.add(currentInternalModel);
-        // Phase 5: Model fallback from recovery pipeline
         if (recovery.newModel) {
           logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
             requestId,
             metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: res.status, attempt },
           });
+          await clearStickyRoute();
           currentInternalModel = recovery.newModel;
-          // Also advance fallbackIndex past this model if it's in our chain
           while (fallbackIndex < fallbacks.length && fallbacks[fallbackIndex] !== recovery.newModel) {
             fallbackIndex++;
           }
           if (fallbackIndex < fallbacks.length) fallbackIndex++;
         } else if (fallbackIndex < fallbacks.length) {
           const prev = currentInternalModel;
+          await clearStickyRoute();
           currentInternalModel = fallbacks[fallbackIndex++];
           logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
             requestId,
@@ -516,16 +514,14 @@ export async function executeWithRetry(
           });
         }
 
-        // Fast-exit: every model in the chain has now returned 503 at least once.
-        // Use the larger of router chain and recovery chain to avoid premature exit.
         const totalAvailableModels = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
         if (overloadedModels.size >= totalAvailableModels) {
-          logError('OVERLOAD', `All ${overloadedModels.size} models overloaded — failing fast after ${attempt} attempt(s)`);
+          logError('OVERLOAD', `All ${overloadedModels.size} models overloaded — waiting 2 s before failing`);
+          await waitBeforeAllModelsExhausted();
           break;
         }
 
         lastError = { status: res.status };
-        // Phase 8: Overload-specific backoff (2s → 5s → 10s)
         await sleep(computeOverloadBackoff(attempt));
         continue;
       }
@@ -538,10 +534,28 @@ export async function executeWithRetry(
         // Also handle transient 400 "unexpected error" as a server-side glitch
         const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
         
-        if (res.status === 503 || res.status >= 500 || isTransientBackendErr) {
+        if (res.status === 503) {
+          overloadedModels.add(currentInternalModel);
+          if (fallbackIndex < fallbacks.length) {
+            const prev = currentInternalModel;
+            await clearStickyRoute();
+            currentInternalModel = fallbacks[fallbackIndex++];
+            logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+              requestId,
+              metadata: { fromModel: prev, toModel: currentInternalModel, status: 503, attempt },
+            });
+          } else {
+            logError('OVERLOAD', `No fallback model left after 503 on ${currentInternalModel}`);
+            break;
+          }
+          lastError = { status: 503, message: msg };
+          await sleep(computeOverloadBackoff(attempt));
+          continue;
+        }
+
+        if (res.status >= 500 || isTransientBackendErr) {
           await maybeEmergencyCompact({ status: res.status, message: msg || 'capacity_error' }, attempt);
 
-          // Use recovery pipeline for body-parse path too
           const recovery = await recoverFromOverload({
             currentModel: currentInternalModel,
             currentKeyId: keyObj.id,
@@ -557,9 +571,11 @@ export async function executeWithRetry(
               requestId,
               metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: res.status, attempt },
             });
+            await clearStickyRoute();
             currentInternalModel = recovery.newModel;
           } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
+            await clearStickyRoute();
             currentInternalModel = fallbacks[fallbackIndex++];
             logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
               requestId,
@@ -569,7 +585,8 @@ export async function executeWithRetry(
 
           const totalAvailableModels2 = Math.max(1 + fallbacks.length, RECOVERY_CHAIN_SIZE);
           if (overloadedModels.size >= totalAvailableModels2) {
-            logError('OVERLOAD', `All ${overloadedModels.size} models overloaded (body parse) — failing fast`);
+            logError('OVERLOAD', `All ${overloadedModels.size} models overloaded (body parse) — waiting 2 s before failing`);
+            await waitBeforeAllModelsExhausted();
             break;
           }
 
@@ -643,6 +660,7 @@ export async function executeWithRetry(
             stripThinking = true;
           } else if (fallbackIndex < fallbacks.length) {
             const prev = currentInternalModel;
+            await clearStickyRoute();
             currentInternalModel = fallbacks[fallbackIndex++];
             logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (bad_request_400)`);
           }
@@ -662,6 +680,29 @@ export async function executeWithRetry(
       return res;
     } catch (err: any) {
       // Phase 1: Classify overload errors as recoverable — don't hard throw
+      if (err.status === 429 && attempt < maxRetries) {
+        await reportKeyFailure(keyObj.id, 'ratelimit');
+        lastError = err;
+        await sleep(computeBackoffMs(attempt));
+        continue;
+      }
+
+      if (err.status === 503 && attempt < maxRetries) {
+        overloadedModels.add(currentInternalModel);
+        if (fallbackIndex < fallbacks.length) {
+          const prev = currentInternalModel;
+          await clearStickyRoute();
+          currentInternalModel = fallbacks[fallbackIndex++];
+          logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
+            requestId,
+            metadata: { fromModel: prev, toModel: currentInternalModel, status: 503, attempt },
+          });
+          lastError = err;
+          await sleep(computeOverloadBackoff(attempt));
+          continue;
+        }
+      }
+
       if (classifyOverload({ status: err.status, message: err.message }) && attempt < maxRetries) {
         // Track this model as overloaded so recovery doesn't return it again
         overloadedModels.add(currentInternalModel);
@@ -680,6 +721,7 @@ export async function executeWithRetry(
               requestId,
               metadata: { fromModel: currentInternalModel, toModel: recovery.newModel, status: err.status ?? 529, attempt },
             });
+            await clearStickyRoute();
             currentInternalModel = recovery.newModel;
           }
           // Fast-exit: all available models exhausted
@@ -698,6 +740,7 @@ export async function executeWithRetry(
       // If it's a 400 (likely safety or bad request), try one more time with a fallback model
       if (err.status === 400 && fallbackIndex < fallbacks.length) {
         const prev = currentInternalModel;
+        await clearStickyRoute();
         currentInternalModel = fallbacks[fallbackIndex++];
         logWarn('ROUTING', `Fallback: ${prev} → ${currentInternalModel} (exception_400)`);
         lastError = err;

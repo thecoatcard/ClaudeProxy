@@ -18,12 +18,21 @@ import {
   saveOperationalState,
   updateStateFromMessages,
   buildOperationalGuidance,
+  operationalStateKey,
   type OperationalStateStore,
 } from '../context/operational-state';
 import {
   applyCanonicalEmergencyState,
   loadEmergencyCompactionState,
 } from '../context/emergency-compactor';
+import {
+  evaluateHydration,
+  evaluateHydrationForEstablishedSession,
+  extractWorkspaceRootFromSystem,
+  extractWorkspaceRootFromMessages,
+  messagesContainCompactedMarker,
+  type HydrationVerdict,
+} from '../context/hydration-guard';
 import { logInfo } from '../logging/event-logger';
 export type { WebSearchConfig };
 
@@ -177,8 +186,82 @@ export async function transformRequestToGemini(
     DEFAULT_SUMMARY_CHAR_BUDGET,
   );
 
+  // Extract workspace root from the current system prompt for hydration gating.
+  // Claude Code primarily injects workspace in user messages (<environment_details>),
+  // not in the system prompt, so we check both sources.
+  const rawSystemForExtraction = typeof anthropicReq.system === 'string'
+    ? anthropicReq.system
+    : Array.isArray(anthropicReq.system)
+      ? anthropicReq.system.map((s: any) => (typeof s?.text === 'string' ? s.text : '')).join(' ')
+      : '';
+  const currentWorkspaceRoot =
+    extractWorkspaceRootFromSystem(rawSystemForExtraction) ||
+    extractWorkspaceRootFromMessages(anthropicReq.messages || []);
+
+  // Companion Redis key: stores the most-recently-seen workspace root for this
+  // conversationId. This is more reliable than op-state.workspace_root because
+  // it is explicitly set every request and doesn't depend on tool-call analysis.
+  const workspaceRootKey = `context:workspace:${conversationId}`;
+
   if (Array.isArray(anthropicReq.messages)) {
-    const emergencyState = await loadEmergencyCompactionState(conversationId).catch(() => null);
+    // ── Hydration gate ───────────────────────────────────────────────────────
+    // Decide upfront whether stored context (rolling summaries, operational
+    // state, emergency compaction) is safe to inject into this request.
+    //
+    // When messages already contain a compacted sentinel the session is
+    // proven — only workspace and /clear gates apply. Otherwise run the full
+    // multi-gate evaluation.
+    const hasEstablishedMarkers = messagesContainCompactedMarker(anthropicReq.messages);
+
+    // Load stored workspace root for boundary check (best-effort).
+    // Primary: companion key (explicitly saved on each request).
+    // Fallback: workspace_root in the operational state JSON.
+    let storedWorkspaceRoot: string | null = null;
+    try {
+      const [companionRoot, rawOpState] = await Promise.all([
+        redis.get<string>(workspaceRootKey).catch(() => null),
+        opStateStore.get(operationalStateKey(conversationId)).catch(() => null),
+      ]);
+      storedWorkspaceRoot = companionRoot
+        ?? (rawOpState ? (JSON.parse(rawOpState)?.workspace_root ?? null) : null);
+    } catch { /* best-effort */ }
+
+    const hydrationCtx = {
+      messages: anthropicReq.messages,
+      conversationId,
+      currentWorkspaceRoot,
+      storedWorkspaceRoot,
+    };
+    const hydrationVerdict: HydrationVerdict = hasEstablishedMarkers
+      ? evaluateHydrationForEstablishedSession(hydrationCtx)
+      : evaluateHydration(hydrationCtx);
+
+    logInfo('RETRIEVAL', `Hydration verdict: ${hydrationVerdict.reason}`, {
+      requestId,
+      metadata: {
+        conversationId,
+        allow: hydrationVerdict.allow,
+        reason: hydrationVerdict.reason,
+        hasEstablishedMarkers,
+        messageCount: anthropicReq.messages.length,
+        currentWorkspaceRoot: currentWorkspaceRoot ?? null,
+        storedWorkspaceRoot,
+      },
+    });
+
+    // Start rolling summary + API key fetch NOW, before the sequential
+    // emergency-state load and marker hydration that follow.
+    // Hiding this ~50 ms Redis RTT behind other mandatory work cuts cold-start
+    // P95 latency for established sessions.
+    const contextLookupStart = Date.now();
+    const rollingSummaryAndKeyPromise = Promise.all([
+      hydrationVerdict.allow ? redis.get<string>(summaryKey).catch(() => '') : Promise.resolve(''),
+      getHealthiestKeyObj(userId),
+    ]);
+
+    const emergencyState = hydrationVerdict.allow
+      ? await loadEmergencyCompactionState(conversationId).catch(() => null)
+      : null;
     if (emergencyState) {
       anthropicReq.messages = applyCanonicalEmergencyState(anthropicReq.messages, emergencyState);
       logInfo('COMPACTION', 'REQUEST_REWRITTEN', {
@@ -193,23 +276,23 @@ export async function transformRequestToGemini(
     }
 
     const hydrateStart = Date.now();
-    anthropicReq.messages = await hydrateCompactedMarkers(anthropicReq.messages, conversationId).catch(() => anthropicReq.messages);
+    // Only hydrate compacted markers when the guard approved hydration.
+    if (hydrationVerdict.allow) {
+      anthropicReq.messages = await hydrateCompactedMarkers(anthropicReq.messages, conversationId).catch(() => anthropicReq.messages);
+    }
     logInfo('RETRIEVAL', 'Compacted marker hydration completed', {
       requestId,
       duration: Date.now() - hydrateStart,
-      metadata: { conversationId, messageCount: anthropicReq.messages.length },
+      metadata: { conversationId, messageCount: anthropicReq.messages.length, skipped: !hydrationVerdict.allow },
     });
 
-    // Pipeline initial metadata lookups to save RTT
-    const contextLookupStart = Date.now();
-    const [rollingSummary, systemKey] = await Promise.all([
-      redis.get<string>(summaryKey).catch(() => ''),
-      getHealthiestKeyObj(userId)
-    ]);
+    // Await the parallel fetch started above.
+    const [rollingSummaryRaw, systemKey] = await rollingSummaryAndKeyPromise;
+    const rollingSummary = hydrationVerdict.allow ? rollingSummaryRaw : '';
     logInfo('RETRIEVAL', 'Context metadata lookup completed', {
       requestId,
       duration: Date.now() - contextLookupStart,
-      metadata: { hasRollingSummary: Boolean(rollingSummary), hasCompactionKey: Boolean(systemKey?.key) },
+      metadata: { hasRollingSummary: Boolean(rollingSummary), hasCompactionKey: Boolean(systemKey?.key), hydrationAllowed: hydrationVerdict.allow },
     });
 
     const compactionStart = Date.now();
@@ -241,6 +324,12 @@ export async function transformRequestToGemini(
 
     if (compaction.didCompact && compaction.generatedSummary) {
       await redis.set(summaryKey, compaction.generatedSummary, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
+    }
+
+    // Save companion workspace root key so future requests for this conversationId
+    // can detect cross-workspace context leakage even when the op-state root is null.
+    if (currentWorkspaceRoot) {
+      redis.set(workspaceRootKey, currentWorkspaceRoot, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
     }
   }
 
@@ -299,17 +388,38 @@ export async function transformRequestToGemini(
   // memory) from Redis, update it with the current messages, then inject
   // a compact guidance block and save the updated state back.
   // Runs best-effort — a Redis failure never blocks the request.
+  //
+  // Hydration guard: operational state is only injected when the guard
+  // approved hydration for this request. The state is always updated and
+  // saved regardless — we only skip the systemInstruction injection.
   let opStateInjected = false;
   const operationalStart = Date.now();
   try {
     const opState = await loadOperationalState(conversationId, opStateStore);
     const updatedOpState = updateStateFromMessages(opState, anthropicReq.messages || []);
-    const opGuidance = buildOperationalGuidance(updatedOpState);
-    if (opGuidance) {
-      systemText = (systemText ? systemText + '\n' : '') + opGuidance;
-      opStateInjected = true;
+
+    // Re-run workspace boundary check against the just-loaded state.
+    const opHydrationVerdict = evaluateHydration({
+      messages: anthropicReq.messages || [],
+      conversationId,
+      currentWorkspaceRoot,
+      storedWorkspaceRoot: updatedOpState.workspace_root ?? null,
+    });
+
+    if (opHydrationVerdict.allow) {
+      const opGuidance = buildOperationalGuidance(updatedOpState);
+      if (opGuidance) {
+        systemText = (systemText ? systemText + '\n' : '') + opGuidance;
+        opStateInjected = true;
+      }
+    } else {
+      logInfo('MEMORY', `Operational state injection blocked: ${opHydrationVerdict.reason}`, {
+        requestId,
+        metadata: { conversationId, reason: opHydrationVerdict.reason },
+      });
     }
-    // Persist asynchronously — don't block the main path.
+    // Always persist updated state — even if we didn't inject, the state
+    // accumulates new signals for future requests.
     saveOperationalState(updatedOpState, opStateStore).catch(() => {});
   } catch (e) {
     console.warn('[request] operational state error (non-fatal):', String(e));

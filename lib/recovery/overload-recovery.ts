@@ -55,6 +55,11 @@ const OVERLOAD_FALLBACK_CHAIN: string[] = [
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
   'gemini-flash-latest',
+  // Gemma models run on separate infrastructure and are available when all
+  // Gemini endpoints are simultaneously overloaded. Last-resort only since
+  // they lack multi-modal capabilities.
+  'gemma-4-31b-it',
+  'gemma-4-26b-a4b-it',
 ];
 
 /** Total number of distinct models in the recovery fallback chain. */
@@ -202,14 +207,30 @@ export function compactBodyForOverload(body: any): any {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute overload-specific backoff with fast failover.
- * Pattern: 500ms → 1s → 2s → cap (prioritize model rotation over waiting).
+ * Compute overload-specific backoff with true exponential growth.
+ * Stays fast for the first 3 attempts (model rotation is the primary recovery
+ * strategy) then grows to give genuinely-overloaded systems time to recover.
+ *
+ * attempt 1 → ~200ms   (may be transient; rotate fast)
+ * attempt 2 → ~500ms
+ * attempt 3 → ~1200ms
+ * attempt 4 → ~2500ms  (all primary models exhausted; wait before Gemma fallback)
+ * attempt 5+ → ~4000ms (sustained overload; maximise gap between attempts)
  */
 export function computeOverloadBackoff(attempt: number): number {
-  const delays = [150, 400, 900];
-  const base = delays[Math.min(attempt - 1, delays.length - 1)] ?? 2000;
+  const bases = [150, 400, 1000, 2200, 3700];
+  const base = bases[Math.min(attempt - 1, bases.length - 1)] ?? 3700;
   const jitter = Math.floor(Math.random() * 300);
   return base + jitter;
+}
+
+/**
+ * One-time delay before giving up when every model in the chain is overloaded.
+ * Gives the system 2 s to shed load before returning a 529 to the client.
+ */
+export async function waitBeforeAllModelsExhausted(): Promise<void> {
+  const delay = 2000 + Math.floor(Math.random() * 500);
+  await new Promise<void>((resolve) => setTimeout(resolve, delay));
 }
 
 // ---------------------------------------------------------------------------

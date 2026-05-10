@@ -63,6 +63,14 @@ function avgLatencyMs(latencies: any[]): number {
   return Math.round(sum / latencies.length);
 }
 
+async function safeRedis<T>(operation: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await operation;
+  } catch {
+    return fallback;
+  }
+}
+
 export async function GET(req: Request) {
   if (!(await validateAdminKey(req))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
@@ -91,33 +99,33 @@ export async function GET(req: Request) {
     todayModelsTok,
     todayUsersTok,
   ] = await Promise.all([
-    redis.get('stats:requests'),
-    redis.get('stats:errors'),
-    redis.get('stats:input_tokens'),
-    redis.get('stats:output_tokens'),
-    redis.lrange('stats:latency', 0, -1),
-    redis.get(`stats:daily:${today}:requests`),
-    redis.get(`stats:daily:${today}:errors`),
-    redis.get(`stats:daily:${today}:input_tokens`),
-    redis.get(`stats:daily:${today}:output_tokens`),
-    redis.lrange(`stats:daily:${today}:latency`, 0, -1),
-    redis.hgetall('stats:models:requests'),
-    redis.hgetall('stats:models:errors'),
-    redis.hgetall('stats:models:total_tokens'),
-    redis.hgetall(`stats:daily:${today}:models:requests`),
-    redis.hgetall(`stats:daily:${today}:models:errors`),
-    redis.hgetall(`stats:daily:${today}:models:total_tokens`),
-    redis.hgetall(`stats:daily:${today}:users:total_tokens`),
+    safeRedis(redis.get('stats:requests'), null),
+    safeRedis(redis.get('stats:errors'), null),
+    safeRedis(redis.get('stats:input_tokens'), null),
+    safeRedis(redis.get('stats:output_tokens'), null),
+    safeRedis(redis.lrange('stats:latency', 0, -1), []),
+    safeRedis(redis.get(`stats:daily:${today}:requests`), null),
+    safeRedis(redis.get(`stats:daily:${today}:errors`), null),
+    safeRedis(redis.get(`stats:daily:${today}:input_tokens`), null),
+    safeRedis(redis.get(`stats:daily:${today}:output_tokens`), null),
+    safeRedis(redis.lrange(`stats:daily:${today}:latency`, 0, -1), []),
+    safeRedis(redis.hgetall('stats:models:requests'), null),
+    safeRedis(redis.hgetall('stats:models:errors'), null),
+    safeRedis(redis.hgetall('stats:models:total_tokens'), null),
+    safeRedis(redis.hgetall(`stats:daily:${today}:models:requests`), null),
+    safeRedis(redis.hgetall(`stats:daily:${today}:models:errors`), null),
+    safeRedis(redis.hgetall(`stats:daily:${today}:models:total_tokens`), null),
+    safeRedis(redis.hgetall(`stats:daily:${today}:users:total_tokens`), null),
   ]);
 
   const daily: DailyStatRow[] = await Promise.all(
     days.map(async (day) => {
       const [r, e, i, o, lat] = await Promise.all([
-        redis.get(`stats:daily:${day}:requests`),
-        redis.get(`stats:daily:${day}:errors`),
-        redis.get(`stats:daily:${day}:input_tokens`),
-        redis.get(`stats:daily:${day}:output_tokens`),
-        redis.lrange(`stats:daily:${day}:latency`, 0, -1),
+        safeRedis(redis.get(`stats:daily:${day}:requests`), null),
+        safeRedis(redis.get(`stats:daily:${day}:errors`), null),
+        safeRedis(redis.get(`stats:daily:${day}:input_tokens`), null),
+        safeRedis(redis.get(`stats:daily:${day}:output_tokens`), null),
+        safeRedis(redis.lrange(`stats:daily:${day}:latency`, 0, -1), []),
       ]);
       const inputTokens = toNumber(i);
       const outputTokens = toNumber(o);

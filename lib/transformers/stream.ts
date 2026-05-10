@@ -43,6 +43,8 @@ export async function* transformStream(
   let finalFinishReason: string | null = null;
   let finalOutputTokens = 0;
   let sawToolUse = false;
+  let firstTokenEmittedAt: number | null = null;
+  const streamStartedAt = Date.now();
 
   const prefixes = [
     '<', '<t', '<th', '<thi', '<thin', '<think',
@@ -175,12 +177,26 @@ export async function* transformStream(
 
     try {
       while (true) {
-        const { done, value } = await withTimeout(
-          reader.read(),
-          30_000,
-          'stream-chunk-read',
-        );
-        
+        let done: boolean;
+        let value: Uint8Array | undefined;
+        try {
+          // 90 s covers extended Gemini thinking phases (previously 30 s was too
+          // short and killed streams mid-response on long agent runs).
+          ({ done, value } = await withTimeout(
+            reader.read(),
+            90_000,
+            'stream-chunk-read',
+          ));
+        } catch (readErr: any) {
+          if (readErr?.message?.startsWith('Timeout:')) {
+            // No new bytes from Gemini in 90 s — Gemini has likely stalled.
+            // Close the loop cleanly; the finally block will emit message_stop.
+            console.warn('[stream] Gemini chunk read timed out after 90 s — closing stream gracefully');
+            break;
+          }
+          throw readErr; // real network error — propagate to outer catch
+        }
+
         if (value) {
           buffer += decoder.decode(value, { stream: true });
         }
@@ -390,6 +406,7 @@ export async function* transformStream(
           if (safeLength > outputTextLength) {
             const newText = cleanedText.slice(outputTextLength, safeLength);
             outputTextLength = safeLength;
+            if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
             yield `event: content_block_delta\ndata: ${JSON.stringify({
               type: 'content_block_delta',
               index: contentBlockIndex,
@@ -503,6 +520,18 @@ export async function* transformStream(
       delta: { stop_reason: stopReason, stop_sequence: null },
       usage: { output_tokens: finalOutputTokens }
     })}\n\n`;
+
+    // Emit structured TTFT telemetry so the server log shows latency breakdown.
+    const totalMs = Date.now() - streamStartedAt;
+    const ttftMs = firstTokenEmittedAt !== null ? firstTokenEmittedAt - streamStartedAt : totalMs;
+    console.info('[stream] completed', JSON.stringify({
+      requestId,
+      ttft_ms: ttftMs,
+      total_ms: totalMs,
+      output_tokens: finalOutputTokens,
+      stop_reason: stopReason,
+      saw_tool_use: sawToolUse,
+    }));
 
     yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
 

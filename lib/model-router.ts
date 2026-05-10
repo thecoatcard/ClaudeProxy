@@ -3,6 +3,7 @@ import path from 'node:path';
 import { redis } from './redis';
 import { classifyTaskType, getTaskModelChain, ALLOWED_MODEL_POOL, type TaskType } from './routing/task-router';
 import { normalizeModelName } from './models/capability-profile';
+import { REDIS_TIMEOUT, withTimeout } from './runtime/response-watchdog';
 
 export interface ModelRoute {
   primary: string;
@@ -156,7 +157,11 @@ async function loadLocalDefaultRegistry(): Promise<Record<string, ModelRoute> | 
 
 async function readRegistry(forceReload = false): Promise<RoutingReadResult> {
   if (!forceReload && registryCache) {
-    const currentVersion = await redisClient.get<string>(ROUTING_REGISTRY_VERSION_KEY).catch(() => null);
+    const currentVersion = await withTimeout(
+      redisClient.get<string>(ROUTING_REGISTRY_VERSION_KEY),
+      REDIS_TIMEOUT,
+      'routing-registry-version'
+    ).catch(() => null);
     const normalizedCurrent = (currentVersion ?? '0').toString();
     if (normalizedCurrent === registryCache.version) {
       return {
@@ -168,8 +173,8 @@ async function readRegistry(forceReload = false): Promise<RoutingReadResult> {
   }
 
   const [registryRaw, versionRaw] = await Promise.all([
-    redisClient.get<string>(ROUTING_REGISTRY_KEY).catch(() => null),
-    redisClient.get<string>(ROUTING_REGISTRY_VERSION_KEY).catch(() => null),
+    withTimeout(redisClient.get<string>(ROUTING_REGISTRY_KEY), REDIS_TIMEOUT, 'routing-registry').catch(() => null),
+    withTimeout(redisClient.get<string>(ROUTING_REGISTRY_VERSION_KEY), REDIS_TIMEOUT, 'routing-registry-version').catch(() => null),
   ]);
 
   const version = (versionRaw ?? '0').toString();

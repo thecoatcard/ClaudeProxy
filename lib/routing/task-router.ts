@@ -104,6 +104,8 @@ export interface BehavioralSignals {
   webSearch: boolean;
   /** Total length of the user message */
   messageLength: number;
+  /** Number of conversation turns — long sessions need more capable models */
+  messageCount?: number;
 }
 
 /**
@@ -158,6 +160,7 @@ export function extractBehavioralSignals(requestBody: any): BehavioralSignals {
     explicitReasoning,
     webSearch,
     messageLength: text.length,
+    messageCount: (Array.isArray(requestBody?.messages) ? requestBody.messages : []).length,
   };
 }
 
@@ -206,6 +209,11 @@ export function classifyFromBehavior(signals: BehavioralSignals, thinkingEnabled
     signals.toolCount >= 1 ||
     signals.executionDensity >= 1
   ) {
+    // Long sessions accumulate large context; promote to HEAVY_CODING so they
+    // get the most capable model in the chain rather than the fastest-cheap one.
+    if ((signals.messageCount ?? 0) > 15) {
+      return { type: 'HEAVY_CODING', reason: 'long-session-promotion' };
+    }
     return {
       type: 'LIGHT_CODING',
       reason: signals.codeDensity >= 1 ? 'code-density' : 'tool-present',
