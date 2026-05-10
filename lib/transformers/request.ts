@@ -9,6 +9,13 @@ import {
   ARCHIVE_KEEP_RECENT,
 } from '../tool-archive';
 import { runBehaviorAudit } from '../agent/behavior-auditor';
+import { recordToolFailure } from '../tools/tool-failure-memory';
+import {
+  isEditTool,
+  extractFilePath,
+  classifyEditFailure,
+  normalizeLineEndings,
+} from '../tools/edit-failure-classifier';
 import { getAdaptiveCompactionPolicy } from './adaptive-compaction-policy';
 import { hydrateCompactedMarkers } from '../compactor/ai-compactor';
 import { stableHash } from '../utils/hash';
@@ -34,6 +41,9 @@ import {
   type HydrationVerdict,
 } from '../context/hydration-guard';
 import { logInfo } from '../logging/event-logger';
+import { getOrCreateSessionNonce, deriveHardSessionId, deriveSlotHash } from '../session/session-identity';
+import { computeWorkspaceFingerprint } from '../session/workspace-fingerprint';
+import { loadSessionBinding, saveSessionBinding, validateBinding } from '../session/session-binding';
 export type { WebSearchConfig };
 
 export interface GatewayRequestContext {
@@ -110,6 +120,16 @@ function deriveSummaryKey(anthropicReq: any, userId?: string): string {
   return `context:summary:${stableHash(anchor)}`;
 }
 
+/**
+ * Phase 1 — Hard Session Identity.
+ *
+ * Explicit IDs (from request metadata) are returned as-is.
+ * Anonymous IDs are returned as a PLACEHOLDER; the caller must
+ * call finalizeConversationId() once the nonce and fingerprint are ready.
+ * This two-stage approach keeps deriveConversationId synchronous for callers
+ * that only need the summaryKey, while allowing transformRequestToGemini to
+ * await the async nonce before setting the final conversationId.
+ */
 function deriveConversationId(anthropicReq: any, userId?: string): string {
   const explicitId = anthropicReq?.metadata?.conversation_id
     || anthropicReq?.conversation_id
@@ -120,10 +140,42 @@ function deriveConversationId(anthropicReq: any, userId?: string): string {
     return explicitId.trim();
   }
 
+  // Return the legacy hash-based fallback synchronously.
+  // This is used for the summaryKey and as the slot address for the nonce store.
+  // The FINAL conversationId will be upgraded by finalizeConversationId().
   const systemText = typeof anthropicReq?.system === 'string' ? anthropicReq.system : '';
   const firstUser = (anthropicReq?.messages || []).find((msg: any) => msg?.role === 'user');
   const anchor = `${userId || 'anon'}|${systemText.slice(0, 400)}|${extractText(firstUser?.content).slice(0, 400)}`;
   return `anon-${stableHash(anchor)}`;
+}
+
+/**
+ * Phase 1 — Upgrade a legacy hash-derived conversationId to a nonce-based one.
+ * If an explicit ID was used, returns it unchanged.
+ * Otherwise: slot = stableHash(user|system|firstMsg); nonce = Redis(slot); id = hash(user|fingerprint|nonce).
+ */
+async function finalizeConversationId(
+  anthropicReq: any,
+  userId: string,
+  legacyId: string,
+  workspaceFingerprint: string,
+): Promise<string> {
+  // Explicit IDs do not need upgrading.
+  const explicitId = anthropicReq?.metadata?.conversation_id
+    || anthropicReq?.conversation_id
+    || anthropicReq?.session_id
+    || anthropicReq?.thread_id;
+  if (typeof explicitId === 'string' && explicitId.trim()) return explicitId.trim();
+
+  // Derive the slot hash from the legacy anchor.
+  const systemText = typeof anthropicReq?.system === 'string' ? anthropicReq.system : '';
+  const firstUser = (anthropicReq?.messages || []).find((msg: any) => msg?.role === 'user');
+  const slotHash = deriveSlotHash(userId, systemText, extractText(firstUser?.content));
+
+  // Retrieve or create the nonce for this slot.
+  const nonce = await getOrCreateSessionNonce(slotHash);
+
+  return deriveHardSessionId(userId, workspaceFingerprint, nonce);
 }
 
 function getCompactionTargetTokens(internalModel?: string): number {
@@ -174,12 +226,27 @@ export async function transformRequestToGemini(
   userId?: string,
   requestId?: string,
 ): Promise<{ geminiBody: any; webSearchConfig: WebSearchConfig | null; requestContext: GatewayRequestContext }> {
-  // Derive session key once — used by compaction, rolling summary AND tool archive.
+  const rawSystemForExtraction = typeof anthropicReq.system === 'string'
+    ? anthropicReq.system
+    : Array.isArray(anthropicReq.system)
+      ? anthropicReq.system.map((s: any) => (typeof s?.text === 'string' ? s.text : '')).join(' ')
+      : '';
+
+  // Phase 2: Workspace fingerprint (stable hex hash of normalised cwd/workspacePath).
+  const workspaceFp = computeWorkspaceFingerprint(rawSystemForExtraction, anthropicReq.messages || []);
+
+  // Phase 1: Hard session identity — upgrade the anonymous conversationId to use
+  // a nonce instead of the first-message content. The summaryKey still uses the
+  // legacy anchor (for backwards compatibility with stored summaries).
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
-  const conversationId = deriveConversationId(anthropicReq, userId);
-  // True when the client supplied an explicit ID (metadata, session_id, thread_id).
-  // Hash-derived IDs can collide across sessions in the same workspace, so
-  // single-message requests without an explicit ID are treated as fresh sessions.
+  const legacyId = deriveConversationId(anthropicReq, userId);
+  const conversationId = await finalizeConversationId(
+    anthropicReq,
+    userId || 'anon',
+    legacyId,
+    workspaceFp.fingerprint,
+  );
+
   const hasExplicitConversationId = !!(
     anthropicReq?.metadata?.conversation_id ||
     anthropicReq?.conversation_id ||
@@ -198,11 +265,6 @@ export async function transformRequestToGemini(
   // Extract workspace root from the current system prompt for hydration gating.
   // Claude Code primarily injects workspace in user messages (<environment_details>),
   // not in the system prompt, so we check both sources.
-  const rawSystemForExtraction = typeof anthropicReq.system === 'string'
-    ? anthropicReq.system
-    : Array.isArray(anthropicReq.system)
-      ? anthropicReq.system.map((s: any) => (typeof s?.text === 'string' ? s.text : '')).join(' ')
-      : '';
   const currentWorkspaceRoot =
     extractWorkspaceRootFromSystem(rawSystemForExtraction) ||
     extractWorkspaceRootFromMessages(anthropicReq.messages || []);
@@ -214,26 +276,24 @@ export async function transformRequestToGemini(
 
   if (Array.isArray(anthropicReq.messages)) {
     // ── Hydration gate ───────────────────────────────────────────────────────
-    // Decide upfront whether stored context (rolling summaries, operational
-    // state, emergency compaction) is safe to inject into this request.
-    //
-    // When messages already contain a compacted sentinel the session is
-    // proven — only workspace and /clear gates apply. Otherwise run the full
-    // multi-gate evaluation.
     const hasEstablishedMarkers = messagesContainCompactedMarker(anthropicReq.messages);
 
-    // Load stored workspace root for boundary check (best-effort).
-    // Primary: companion key (explicitly saved on each request).
-    // Fallback: workspace_root in the operational state JSON.
+    // Load stored workspace root + Phase 4 session binding in parallel.
     let storedWorkspaceRoot: string | null = null;
+    let sessionBinding = null;
     try {
-      const [companionRoot, rawOpState] = await Promise.all([
+      const [companionRoot, rawOpState, binding] = await Promise.all([
         redis.get<string>(workspaceRootKey).catch(() => null),
         opStateStore.get(operationalStateKey(conversationId)).catch(() => null),
+        loadSessionBinding(conversationId).catch(() => null),
       ]);
       storedWorkspaceRoot = companionRoot
         ?? (rawOpState ? (JSON.parse(rawOpState)?.workspace_root ?? null) : null);
+      sessionBinding = binding;
     } catch { /* best-effort */ }
+
+    // Phase 4: Validate session binding.
+    const bindingStatus = validateBinding(sessionBinding, userId || 'anon', workspaceFp.fingerprint);
 
     const hydrationCtx = {
       messages: anthropicReq.messages,
@@ -241,16 +301,18 @@ export async function transformRequestToGemini(
       currentWorkspaceRoot,
       storedWorkspaceRoot,
       hasExplicitConversationId,
+      currentWorkspaceFingerprint: workspaceFp.fingerprint,
+      sessionBindingStatus: bindingStatus,
     };
     const hydrationVerdict: HydrationVerdict = hasEstablishedMarkers
       ? evaluateHydrationForEstablishedSession(hydrationCtx)
       : evaluateHydration(hydrationCtx);
 
-    // When a fresh session is detected (hash-derived ID, single-message, no
-    // continuation signal) proactively delete any stale Redis keys that share
-    // this conversationId so the next compaction starts with a clean slate.
+    // Phase 5: CRITICAL Redis write — stale key deletion must be awaited so
+    // the next request doesn't read partially-deleted state.
     if (
       hydrationVerdict.reason === 'HYDRATION_SKIPPED_FRESH_SESSION' ||
+      hydrationVerdict.reason === 'HYDRATION_SKIPPED_NULL_WORKSPACE' ||
       (hydrationVerdict.reason === 'HYDRATION_SKIPPED_CLEAR_RESET' && anthropicReq.messages.length <= 2)
     ) {
       const staleKeys = [
@@ -259,11 +321,17 @@ export async function transformRequestToGemini(
         `context:emergency:${conversationId}`,
         `context:workspace:${conversationId}`,
       ];
-      redis.del(...staleKeys).catch(() => {});
+      // Phase 5: await this critical write (was fire-and-forget).
+      await redis.del(...staleKeys).catch(() => {});
       logInfo('RETRIEVAL', 'Stale session keys deleted', {
         requestId,
         metadata: { conversationId, deletedKeys: staleKeys.length, reason: hydrationVerdict.reason },
       });
+    }
+
+    // Phase 4: Save session binding for new sessions (CRITICAL write — await).
+    if (bindingStatus === 'new') {
+      await saveSessionBinding(conversationId, userId || 'anon', workspaceFp.fingerprint, legacyId).catch(() => {});
     }
 
     logInfo('RETRIEVAL', `Hydration verdict: ${hydrationVerdict.reason}`, {
@@ -276,6 +344,9 @@ export async function transformRequestToGemini(
         messageCount: anthropicReq.messages.length,
         currentWorkspaceRoot: currentWorkspaceRoot ?? null,
         storedWorkspaceRoot,
+        workspaceFingerprint: workspaceFp.fingerprint,
+        workspaceConfidence: workspaceFp.confidence,
+        bindingStatus,
       },
     });
 
@@ -411,6 +482,43 @@ export async function transformRequestToGemini(
   });
   if (auditResult.hasGuidance) {
     systemText = (systemText ? systemText + '\n' : '') + auditResult.guidance;
+  }
+
+  // ── Phase 6: Tool failure memory ─────────────────────────────────────────
+  // Persist edit failures to Redis so the next request knows how many
+  // times an identical edit has failed. Fire-and-forget (noncritical).
+  // We look only at the most recent user message for fresh tool_result failures.
+  {
+    const lastUserMsg = [...(anthropicReq.messages || [])].reverse().find(m => m.role === 'user');
+    if (lastUserMsg && Array.isArray(lastUserMsg.content)) {
+      const toolUseMap = new Map<string, { name: string; input: Record<string, any> }>();
+      // Build map of tool_use.id → name+input from assistant turns
+      for (const msg of anthropicReq.messages || []) {
+        if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block?.type === 'tool_use' && block.id) {
+              toolUseMap.set(block.id, { name: String(block.name || ''), input: block.input ?? {} });
+            }
+          }
+        }
+      }
+      for (const block of lastUserMsg.content) {
+        if (block?.type !== 'tool_result' || !block.tool_use_id) continue;
+        const isError = block.is_error === true;
+        const text = typeof block.content === 'string'
+          ? normalizeLineEndings(block.content)
+          : Array.isArray(block.content)
+            ? block.content.map((c: any) => c?.text ?? '').join('\n')
+            : '';
+        if (!isError && !text) continue;
+        const toolUse = toolUseMap.get(block.tool_use_id);
+        if (!toolUse || !isEditTool(toolUse.name)) continue;
+        const filePath = extractFilePath(toolUse.input);
+        const classification = classifyEditFailure(text);
+        // Fire-and-forget — Phase 6 failure memory recording
+        recordToolFailure(conversationId, toolUse.name, filePath, classification.type).catch(() => {});
+      }
+    }
   }
 
   // ── Operational context memory ───────────────────────────────────────────

@@ -104,8 +104,9 @@ describe('context-isolation', () => {
       messages: [userMsg('hi')],
     });
     expect(verdict.allow).toBe(false);
-    // Single-message without explicit conversation_id → FRESH_SESSION (blocks before continuity check)
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
+    // Phase 3: null-null workspace now fires before fresh-session gate.
+    // Both reasons correctly indicate denied hydration.
+    expect(['HYDRATION_SKIPPED_FRESH_SESSION', 'HYDRATION_SKIPPED_NULL_WORKSPACE']).toContain(verdict.reason);
   });
 
   test('4b. trivial greeting "hello" → blocks hydration', () => {
@@ -114,24 +115,31 @@ describe('context-isolation', () => {
       messages: [userMsg('hello')],
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
+    // Phase 3: null-null workspace fires before fresh-session gate.
+    expect(['HYDRATION_SKIPPED_FRESH_SESSION', 'HYDRATION_SKIPPED_NULL_WORKSPACE']).toContain(verdict.reason);
   });
 
-  // ─── Test 5: "continue" → hydrates ───────────────────────────────────────
+  // ─── Test 5: "continue" → hydrates when workspace is known ──────────────
 
-  test('5. "continue" → allows hydration', () => {
+  test('5. "continue" with known workspace → allows hydration', () => {
+    // Phase 3: null-null workspace is now denied. Must supply workspace roots.
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('continue')],
+      currentWorkspaceRoot: '/home/user/project',
+      storedWorkspaceRoot:  '/home/user/project',
     });
     expect(verdict.allow).toBe(true);
     expect(verdict.reason).toBe('HYDRATION_APPROVED');
   });
 
-  test('5b. "resume the previous task" → allows hydration', () => {
+  test('5b. "resume the previous task" with known workspace → allows hydration', () => {
+    // Phase 3: null-null workspace is now denied. Must supply workspace roots.
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('resume the previous task')],
+      currentWorkspaceRoot: '/home/user/project',
+      storedWorkspaceRoot:  '/home/user/project',
     });
     expect(verdict.allow).toBe(true);
     expect(verdict.reason).toBe('HYDRATION_APPROVED');
@@ -146,8 +154,8 @@ describe('context-isolation', () => {
       messages: [userMsg('hey')],
     });
     expect(verdict.allow).toBe(false);
-    // Single-message without explicit conversation_id → fresh session gate fires
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
+    // Phase 3: null-null workspace fires before fresh-session gate.
+    expect(['HYDRATION_SKIPPED_FRESH_SESSION', 'HYDRATION_SKIPPED_NULL_WORKSPACE']).toContain(verdict.reason);
   });
 
   // ─── Test 7: Established session with markers → uses lighter gate ─────────
@@ -278,16 +286,37 @@ describe('context-isolation', () => {
     expect(verdict.reason).toBe('HYDRATION_APPROVED');
   });
 
-  // ─── Test 12: Unknown workspace roots → pass gate ────────────────────────
+  // ─── Test 12: Unknown workspace roots ───────────────────────────────────
 
-  test('12. unknown workspace roots (both null) → does not block', () => {
+  test('12. unknown workspace roots (both null, anonymous session) → Phase 3 blocks hydration', () => {
+    // Phase 3 hardening: null-null workspace is now DENIED (safe default).
+    // Previous behaviour was to pass. New behaviour: cannot prove workspace continuity → deny.
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('continue the task')],
       currentWorkspaceRoot: null,
       storedWorkspaceRoot: null,
     });
+    expect(verdict.allow).toBe(false);
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_NULL_WORKSPACE');
+  });
+
+  test('12b. unknown workspace roots (both null) with explicit conversation ID → allowed', () => {
+    // Explicit ID: client asserts identity — null workspace is permitted.
+    const verdict = evaluateHydration({
+      ...BASE_CTX,
+      messages: [
+        userMsg('continue the task'),
+        { role: 'assistant', content: 'Done.' },
+        userMsg('and now do this'),
+      ],
+      currentWorkspaceRoot: null,
+      storedWorkspaceRoot: null,
+      hasExplicitConversationId: true,
+    });
+    // Passes null workspace gate (explicit) and should pass continuity gate (multi-turn)
     expect(verdict.allow).toBe(true);
+    expect(verdict.reason).toBe('HYDRATION_APPROVED');
   });
 
   // ─── CRITICAL: Test 13 — The exact failure scenario from the bug report ───
@@ -340,9 +369,8 @@ describe('context-isolation', () => {
     expect(verdict.reason).toBe('HYDRATION_APPROVED');
   });
 
-  test('13c. "hi" alone (no workspace info) with NO stored workspace → blocks by fresh session gate', () => {
-    // No workspace info anywhere, single message, no explicit conversation ID
-    // → FRESH_SESSION (hash-derived ID may collide; safer to block)
+  test('13c. "hi" alone (no workspace info) with NO stored workspace → Phase 3 blocks by null workspace gate', () => {
+    // Phase 3: No workspace info = null-null → denied (cannot prove continuity).
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('hi')],
@@ -350,7 +378,8 @@ describe('context-isolation', () => {
       storedWorkspaceRoot: null,
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
+    // Phase 3 null workspace gate fires before fresh-session gate.
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_NULL_WORKSPACE');
   });
 
   // ─── Test 14: Subdirectory — strict isolation blocks it ──────────────────

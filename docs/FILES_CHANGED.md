@@ -2,7 +2,99 @@
 
 ---
 
-## Context Isolation Fix — Hydration Leakage Fix
+## Tool Behavior Hardening — 10 Phases (Claude Code-Like Tool Flow)
+
+### New Source Files
+
+| File | Phase | Purpose |
+|---|---|---|
+| `lib/tools/edit-failure-classifier.ts` | 2, 8 | Pure classification of edit tool failures; path/CRLF normalization |
+| `lib/tools/edit-recovery.ts` | 3, 4, 5 | Claude Code-like edit recovery guidance (REREAD → WRITE → ESCALATE) |
+| `lib/tools/tool-failure-memory.ts` | 6 | Redis-backed tool failure tracking per (session, tool, file) |
+
+### Modified Source Files
+
+| File | Phases | Changes |
+|---|---|---|
+| `lib/transformers/loop-detector.ts` | 1, 8 | Added `detectEditStagnation()`; Phase 8 path/CRLF normalization |
+| `lib/agent/behavior-auditor.ts` | 1, 3, 7 | Phase 0 stagnation check; `[LOOP_BREAKER]` injection at failureCount≥3 |
+| `lib/transformers/request.ts` | 6 | Fire-and-forget `recordToolFailure` after behavior audit |
+
+### New Test Files
+
+| File | Tests | Phases |
+|---|---|---|
+| `tests/edit-failure-classifier.test.ts` | 48 | 2, 8 |
+| `tests/edit-recovery.test.ts` | 36 | 3, 4, 5 |
+| `tests/tool-loop-detector.test.ts` | 22 | 1, 7, 8 |
+| `tests/tool-failure-memory.test.ts` | 19 | 6 |
+
+### New Documentation
+
+| File | Contents |
+|---|---|
+| `docs/TOOL_SUPERVISION_REPORT.md` | All 8 phases overview |
+| `docs/EDIT_RECOVERY_REPORT.md` | Phases 3/4/5 deep-dive |
+| `docs/TOOL_LOOP_FIX_REPORT.md` | Phases 1/7 loop detection and breaker |
+| `docs/FILES_CHANGED.md` | This file (updated) |
+| `docs/TEST_RESULTS.md` | Updated with 929 passing tests |
+
+---
+
+## Security Hardening Pass — Phases 1–8
+
+### New Source Files
+
+| File | Phase | Purpose |
+|---|---|---|
+| `lib/session/session-identity.ts` | 1 | Nonce-based hard session identity |
+| `lib/session/workspace-fingerprint.ts` | 2 | Multi-source workspace path fingerprinting |
+| `lib/session/session-binding.ts` | 4 | Session binding (conversationId ↔ userId + workspace) |
+
+### Modified Source Files
+
+| File | Phases | Changes |
+|---|---|---|
+| `lib/context/hydration-guard.ts` | 3, 4 | `workspacesMatch()` null-null policy; new skip reasons; binding gate |
+| `lib/transformers/request.ts` | 1, 2, 4, 5 | `finalizeConversationId()`; workspace fingerprint; session binding; await critical writes |
+| `lib/tool-archive.ts` | 6 | `buildArchiveMissPlaceholder()`, `recoverArchivedOutput()` |
+| `lib/retry-engine.ts` | 7, 8 | `getFastPathRaceTimeoutMs(taskType)`; `recordModelHealth` import; health-aware routing call |
+| `lib/recovery/overload-recovery.ts` | 8 | `ModelHealthRecord`, `recordModelHealth`, `getHealthAwareFallbackChain`, `getNextFallbackModelHealthAware` |
+
+### New Test Files
+
+| File | Tests | Phase |
+|---|---|---|
+| `tests/session-identity.test.ts` | 14 | 1 |
+| `tests/workspace-fingerprint.test.ts` | 28 | 2 |
+| `tests/hydration-null-policy.test.ts` | 12 | 3, 4 |
+| `tests/session-binding.test.ts` | 16 | 4 |
+| `tests/archive-recovery.test.ts` | 13 | 6 |
+| `tests/dynamic-key-timeout.test.ts` | 15 | 7 |
+| `tests/provider-health-routing.test.ts` | 15 | 8 |
+
+### Modified Test Files
+
+| File | Changes |
+|---|---|
+| `tests/context-isolation.test.ts` | 7 tests updated: Phase 3 null workspace expectations |
+| `tests/integration-pipeline.test.ts` | 1 test updated: null workspace triggers stale key deletion |
+
+### New Documentation
+
+| File | Contents |
+|---|---|
+| `docs/SESSION_HARDENING_REPORT.md` | Phase 1–8 full report |
+| `docs/WORKSPACE_FINGERPRINT_REPORT.md` | Phase 2 deep-dive |
+| `docs/REDIS_INTEGRITY_REPORT.md` | Phase 5 critical write classification |
+| `docs/ARCHIVE_RECOVERY_REPORT.md` | Phase 6 miss recovery |
+| `docs/HEALTH_ROUTING_REPORT.md` | Phase 8 health-aware routing |
+| `docs/FILES_CHANGED.md` | This file |
+| `docs/TEST_RESULTS.md` | Updated with Phase 9 results |
+
+---
+
+## Context Isolation Fix — Hydration Leakage Fix (Previous)
 
 ### New Files
 

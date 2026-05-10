@@ -121,6 +121,49 @@ export async function retrieveArchivedOutput(
 }
 
 /**
+ * Phase 6 — Tool Archive Miss Recovery.
+ *
+ * When a GATEWAY ARCHIVE reference tag is found in conversation history but
+ * the corresponding Redis entry has expired (TTL elapsed), this function
+ * returns a safe placeholder string instead of propagating a broken reference.
+ *
+ * The placeholder informs the model that the content is no longer available
+ * and prompts it to re-run the tool rather than hallucinating the missing data.
+ *
+ * @param toolName   Original tool name embedded in the reference tag.
+ * @param hash       Archive hash from the ref: field.
+ * @returns          Human-readable placeholder message.
+ */
+export function buildArchiveMissPlaceholder(toolName: string, hash: string): string {
+  return (
+    `[GATEWAY ARCHIVE EXPIRED: ${toolName} output (ref:${hash}) is no longer in cache. ` +
+    `Re-run ${toolName} to retrieve the content again.]`
+  );
+}
+
+/**
+ * Phase 6 — Attempt to recover a reference tag from Redis or return a safe placeholder.
+ *
+ * Call this whenever a GATEWAY ARCHIVE reference is encountered in history
+ * but the content cannot be found in Redis (cache miss). Prevents the model
+ * from seeing a raw reference token with no explanation.
+ *
+ * @param sessionKey   Redis session key (same as used in archiveToolOutput).
+ * @param toolName     Tool name from the reference tag.
+ * @param hash         Archive hash from the ref: field.
+ * @returns            Recovered content string, or a descriptive placeholder.
+ */
+export async function recoverArchivedOutput(
+  sessionKey: string,
+  toolName: string,
+  hash: string,
+): Promise<string> {
+  const content = await retrieveArchivedOutput(sessionKey, hash);
+  if (content) return content;
+  return buildArchiveMissPlaceholder(toolName, hash);
+}
+
+/**
  * Count how many large tool results are in a message list.
  * Used by the main loop to decide which ones to archive.
  * Called AFTER compaction so we only count live messages.

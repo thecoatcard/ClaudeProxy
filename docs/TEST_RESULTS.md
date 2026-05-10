@@ -1,7 +1,65 @@
 # Test Results
 
-**Date:** 2026-05-10  
-**Run:** Full Jest suite after overload-aware emergency compaction
+**Date:** Tool behavior hardening — 10-phase Claude Code-like tool flow  
+**Run:** Full Jest suite after tool behavior hardening
+
+---
+
+## Tool Behavior Hardening — Final Results
+
+| Metric | Before Session | After Session | Delta |
+|---|---|---|---|
+| Test suites | 74 | 78 | +4 |
+| Tests | 830 | 929 | +99 |
+| Failures | 0 | 0 | 0 |
+| TypeScript errors | 0 | 0 | 0 |
+
+### New Test Files Added
+
+| File | Tests | Phases |
+|---|---|---|
+| `tests/edit-failure-classifier.test.ts` | 48 | Phase 2, 8 |
+| `tests/edit-recovery.test.ts` | 36 | Phase 3, 4, 5 |
+| `tests/tool-loop-detector.test.ts` | 22 | Phase 1, 7, 8 |
+| `tests/tool-failure-memory.test.ts` | 19 | Phase 6 |
+
+### Bug Fixed During Phase 9
+
+**File**: `tests/tool-failure-memory.test.ts`  
+**Root cause**: `jest.clearAllMocks()` does not drain unconsumed `mockRejectedValueOnce` queues. An error test's unconsumed `set` rejection persisted into the next test, silently swallowing the Redis write.  
+**Fix**: Changed `jest.clearAllMocks()` to `jest.resetAllMocks()` in `beforeEach` to also drain queued once-values, then re-attach implementations via `mockImplementation`.
+
+---
+
+## Phase 9 Final Results (Security Hardening)
+
+| Metric | Before Session | After Session | Delta |
+|---|---|---|---|
+| Test suites | 67 | 74 | +7 |
+| Tests | 728 | 830 | +102 |
+| Failures | 0 | 0 | 0 |
+| TypeScript errors | 0 | 0 | 0 |
+
+### New Test Files Added
+
+| File | Tests | Phase |
+|---|---|---|
+| `tests/session-identity.test.ts` | 14 | Phase 1 |
+| `tests/workspace-fingerprint.test.ts` | 28 | Phase 2 |
+| `tests/hydration-null-policy.test.ts` | 12 | Phase 3 & 4 |
+| `tests/session-binding.test.ts` | 16 | Phase 4 |
+| `tests/archive-recovery.test.ts` | 13 | Phase 6 |
+| `tests/dynamic-key-timeout.test.ts` | 15 | Phase 7 |
+| `tests/provider-health-routing.test.ts` | 15 | Phase 8 |
+
+### Updated Existing Tests
+
+- `tests/context-isolation.test.ts` — 7 tests updated to reflect Phase 3 null workspace policy
+- `tests/integration-pipeline.test.ts` — 1 test updated (null workspace triggers stale key deletion)
+
+---
+
+## Previous Results (2026-05-10)
 
 ## Latest Results
 

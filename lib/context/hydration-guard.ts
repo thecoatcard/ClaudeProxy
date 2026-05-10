@@ -8,9 +8,10 @@
  *
  * Required gates (all must pass):
  *   1. No /clear reset detected in recent messages
- *   2. Workspace root matches stored workspace root (if both known)
- *   3. Session is not trivially fresh (single trivial greeting)
- *   4. Semantic continuity — current request continues prior task
+ *   2. Workspace boundary — null-null is now DENIED (Phase 3 hardening)
+ *   3. Session binding validated (Phase 4 hardening)
+ *   4. Session is not trivially fresh (single trivial greeting)
+ *   5. Semantic continuity — current request continues prior task
  *
  * Fail ANY gate → do not hydrate.
  *
@@ -22,7 +23,9 @@
 export type HydrationSkipReason =
   | 'HYDRATION_SKIPPED_CLEAR_RESET'
   | 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH'
+  | 'HYDRATION_SKIPPED_NULL_WORKSPACE'      // Phase 3: both workspace roots unknown
   | 'HYDRATION_SKIPPED_SESSION_MISMATCH'
+  | 'HYDRATION_SKIPPED_BINDING_MISMATCH'   // Phase 4: session binding mismatch
   | 'HYDRATION_SKIPPED_LOW_CONTINUITY'
   | 'HYDRATION_SKIPPED_FRESH_SESSION';
 
@@ -60,6 +63,25 @@ export interface HydrationContext {
    * sessions and denied hydration.
    */
   hasExplicitConversationId?: boolean;
+
+  /**
+   * Phase 2: Workspace fingerprint for the current request.
+   * Short hex string from computeWorkspaceFingerprint().
+   * Undefined means fingerprinting was not performed (falls back to root-based check).
+   */
+  currentWorkspaceFingerprint?: string | null;
+
+  /**
+   * Phase 2: Stored workspace fingerprint from the session binding.
+   * Compared against currentWorkspaceFingerprint to enforce isolation.
+   */
+  storedWorkspaceFingerprint?: string | null;
+
+  /**
+   * Phase 4: Session binding validation result.
+   * 'valid' | 'mismatch' | 'new' | undefined (not yet validated).
+   */
+  sessionBindingStatus?: 'valid' | 'mismatch' | 'new';
 }
 
 // ─── Trivial-greeting detection ───────────────────────────────────────────────
@@ -215,20 +237,35 @@ function normalizeRoot(root: string): string {
     .toLowerCase();
 }
 
+/**
+ * Phase 3: Safe-default null workspace policy.
+ *
+ * Previous behaviour: both null → pass (silently allowed hydration).
+ * New behaviour:      both null → DENY (we cannot prove session continuity).
+ *
+ * When workspace is unknown we have no way to enforce isolation. Denying is
+ * safer than silently allowing stale context injection.
+ *
+ * Exception: if the session has an explicit conversationId AND an established
+ * compacted marker, continuity is already proven → the workspace gate is not
+ * the right gate to apply. Callers handle that via evaluateHydrationForEstablishedSession.
+ */
 function workspacesMatch(
   current: string | null | undefined,
   stored: string | null | undefined,
+  hasExplicitConversationId?: boolean,
 ): boolean {
-  // Both unknown → cannot assert a mismatch → pass
-  if (!current && !stored) return true;
+  // Phase 3: Both unknown → DENY (safe default — cannot prove continuity).
+  // Exception: explicit conversation_id means the client is asserting identity;
+  // we trust them to manage their own session lifecycle.
+  if (!current && !stored) {
+    return hasExplicitConversationId === true;
+  }
 
-  // One unknown → cannot assert a mismatch → pass (safe default).
-  // The workspace will be stored on the next successful request via the
-  // companion Redis key, enabling stricter checks from the second request on.
+  // One unknown → pass (first request or workspace not yet stored).
   if (!current || !stored) return true;
 
-  // Both known → require EXACT match (strict path-aware isolation per spec).
-  // TrainAi ≠ TrainAi/library even though one is a subdirectory of the other.
+  // Both known → require EXACT match.
   return normalizeRoot(current) === normalizeRoot(stored);
 }
 
@@ -292,21 +329,28 @@ function assessSemanticContinuity(messages: any[], hasExplicitConversationId: bo
  */
 export function evaluateHydration(ctx: HydrationContext): HydrationVerdict {
   const { messages, currentWorkspaceRoot, storedWorkspaceRoot } = ctx;
+  const isExplicit = ctx.hasExplicitConversationId ?? false;
 
   // Gate 1: /clear detection
   if (detectClearReset(messages)) {
     return { allow: false, reason: 'HYDRATION_SKIPPED_CLEAR_RESET' };
   }
 
-  // Gate 2: Workspace boundary
-  if (!workspacesMatch(currentWorkspaceRoot, storedWorkspaceRoot)) {
-    return { allow: false, reason: 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH' };
+  // Gate 2: Workspace boundary (Phase 3: null-null now denied unless explicit ID)
+  if (!workspacesMatch(currentWorkspaceRoot, storedWorkspaceRoot, isExplicit)) {
+    // Distinguish null-null from real mismatch for observability.
+    const reason = (!currentWorkspaceRoot && !storedWorkspaceRoot)
+      ? 'HYDRATION_SKIPPED_NULL_WORKSPACE'
+      : 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH';
+    return { allow: false, reason };
   }
 
-  // Gate 3: Semantic continuity (checks latest user message regardless of history length).
-  // For single-message sessions with no explicit conversation ID (hash-derived),
-  // this gate also blocks hydration to prevent stale-context leakage.
-  const isExplicit = ctx.hasExplicitConversationId ?? false;
+  // Gate 3: Session binding validation (Phase 4)
+  if (ctx.sessionBindingStatus === 'mismatch') {
+    return { allow: false, reason: 'HYDRATION_SKIPPED_BINDING_MISMATCH' };
+  }
+
+  // Gate 4: Semantic continuity
   if (!assessSemanticContinuity(messages, isExplicit)) {
     const reason = (!isExplicit && messages.length === 1)
       ? 'HYDRATION_SKIPPED_FRESH_SESSION'
@@ -341,11 +385,20 @@ export function messagesContainCompactedMarker(messages: any[]): boolean {
  */
 export function evaluateHydrationForEstablishedSession(ctx: HydrationContext): HydrationVerdict {
   const { messages, currentWorkspaceRoot, storedWorkspaceRoot } = ctx;
+  const isExplicit = ctx.hasExplicitConversationId ?? false;
 
   if (detectClearReset(messages)) {
     return { allow: false, reason: 'HYDRATION_SKIPPED_CLEAR_RESET' };
   }
-  if (!workspacesMatch(currentWorkspaceRoot, storedWorkspaceRoot)) {
+  // Established sessions (compacted marker present) prove continuity; session binding
+  // mismatch is still enforced because a user could forge a compacted marker.
+  if (ctx.sessionBindingStatus === 'mismatch') {
+    return { allow: false, reason: 'HYDRATION_SKIPPED_BINDING_MISMATCH' };
+  }
+  // For established sessions, workspace null-null is allowed — the compacted
+  // marker itself proves session continuity, so strict workspace isolation is
+  // not required here (it was enforced when the marker was first created).
+  if (!workspacesMatch(currentWorkspaceRoot, storedWorkspaceRoot, true /* treat as explicit */)) {
     return { allow: false, reason: 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH' };
   }
   return { allow: true, reason: 'HYDRATION_APPROVED' };

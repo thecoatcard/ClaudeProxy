@@ -19,6 +19,117 @@ import { redis } from '../redis';
 import { countTokens } from '../tokenizer';
 
 // ---------------------------------------------------------------------------
+// Phase 8: Provider health tracking
+// ---------------------------------------------------------------------------
+
+export interface ModelHealthRecord {
+  /** Number of consecutive failures (resets on success). */
+  failures: number;
+  /** Number of successful responses. */
+  successes: number;
+  /** Total latency across all calls (ms). */
+  totalLatencyMs: number;
+  /** Number of overload responses received. */
+  overloadCount: number;
+  /** Unix ms timestamp of last update. */
+  updatedAt: number;
+}
+
+const MODEL_HEALTH_KEY = (model: string) => `provider:health:${model.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+const MODEL_HEALTH_TTL = 3600; // 1 h — reset health scores after sustained idle
+
+/**
+ * Record an outcome for a model after a response.
+ * Called from the retry engine on each model attempt.
+ *
+ * @param model      Gemini/Gemma model name.
+ * @param outcome    'success' | 'overload' | 'error'
+ * @param latencyMs  Time taken for the call in ms (0 if unknown).
+ */
+export async function recordModelHealth(
+  model: string,
+  outcome: 'success' | 'overload' | 'error',
+  latencyMs = 0,
+): Promise<void> {
+  try {
+    const key = MODEL_HEALTH_KEY(model);
+    const raw = await redis.get<string>(key);
+    const existing: ModelHealthRecord = raw
+      ? JSON.parse(raw)
+      : { failures: 0, successes: 0, totalLatencyMs: 0, overloadCount: 0, updatedAt: 0 };
+
+    const updated: ModelHealthRecord = {
+      failures:      outcome === 'success' ? 0 : existing.failures + 1,
+      successes:     outcome === 'success' ? existing.successes + 1 : existing.successes,
+      totalLatencyMs: existing.totalLatencyMs + latencyMs,
+      overloadCount:  outcome === 'overload' ? existing.overloadCount + 1 : existing.overloadCount,
+      updatedAt:      Date.now(),
+    };
+
+    await redis.set(key, JSON.stringify(updated), { ex: MODEL_HEALTH_TTL });
+  } catch {
+    // best-effort — health tracking must not affect the request path
+  }
+}
+
+/**
+ * Load the current health record for a model.
+ * Returns a zero-initialized record if none exists (treat as healthy).
+ */
+export async function getModelHealth(model: string): Promise<ModelHealthRecord> {
+  try {
+    const raw = await redis.get<string>(MODEL_HEALTH_KEY(model));
+    if (raw) return JSON.parse(raw) as ModelHealthRecord;
+  } catch { /* ignore */ }
+  return { failures: 0, successes: 0, totalLatencyMs: 0, overloadCount: 0, updatedAt: 0 };
+}
+
+/**
+ * Phase 8: Health-aware fallback model ordering.
+ *
+ * Dynamically re-ranks the OVERLOAD_FALLBACK_CHAIN based on Redis health scores.
+ * Models with recent failures or overloads are demoted. Healthy models are promoted.
+ *
+ * Scoring formula (lower = healthier, i.e. sort ascending):
+ *   score = (failures × 10) + (overloadCount × 5) − (successes × 1)
+ *
+ * Gemma models keep their default position unless Gemini models are all degraded.
+ * This ensures Gemma is still a last resort (not always preferred over Gemini).
+ *
+ * @param triedModels  Models already attempted — excluded from the result.
+ * @param currentModel The currently active model — excluded from the result.
+ * @returns            Ordered array of fallback model names to try.
+ */
+export async function getHealthAwareFallbackChain(
+  currentModel: string,
+  triedModels: Set<string>,
+): Promise<string[]> {
+  // Candidates: models not yet tried, excluding current
+  const candidates = OVERLOAD_FALLBACK_CHAIN.filter(
+    (m) => m !== currentModel && !triedModels.has(m),
+  );
+  if (candidates.length === 0) return [];
+
+  // Load health records in parallel
+  const healthRecords = await Promise.all(candidates.map(getModelHealth));
+
+  // Score each candidate
+  const scored = candidates.map((model, i) => {
+    const h = healthRecords[i];
+    // Gemma penalty: add 50 to score to ensure Gemma stays near the end
+    // unless Gemini models are all critically degraded.
+    const gemmaBase = model.startsWith('gemma-') ? 50 : 0;
+    const score = gemmaBase + (h.failures * 10) + (h.overloadCount * 5) - h.successes;
+    return { model, score };
+  });
+
+  // Sort by ascending score (healthiest first), preserve original order on tie
+  scored.sort((a, b) => a.score - b.score);
+
+  return scored.map((s) => s.model);
+}
+
+// ---------------------------------------------------------------------------
 // Phase 1: Overload classifier
 // ---------------------------------------------------------------------------
 
@@ -68,6 +179,7 @@ export const RECOVERY_CHAIN_SIZE = OVERLOAD_FALLBACK_CHAIN.length;
 /**
  * Returns the next model in the priority chain that hasn't been tried.
  * Returns null when all models are exhausted.
+ * This is the synchronous version — used as a fast fallback when Redis is unavailable.
  */
 export function getNextFallbackModel(
   currentModel: string,
@@ -79,6 +191,30 @@ export function getNextFallbackModel(
     }
   }
   return null;
+}
+
+/**
+ * Phase 8 — Health-aware async fallback model selection.
+ *
+ * Queries Redis for per-model failure/overload counts and re-ranks the
+ * fallback chain so the healthiest available model is tried first.
+ * Falls back to getNextFallbackModel() if Redis is unavailable.
+ *
+ * @param currentModel  Currently active (failing) model.
+ * @param triedModels   Models already attempted in this request.
+ * @returns             Best next model to try, or null if all exhausted.
+ */
+export async function getNextFallbackModelHealthAware(
+  currentModel: string,
+  triedModels: Set<string>,
+): Promise<string | null> {
+  try {
+    const chain = await getHealthAwareFallbackChain(currentModel, triedModels);
+    return chain[0] ?? null;
+  } catch {
+    // Degrade gracefully to the static chain on Redis errors.
+    return getNextFallbackModel(currentModel, triedModels);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,9 +463,9 @@ export async function recoverFromOverload(opts: {
   const newKeyId = freshKey?.id ?? null;
   logRecovery('key-rotated', { oldKey: currentKeyId, newKey: newKeyId });
 
-  // Step 4: Fallback model
+  // Step 4: Phase 8 — health-aware fallback model selection
   triedModels.add(currentModel);
-  const newModel = getNextFallbackModel(currentModel, triedModels);
+  const newModel = await getNextFallbackModelHealthAware(currentModel, triedModels);
   if (newModel) {
     logRecovery('fallback-model-selected', { from: currentModel, to: newModel });
   }

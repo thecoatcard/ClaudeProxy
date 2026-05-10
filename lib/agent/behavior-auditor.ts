@@ -15,7 +15,7 @@
 //   8. Dependency compat       — known-breaking version installs
 //   9. Web recovery            — error patterns requiring official docs
 
-import { detectFailureLoop } from '../transformers/loop-detector';
+import { detectFailureLoop, detectEditStagnation } from '../transformers/loop-detector';
 import { classifyFailure, formatStrategy } from './retry-strategy';
 import { detectPrematureCompletion } from './completion-gate';
 import { inspectHistoryPaths, buildPathGuidance } from './path-guard';
@@ -43,6 +43,10 @@ export interface BehaviorAuditResult {
     contradictionLoops: number;
     dependencyRisks: number;
     webRecoveryTriggered: boolean;
+    // Phase 1/3/7: edit stagnation
+    editStagnationDetected: boolean;
+    editStagnationType: 'READ_EDIT_LOOP' | 'REPEATED_EDIT_FAIL' | null;
+    editStagnationFailures: number;
   };
 }
 
@@ -65,7 +69,40 @@ export async function runBehaviorAudit(
     contradictionLoops: 0,
     dependencyRisks: 0,
     webRecoveryTriggered: false,
+    editStagnationDetected: false,
+    editStagnationType: null,
+    editStagnationFailures: 0,
   };
+
+  // 0. Phase 1/3/7 — Edit stagnation detection (highest priority among tool checks).
+  // Detects Read→Edit fail→Read→Edit fail loops and repeated consecutive edit failures.
+  // Fires BEFORE the generic loop detector so the model gets targeted edit guidance first.
+  const stagnationResult = detectEditStagnation(messages);
+  if (stagnationResult.detected && stagnationResult.diagnostics) {
+    diagnostics.editStagnationDetected = true;
+    diagnostics.editStagnationType = stagnationResult.stagnationType;
+    diagnostics.editStagnationFailures = stagnationResult.diagnostics.failureCount;
+    guidanceParts.push(stagnationResult.guidance);
+
+    // Phase 7 — Loop breaker: if failures >= 3, inject mandatory strategy change
+    if (stagnationResult.diagnostics.failureCount >= 3) {
+      guidanceParts.push(
+        '---\n' +
+        '[LOOP_BREAKER] MANDATORY: Change strategy now. DO NOT make another identical edit attempt.\n' +
+        '• Write the full file content, or use an insert-based approach.\n' +
+        '• If still blocked, stop and report to the user.\n' +
+        '---'
+      );
+    }
+
+    console.warn(
+      `[behavior-auditor] edit stagnation: type=${stagnationResult.stagnationType}` +
+      ` tool=${stagnationResult.diagnostics.toolName}` +
+      ` file=${stagnationResult.diagnostics.filePath}` +
+      ` failures=${stagnationResult.diagnostics.failureCount}` +
+      ` failureType=${stagnationResult.diagnostics.lastFailureType}`,
+    );
+  }
 
   // 1. Loop detection (highest priority — replaces previous standalone call).
   const loopResult = detectFailureLoop(messages, internalModel);

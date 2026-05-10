@@ -16,6 +16,7 @@ import {
   isOverloadError as classifyOverload,
   isRecoverableError,
   recoverFromOverload,
+  recordModelHealth,
   compactBodyForOverload,
   detectTokenPressure,
   computeOverloadBackoff,
@@ -100,9 +101,38 @@ function computeBackoffMs(attempt: number): number {
   return base + jitter;
 }
 
-function getFastPathRaceTimeoutMs(): number {
-  const configured = Number(process.env.FAST_PATH_RACE_TIMEOUT || 3500);
-  return Math.max(1000, Math.min(configured, MODEL_CALL_TIMEOUT));
+/**
+ * Phase 7 — Dynamic Key Race Timeout.
+ *
+ * The race timeout is adaptive per task type. Cheap tasks (CHAT) race faster
+ * to minimise user-facing latency. Expensive tasks (HEAVY_CODING, REASONING)
+ * allow more time so slower-but-accurate keys can catch up before we fall back.
+ *
+ * Values chosen based on observed P95 cold-start latencies per task type:
+ *   CHAT           → 2000ms  (fast response expected; give up quickly)
+ *   LIGHT_CODING   → 3500ms  (default: moderate latency)
+ *   HEAVY_CODING   → 5000ms  (complex tasks take longer; worth waiting)
+ *   REASONING      → 6000ms  (Gemma reasoning tasks need extra time)
+ *   OVERLOAD       → 3000ms  (recovery path: don't add too much extra wait)
+ *   default        → 3500ms
+ */
+function getFastPathRaceTimeoutMs(taskType?: string): number {
+  const envOverride = Number(process.env.FAST_PATH_RACE_TIMEOUT);
+  if (envOverride > 0) {
+    return Math.max(1000, Math.min(envOverride, MODEL_CALL_TIMEOUT));
+  }
+  const timeoutByTask: Record<string, number> = {
+    CHAT:          2000,
+    HEALTH_CHECK:  2000,
+    LIGHT_CODING:  3500,
+    WEB_SEARCH:    3500,
+    COMPACTION:    3500,
+    HEAVY_CODING:  5000,
+    REASONING:     6000,
+    OVERLOAD:      3000,
+  };
+  const ms = timeoutByTask[taskType ?? 'LIGHT_CODING'] ?? 3500;
+  return Math.max(1000, Math.min(ms, MODEL_CALL_TIMEOUT));
 }
 
 function getAttemptModelCallTimeoutMs(taskType: string | undefined, attempt: number): number {
@@ -281,7 +311,7 @@ export async function executeWithRetry(
         keyCount: KEY_RACE_COUNT,
         userId,
       }),
-      getFastPathRaceTimeoutMs(),
+      getFastPathRaceTimeoutMs(modelMap.taskType),
       'keyRace',
     ).catch(() => null);
     if (keyRaceResult?.response.ok) {
@@ -318,7 +348,7 @@ export async function executeWithRetry(
           return b;
         },
       }),
-      getFastPathRaceTimeoutMs(),
+      getFastPathRaceTimeoutMs(modelMap.taskType),
       'modelRace',
     ).catch(() => null);
     if (modelRaceResult?.response.ok) {
