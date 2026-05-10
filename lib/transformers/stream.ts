@@ -514,7 +514,15 @@ export async function* transformStream(
       yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
     }
 
-    const stopReason = sawToolUse ? 'tool_use' : mapStopReason(finalFinishReason || 'STOP');
+    // Determine stop reason.
+    // MAX_TOKENS overrides tool_use: the model was cut off mid-response, so
+    // emitting 'tool_use' would mislead Claude Code into thinking tool execution
+    // completed normally. Sending 'max_tokens' lets the client handle truncation.
+    const stopReason = finalFinishReason === 'MAX_TOKENS'
+      ? 'max_tokens'
+      : sawToolUse
+        ? 'tool_use'
+        : mapStopReason(finalFinishReason || 'STOP');
     yield `event: message_delta\ndata: ${JSON.stringify({
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },

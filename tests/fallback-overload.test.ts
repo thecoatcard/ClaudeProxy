@@ -56,7 +56,16 @@ describe('model fallback on overload', () => {
 
     tried.add('gemini-flash-latest');
     const m4 = getNextFallbackModel('gemini-2.5-flash', tried);
-    expect(m4).toBeNull();
+    // Gemma fallbacks are now in chain — chain not exhausted until they're tried
+    expect(m4).toBe('gemma-4-31b-it');
+
+    tried.add('gemma-4-31b-it');
+    const m5 = getNextFallbackModel('gemini-2.5-flash', tried);
+    expect(m5).toBe('gemma-4-26b-a4b-it');
+
+    tried.add('gemma-4-26b-a4b-it');
+    const m6 = getNextFallbackModel('gemini-2.5-flash', tried);
+    expect(m6).toBeNull();
   });
 
   test('recovery pipeline suggests a fallback model on overload', async () => {

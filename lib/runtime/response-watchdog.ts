@@ -7,8 +7,13 @@
 
 // ─── Timeout Constants ───────────────────────────────────────────────────────
 
-/** Hard timeout for a single Gemini model call (ms) */
-export const MODEL_CALL_TIMEOUT = Number(process.env.MODEL_CALL_TIMEOUT || 20_000);
+/** Hard timeout for a single Gemini model call (ms)
+ * Raised from 20 s → 55 s because multi-turn conversations with long
+ * context (tool results, extended histories) can take Gemini 20–50 s to
+ * begin streaming the second/third response. A 20 s limit caused spurious
+ * mid-task timeouts that looked like dropped streams from the client side.
+ */
+export const MODEL_CALL_TIMEOUT = Number(process.env.MODEL_CALL_TIMEOUT || 55_000);
 
 /** Hard timeout for context compaction (ms) */
 export const COMPACTOR_TIMEOUT = Number(process.env.COMPACTOR_TIMEOUT || 8_000);
@@ -26,7 +31,7 @@ export const FALLBACK_TIMEOUT = Number(process.env.FALLBACK_TIMEOUT || 5_000);
 export const REQUEST_TIMEOUT = Number(process.env.REQUEST_TIMEOUT || 2_700_000);
 
 /** If no progress for this many ms, trigger recovery */
-export const STALL_DETECTION_MS = Number(process.env.STALL_DETECTION_MS || 15_000);
+export const STALL_DETECTION_MS = Number(process.env.STALL_DETECTION_MS || 30_000);
 
 // ─── withTimeout ─────────────────────────────────────────────────────────────
 

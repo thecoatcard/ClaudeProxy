@@ -154,7 +154,7 @@ export async function POST(req: Request) {
 
           pingInterval = setInterval(() => {
             safeEnqueue(new TextEncoder().encode(`event: ping\ndata: {"type":"ping"}\n\n`));
-          }, 5000);
+          }, 2000); // 2 s — Gemini can take 20–50 s between turn responses; frequent pings prevent proxy/client timeouts
 
           try {
             for await (const chunk of transformIterator) {

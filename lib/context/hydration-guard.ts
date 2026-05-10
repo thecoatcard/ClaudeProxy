@@ -23,7 +23,8 @@ export type HydrationSkipReason =
   | 'HYDRATION_SKIPPED_CLEAR_RESET'
   | 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH'
   | 'HYDRATION_SKIPPED_SESSION_MISMATCH'
-  | 'HYDRATION_SKIPPED_LOW_CONTINUITY';
+  | 'HYDRATION_SKIPPED_LOW_CONTINUITY'
+  | 'HYDRATION_SKIPPED_FRESH_SESSION';
 
 export type HydrationApprovedReason = 'HYDRATION_APPROVED';
 
@@ -49,6 +50,16 @@ export interface HydrationContext {
    * Null when the stored state has no workspace_root.
    */
   storedWorkspaceRoot?: string | null;
+
+  /**
+   * True when the client explicitly provided a conversation_id / session_id
+   * in request metadata. False when the ID was derived from a content hash.
+   *
+   * Hash-derived IDs can collide across sessions in the same workspace, so
+   * single-message requests without an explicit ID are treated as fresh
+   * sessions and denied hydration.
+   */
+  hasExplicitConversationId?: boolean;
 }
 
 // ─── Trivial-greeting detection ───────────────────────────────────────────────
@@ -237,7 +248,7 @@ function workspacesMatch(
  *
  * Returns true → likely continuation, false → likely new/unrelated session.
  */
-function assessSemanticContinuity(messages: any[]): boolean {
+function assessSemanticContinuity(messages: any[], hasExplicitConversationId: boolean): boolean {
   // Find the latest user message.
   const latestUserMsg = [...messages].reverse().find(m => m?.role === 'user');
   if (!latestUserMsg) return false;
@@ -255,8 +266,19 @@ function assessSemanticContinuity(messages: any[]): boolean {
   // A short reply like "yes please" or "ok" in an active session is fine.
   if (messages.length > 1) return true;
 
-  // Single-message session: apply the trivial greeting check.
-  // "hi" / "hello" / "hey" alone on a fresh session → deny.
+  // ── Fresh single-message session guard ───────────────────────────────────
+  // When no explicit conversation_id was provided, the gateway derives the ID
+  // from a hash of the system prompt + first user message. This hash can
+  // collide with a previous session in the same workspace, causing old context
+  // to leak into a genuinely new conversation.
+  //
+  // A single-message request with no explicit ID and no continuation signal is
+  // definitively a fresh start. Block hydration even if the message content
+  // looks substantive (e.g. "analyse this codebase").
+  if (!hasExplicitConversationId) return false;
+
+  // Single-message session with an explicit ID: apply the trivial greeting check.
+  // "hi" / "hello" / "hey" alone → deny; anything else → allow.
   return !isTrivialGreeting(cleanText);
 }
 
@@ -281,9 +303,15 @@ export function evaluateHydration(ctx: HydrationContext): HydrationVerdict {
     return { allow: false, reason: 'HYDRATION_SKIPPED_WORKSPACE_MISMATCH' };
   }
 
-  // Gate 3: Semantic continuity (checks latest user message regardless of history length)
-  if (!assessSemanticContinuity(messages)) {
-    return { allow: false, reason: 'HYDRATION_SKIPPED_LOW_CONTINUITY' };
+  // Gate 3: Semantic continuity (checks latest user message regardless of history length).
+  // For single-message sessions with no explicit conversation ID (hash-derived),
+  // this gate also blocks hydration to prevent stale-context leakage.
+  const isExplicit = ctx.hasExplicitConversationId ?? false;
+  if (!assessSemanticContinuity(messages, isExplicit)) {
+    const reason = (!isExplicit && messages.length === 1)
+      ? 'HYDRATION_SKIPPED_FRESH_SESSION'
+      : 'HYDRATION_SKIPPED_LOW_CONTINUITY';
+    return { allow: false, reason };
   }
 
   return { allow: true, reason: 'HYDRATION_APPROVED' };

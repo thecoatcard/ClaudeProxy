@@ -58,8 +58,8 @@ describe('RequestWatchdog', () => {
 });
 
 describe('Timeout constants', () => {
-  test('MODEL_CALL_TIMEOUT defaults to 20s', () => {
-    expect(MODEL_CALL_TIMEOUT).toBe(20_000);
+  test('MODEL_CALL_TIMEOUT defaults to 55s (raised from 20s to cover long Gemini pre-generation phases)', () => {
+    expect(MODEL_CALL_TIMEOUT).toBe(55_000);
   });
 
   test('COMPACTOR_TIMEOUT defaults to 8s', () => {

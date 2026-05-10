@@ -123,6 +123,9 @@ describe('getNextFallbackModel', () => {
       'gemini-3-flash-preview',
       'gemini-3.1-flash-lite-preview',
       'gemini-flash-latest',
+      // Gemma fallbacks added in chain — must include them all to get null
+      'gemma-4-31b-it',
+      'gemma-4-26b-a4b-it',
     ]);
     const next = getNextFallbackModel('gemini-2.5-flash', tried);
     expect(next).toBeNull();
@@ -225,13 +228,16 @@ describe('recoverFromOverload', () => {
     const result = await recoverFromOverload({
       currentModel: 'gemini-2.5-flash',
       currentKeyId: 'k1',
+      // Include all 6 chain members (4 Gemini + 2 Gemma) to exhaust the chain
       triedModels: new Set([
         'gemini-2.5-flash',
         'gemini-3-flash-preview',
         'gemini-3.1-flash-lite-preview',
         'gemini-flash-latest',
+        'gemma-4-31b-it',
+        'gemma-4-26b-a4b-it',
       ]),
-      attempt: 4,
+      attempt: 6,
       body: { contents: [] },
     });
     expect(result.newModel).toBeNull();

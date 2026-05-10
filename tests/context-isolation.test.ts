@@ -98,13 +98,14 @@ describe('context-isolation', () => {
 
   // ─── Test 4: "hi" alone → blocks hydration ────────────────────────────────
 
-  test('4. trivial greeting "hi" → blocks hydration (low continuity)', () => {
+  test('4. trivial greeting "hi" → blocks hydration (fresh session — no explicit ID)', () => {
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('hi')],
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_LOW_CONTINUITY');
+    // Single-message without explicit conversation_id → FRESH_SESSION (blocks before continuity check)
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
   });
 
   test('4b. trivial greeting "hello" → blocks hydration', () => {
@@ -113,7 +114,7 @@ describe('context-isolation', () => {
       messages: [userMsg('hello')],
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_LOW_CONTINUITY');
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
   });
 
   // ─── Test 5: "continue" → hydrates ───────────────────────────────────────
@@ -138,14 +139,15 @@ describe('context-isolation', () => {
 
   // ─── Test 6: Unrelated task → blocks hydration ───────────────────────────
 
-  test('6. unrelated new task without context → blocks hydration', () => {
+  test('6. unrelated new task without context → blocks hydration (fresh session)', () => {
     // A single brand-new short message that isn't a continuation
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('hey')],
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_LOW_CONTINUITY');
+    // Single-message without explicit conversation_id → fresh session gate fires
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
   });
 
   // ─── Test 7: Established session with markers → uses lighter gate ─────────
@@ -338,8 +340,9 @@ describe('context-isolation', () => {
     expect(verdict.reason).toBe('HYDRATION_APPROVED');
   });
 
-  test('13c. "hi" alone (no workspace info) with NO stored workspace → blocks by low continuity', () => {
-    // No workspace info anywhere, but "hi" is a trivial greeting → low continuity
+  test('13c. "hi" alone (no workspace info) with NO stored workspace → blocks by fresh session gate', () => {
+    // No workspace info anywhere, single message, no explicit conversation ID
+    // → FRESH_SESSION (hash-derived ID may collide; safer to block)
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('hi')],
@@ -347,7 +350,7 @@ describe('context-isolation', () => {
       storedWorkspaceRoot: null,
     });
     expect(verdict.allow).toBe(false);
-    expect(verdict.reason).toBe('HYDRATION_SKIPPED_LOW_CONTINUITY');
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
   });
 
   // ─── Test 14: Subdirectory — strict isolation blocks it ──────────────────
@@ -356,7 +359,7 @@ describe('context-isolation', () => {
 
   test('14. subdirectory of stored workspace → blocked (strict isolation)', () => {
     // stored: /home/user/myrepo, current: /home/user/myrepo/packages/api
-    // Different workspace roots \u2192 must block.
+    // Different workspace roots → must block.
     const verdict = evaluateHydration({
       ...BASE_CTX,
       messages: [userMsg('continue working on the API')],
@@ -366,4 +369,62 @@ describe('context-isolation', () => {
     expect(verdict.allow).toBe(false);
     expect(verdict.reason).toBe('HYDRATION_SKIPPED_WORKSPACE_MISMATCH');
   });
+
+  // ─── Test 15: Fresh-session gate — the core "new session leaks old data" fix ──
+  // A new Claude Code window types "analyse this codebase" in the same workspace.
+  // Without an explicit conversation_id the hash may collide with a previous
+  // session → gateway must block hydration even though the message is substantive.
+
+  test('15. substantive single-message in same workspace without explicit ID → blocked (fresh session)', () => {
+    const verdict = evaluateHydration({
+      ...BASE_CTX,
+      messages: [claudeCodeMsg('analyse this codebase and find all security issues', '/home/user/myproject')],
+      currentWorkspaceRoot: '/home/user/myproject',
+      storedWorkspaceRoot:  '/home/user/myproject',
+      // hasExplicitConversationId defaults to undefined → falsy → fresh-session gate fires
+    });
+    expect(verdict.allow).toBe(false);
+    expect(verdict.reason).toBe('HYDRATION_SKIPPED_FRESH_SESSION');
+  });
+
+  test('15b. same single-message WITH explicit conversation_id → allowed (API user continuity)', () => {
+    const verdict = evaluateHydration({
+      ...BASE_CTX,
+      messages: [claudeCodeMsg('analyse this codebase and find all security issues', '/home/user/myproject')],
+      currentWorkspaceRoot: '/home/user/myproject',
+      storedWorkspaceRoot:  '/home/user/myproject',
+      hasExplicitConversationId: true,   // client provided its own ID → continuity allowed
+    });
+    expect(verdict.allow).toBe(true);
+    expect(verdict.reason).toBe('HYDRATION_APPROVED');
+  });
+
+  test('15c. "continue the task" (continuation signal) single-message without explicit ID → allowed', () => {
+    // Continuation signal overrides the fresh-session gate
+    const verdict = evaluateHydration({
+      ...BASE_CTX,
+      messages: [userMsg('continue the task from before')],
+      currentWorkspaceRoot: '/home/user/myproject',
+      storedWorkspaceRoot:  '/home/user/myproject',
+    });
+    expect(verdict.allow).toBe(true);
+    expect(verdict.reason).toBe('HYDRATION_APPROVED');
+  });
+
+  test('15d. multi-turn session without explicit ID in same workspace → allowed', () => {
+    // Multi-turn sessions are proven continuations regardless of explicit ID
+    const verdict = evaluateHydration({
+      ...BASE_CTX,
+      messages: [
+        claudeCodeMsg('build a REST API', '/home/user/myproject'),
+        assistantMsg('Starting...'),
+        claudeCodeMsg('add authentication', '/home/user/myproject'),
+      ],
+      currentWorkspaceRoot: '/home/user/myproject',
+      storedWorkspaceRoot:  '/home/user/myproject',
+    });
+    expect(verdict.allow).toBe(true);
+    expect(verdict.reason).toBe('HYDRATION_APPROVED');
+  });
 });
+

@@ -177,6 +177,15 @@ export async function transformRequestToGemini(
   // Derive session key once — used by compaction, rolling summary AND tool archive.
   const summaryKey = deriveSummaryKey(anthropicReq, userId);
   const conversationId = deriveConversationId(anthropicReq, userId);
+  // True when the client supplied an explicit ID (metadata, session_id, thread_id).
+  // Hash-derived IDs can collide across sessions in the same workspace, so
+  // single-message requests without an explicit ID are treated as fresh sessions.
+  const hasExplicitConversationId = !!(
+    anthropicReq?.metadata?.conversation_id ||
+    anthropicReq?.conversation_id ||
+    anthropicReq?.session_id ||
+    anthropicReq?.thread_id
+  );
   const requestContext: GatewayRequestContext = { conversationId, summaryKey };
   const baseKeepLastN = Number(process.env.CONTEXT_COMPACTION_KEEP_LAST || 20);
   const compactionPolicy = getAdaptiveCompactionPolicy(
@@ -231,10 +240,31 @@ export async function transformRequestToGemini(
       conversationId,
       currentWorkspaceRoot,
       storedWorkspaceRoot,
+      hasExplicitConversationId,
     };
     const hydrationVerdict: HydrationVerdict = hasEstablishedMarkers
       ? evaluateHydrationForEstablishedSession(hydrationCtx)
       : evaluateHydration(hydrationCtx);
+
+    // When a fresh session is detected (hash-derived ID, single-message, no
+    // continuation signal) proactively delete any stale Redis keys that share
+    // this conversationId so the next compaction starts with a clean slate.
+    if (
+      hydrationVerdict.reason === 'HYDRATION_SKIPPED_FRESH_SESSION' ||
+      (hydrationVerdict.reason === 'HYDRATION_SKIPPED_CLEAR_RESET' && anthropicReq.messages.length <= 2)
+    ) {
+      const staleKeys = [
+        summaryKey,
+        operationalStateKey(conversationId),
+        `context:emergency:${conversationId}`,
+        `context:workspace:${conversationId}`,
+      ];
+      redis.del(...staleKeys).catch(() => {});
+      logInfo('RETRIEVAL', 'Stale session keys deleted', {
+        requestId,
+        metadata: { conversationId, deletedKeys: staleKeys.length, reason: hydrationVerdict.reason },
+      });
+    }
 
     logInfo('RETRIEVAL', `Hydration verdict: ${hydrationVerdict.reason}`, {
       requestId,
