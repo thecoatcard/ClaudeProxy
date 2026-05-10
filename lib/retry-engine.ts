@@ -261,6 +261,8 @@ export async function executeWithRetry(
   // exhausted we break early instead of burning remaining retries on models
   // that are confirmed overloaded. This cuts worst-case latency from ~25s to ~8s.
   const overloadedModels = new Set<string>();
+  let overloadEvents = 0;
+  const MAX_OVERLOAD_EVENTS = Math.max(4, Math.min(RECOVERY_CHAIN_SIZE + 1, 8));
   // When Gemini returns 400 "max tokens exceeded", we reduce maxOutputTokens
   // for all subsequent attempts. Null = use the value already in geminiBody.
   let maxOutputTokensOverride: number | null = null;
@@ -731,6 +733,7 @@ export async function executeWithRetry(
       }
 
       if (err.status === 503 && attempt < maxRetries) {
+        overloadEvents++;
         overloadedModels.add(currentInternalModel);
         if (fallbackIndex < fallbacks.length) {
           const prev = currentInternalModel;
@@ -745,11 +748,16 @@ export async function executeWithRetry(
           const budgetRemaining503 = REQUEST_TIMEOUT - requestTimer.elapsed();
           const backoff503 = budgetRemaining503 < 10_000 ? 0 : computeOverloadBackoff(attempt);
           if (backoff503 > 0) await sleep(backoff503);
+          if (overloadEvents >= MAX_OVERLOAD_EVENTS) {
+            logError('OVERLOAD', `Overload circuit breaker tripped (${overloadEvents} events) — failing fast`);
+            throw err;
+          }
           continue;
         }
       }
 
       if (classifyOverload({ status: err.status, message: err.message }) && attempt < maxRetries) {
+        overloadEvents++;
         // Track this model as overloaded so recovery doesn't return it again
         overloadedModels.add(currentInternalModel);
         await maybeEmergencyCompact({ status: err.status ?? 529, message: err.message ?? 'overloaded_error' }, attempt);
@@ -780,6 +788,10 @@ export async function executeWithRetry(
           const budgetRemainingOverload = REQUEST_TIMEOUT - requestTimer.elapsed();
           const backoffOverload = budgetRemainingOverload < 10_000 ? 0 : recovery.backoffMs;
           if (backoffOverload > 0) await sleep(backoffOverload);
+          if (overloadEvents >= MAX_OVERLOAD_EVENTS) {
+            logError('OVERLOAD', `Overload circuit breaker tripped (${overloadEvents} events) — failing fast`);
+            throw err;
+          }
           continue;
         }
         throw err; // recovery exhausted — rethrow
@@ -798,6 +810,7 @@ export async function executeWithRetry(
       }
 
       if (err.name === 'AbortError' || err.message?.includes('Timeout:')) {
+        overloadEvents++;
         await reportKeyFailure(keyObj.id, 'server');
         overloadedModels.add(currentInternalModel);
         await maybeEmergencyCompact({ status: 504, message: err.message ?? 'capacity_error timeout' }, attempt);
@@ -835,6 +848,10 @@ export async function executeWithRetry(
         const budgetRemainingTimeout = REQUEST_TIMEOUT - requestTimer.elapsed();
         const backoffTimeout = budgetRemainingTimeout < 10_000 ? 0 : (recovery.backoffMs || computeOverloadBackoff(attempt));
         if (backoffTimeout > 0) await sleep(backoffTimeout);
+        if (overloadEvents >= MAX_OVERLOAD_EVENTS) {
+          logError('OVERLOAD', `Overload circuit breaker tripped (${overloadEvents} events) — failing fast`);
+          throw err;
+        }
         continue;
       }
       throw err;

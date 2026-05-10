@@ -1,5 +1,42 @@
 # Test Results
 
+**Date:** JS/HTML tool reliability hardening (phases 1–8)  
+**Run:** Full Jest suite after reliability hardening
+
+---
+
+## JS/HTML Tool Reliability — Final Results
+
+| Metric | Before Session | After Session | Delta |
+|---|---|---|---|
+| Test suites | 78 | 83 | +5 |
+| Tests | 929 | 944 | +15 |
+| Failures | 0 | 0 | 0 |
+| TypeScript errors | 0 | 0 | 0 |
+
+### New Test Files Added
+
+| File | Tests | Phases |
+|---|---|---|
+| `tests/js-edit-reliability.test.ts` | 3 | Phase 1, 3 |
+| `tests/html-edit-reliability.test.ts` | 3 | Phase 1, 8 |
+| `tests/windows-shell-fallback.test.ts` | 3 | Phase 4 |
+| `tests/empty-agent-result.test.ts` | 2 | Phase 5 |
+| `tests/snapshot-freshness.test.ts` | 4 | Phase 2 |
+
+### Validation Commands
+
+- `npx tsc --noEmit`
+- `npx jest --passWithNoTests --no-coverage`
+
+### Full Run Result
+
+- Test Suites: **83 passed / 83 total**
+- Tests: **944 passed / 944 total**
+- TypeScript: **0 errors**
+
+---
+
 **Date:** Tool behavior hardening — 10-phase Claude Code-like tool flow  
 **Run:** Full Jest suite after tool behavior hardening
 

@@ -146,4 +146,41 @@ describe('emergency compactor', () => {
     expect(serialized).toContain('latest failure: overloaded_error on gemini-2.5-flash');
     expect(serialized).toContain('update retry-engine and tests');
   });
+
+  test('concurrent overload compactions on same conversation are deterministic', async () => {
+    const store = createStore();
+    const body = makeGeminiBody(20);
+
+    const summarizeMiddle = async (_contents: any[], compactionCount: number) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return [
+        '[EMERGENCY COMPACTED CONTEXT]',
+        `Goal: compaction-${compactionCount}`,
+        'LatestTurns: keep latest',
+        'ActiveTaskChain: continue',
+        'PendingTasks: pending',
+        'ToolState: active',
+        'Artifacts: src/app.ts',
+        'Failures: overload',
+        'OperationalMemory: keep continuity',
+        '[/EMERGENCY COMPACTED CONTEXT]',
+      ].join('\n');
+    };
+
+    const [r1, r2] = await Promise.all([
+      performEmergencyCompaction(
+        body,
+        { conversationId: 'conv-lock', summaryKey: 'summary-lock' },
+        { store, summarizeMiddle },
+      ),
+      performEmergencyCompaction(
+        body,
+        { conversationId: 'conv-lock', summaryKey: 'summary-lock' },
+        { store, summarizeMiddle },
+      ),
+    ]);
+
+    const counts = [r1.compactionCount, r2.compactionCount].sort((a, b) => a - b);
+    expect(counts).toEqual([1, 2]);
+  });
 });

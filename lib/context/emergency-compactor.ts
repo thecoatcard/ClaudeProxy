@@ -4,12 +4,35 @@ import { logInfo, logWarn } from '../logging/event-logger';
 import { redis } from '../redis';
 
 const EMERGENCY_COMPACTOR_MODEL = 'gemma-4-31b-it';
+const OVERLOAD_FANOUT_MODEL = 'gemini-2.5-flash-lite';
+const OVERLOAD_FANOUT_CHUNKS = 10;
 const EMERGENCY_STATE_TTL_SECONDS = Number(process.env.EMERGENCY_COMPACTION_TTL_SECONDS || 21600);
 const MAX_EMERGENCY_COMPACTIONS = 2;
 const SUMMARY_MAX_OUTPUT_TOKENS = 900;
 const SUMMARY_INPUT_CHAR_BUDGET = Number(process.env.EMERGENCY_COMPACTION_INPUT_CHARS || 24000);
+const EMERGENCY_SUMMARY_CHUNK_SIZE = Number(process.env.EMERGENCY_SUMMARY_CHUNK_SIZE || 18);
 const SUMMARY_BLOCK_HEADER = '[EMERGENCY COMPACTED CONTEXT]';
 const SUMMARY_BLOCK_FOOTER = '[/EMERGENCY COMPACTED CONTEXT]';
+
+const compactionQueueByConversation = new Map<string, Promise<void>>();
+
+async function withConversationCompactionLock<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
+  const prev = compactionQueueByConversation.get(conversationId) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const chain = prev.then(() => gate);
+  compactionQueueByConversation.set(conversationId, chain);
+  await prev;
+  try {
+    return await work();
+  } finally {
+    release();
+    const current = compactionQueueByConversation.get(conversationId);
+    if (current === chain || !current) {
+      compactionQueueByConversation.delete(conversationId);
+    }
+  }
+}
 
 export interface EmergencyCompactionRequestContext {
   conversationId?: string;
@@ -149,7 +172,12 @@ function buildFallbackSummary(middleContents: any[], compactionCount: number): s
   ].join('\n');
 }
 
-async function summarizeWithGemma(middleContents: any[], compactionCount: number, userId?: string): Promise<string | null> {
+async function summarizeWithModel(
+  middleContents: any[],
+  compactionCount: number,
+  userId?: string,
+  model: string = EMERGENCY_COMPACTOR_MODEL,
+): Promise<string | null> {
   const transcript = contentsToTranscript(middleContents);
   if (!transcript.trim()) return null;
 
@@ -169,7 +197,7 @@ async function summarizeWithGemma(middleContents: any[], compactionCount: number
   };
 
   try {
-    const response = await callGemini(EMERGENCY_COMPACTOR_MODEL, keyObj.key, body, false);
+    const response = await callGemini(model, keyObj.key, body, false);
     if (!response.ok) return null;
     const payload = await response.json().catch(() => null);
     const parts = payload?.candidates?.[0]?.content?.parts ?? [];
@@ -178,6 +206,86 @@ async function summarizeWithGemma(middleContents: any[], compactionCount: number
   } catch {
     return null;
   }
+}
+
+function chunkContents(contents: any[], chunkSize: number): any[][] {
+  const chunks: any[][] = [];
+  for (let i = 0; i < contents.length; i += chunkSize) {
+    chunks.push(contents.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+async function summarizeChunkedWithGemma(
+  middleContents: any[],
+  compactionCount: number,
+  userId?: string,
+): Promise<string | null> {
+  if (!middleContents.length) return null;
+  const chunkSize = Math.max(8, EMERGENCY_SUMMARY_CHUNK_SIZE);
+  if (middleContents.length <= chunkSize) {
+    return summarizeWithModel(middleContents, compactionCount, userId, EMERGENCY_COMPACTOR_MODEL);
+  }
+
+  const chunks = chunkContents(middleContents, chunkSize);
+  const chunkSummaries: string[] = [];
+
+  for (const chunk of chunks) {
+    const summary = await summarizeWithModel(chunk, compactionCount, userId, EMERGENCY_COMPACTOR_MODEL);
+    if (summary && summary.trim()) {
+      chunkSummaries.push(summary.trim());
+    }
+  }
+
+  if (chunkSummaries.length === 0) return null;
+  if (chunkSummaries.length === 1) return chunkSummaries[0];
+
+  const mergeContents = chunkSummaries.map((summary, i) => ({
+    role: 'user',
+    parts: [{ text: `[Chunk ${i + 1}]\n${summary}` }],
+  }));
+
+  const merged = await summarizeWithModel(mergeContents, compactionCount, userId, EMERGENCY_COMPACTOR_MODEL);
+  if (merged && merged.trim()) return merged.trim();
+
+  return [
+    SUMMARY_BLOCK_HEADER,
+    'Goal: Continue from chunked emergency compaction.',
+    ...chunkSummaries.map((s, i) => `Chunk${i + 1}: ${clip(s, 800)}`),
+    SUMMARY_BLOCK_FOOTER,
+  ].join('\n');
+}
+
+async function summarizeChunkedWithLiteFanout(
+  middleContents: any[],
+  compactionCount: number,
+  userId?: string,
+): Promise<string | null> {
+  if (!middleContents.length) return null;
+
+  const chunkSize = Math.max(1, Math.ceil(middleContents.length / OVERLOAD_FANOUT_CHUNKS));
+  const chunks = chunkContents(middleContents, chunkSize).slice(0, OVERLOAD_FANOUT_CHUNKS);
+  const summaries = await Promise.all(
+    chunks.map((chunk) => summarizeWithModel(chunk, compactionCount, userId, OVERLOAD_FANOUT_MODEL)),
+  );
+  const chunkSummaries = summaries.filter((s): s is string => !!s && s.trim().length > 0);
+
+  if (chunkSummaries.length === 0) return null;
+  if (chunkSummaries.length === 1) return chunkSummaries[0];
+
+  const mergeContents = chunkSummaries.map((summary, i) => ({
+    role: 'user',
+    parts: [{ text: `[LiteChunk ${i + 1}]\n${summary}` }],
+  }));
+  const merged = await summarizeWithModel(mergeContents, compactionCount, userId, OVERLOAD_FANOUT_MODEL);
+  if (merged && merged.trim()) return merged.trim();
+
+  return [
+    SUMMARY_BLOCK_HEADER,
+    'Goal: Continue from overload fan-out compaction.',
+    ...chunkSummaries.map((s, i) => `Chunk${i + 1}: ${clip(s, 800)}`),
+    SUMMARY_BLOCK_FOOTER,
+  ].join('\n');
 }
 
 function mergeAdjacentContents(contents: any[]): any[] {
@@ -261,6 +369,7 @@ export async function performEmergencyCompaction(
   context: EmergencyCompactionRequestContext,
   dependencies: EmergencyCompactionDependencies = {},
 ): Promise<EmergencyCompactionResult> {
+  const run = async (): Promise<EmergencyCompactionResult> => {
   const store = dependencies.store || redisStore;
   const currentState = await loadEmergencyCompactionState(context.conversationId, store);
   const currentCount = currentState?.compactionCount ?? 0;
@@ -327,7 +436,14 @@ export async function performEmergencyCompaction(
 
   const summarizeMiddle = dependencies.summarizeMiddle
     ? dependencies.summarizeMiddle
-    : (contents: any[], compactionCount: number) => summarizeWithGemma(contents, compactionCount, context.userId);
+    : async (contents: any[], compactionCount: number) => {
+      // Primary overload strategy: split roughly 90% middle turns into 10 fan-out chunks,
+      // summarize on gemini-2.5-flash-lite using active key pool, merge, then continue.
+      const fanout = await summarizeChunkedWithLiteFanout(contents, compactionCount, context.userId);
+      if (fanout) return fanout;
+      // Fallback strategy: Gemma compaction if fan-out path fails.
+      return summarizeChunkedWithGemma(contents, compactionCount, context.userId);
+    };
 
   let summary = await summarizeMiddle(middleContents, nextCount);
   if (!summary || !summary.includes(SUMMARY_BLOCK_HEADER)) {
@@ -391,4 +507,10 @@ export async function performEmergencyCompaction(
     reducedChars,
     summary,
   };
+  };
+
+  if (context.conversationId) {
+    return withConversationCompactionLock(context.conversationId, run);
+  }
+  return run();
 }

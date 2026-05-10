@@ -30,6 +30,11 @@ import {
   classifyEditFailure,
 } from '../tools/edit-failure-classifier';
 import { buildEditRecoveryGuidance, checkPatchGranularity, LARGE_PATCH_THRESHOLD } from '../tools/edit-recovery';
+import {
+  buildFreshSnapshotGuidance,
+  buildStructureAwarePatchGuidance,
+  hashFileSnapshot,
+} from '../tools/structure-aware-patch';
 
 const ERROR_TEXT_PATTERNS = [
   /no such file or directory/i,
@@ -275,6 +280,7 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
     failed: boolean;
     errorText: string;
     inputOldStringLength: number;    // for patch granularity check
+    failureType: string;
   }
 
   const byId = new Map<string, ToolCall>();
@@ -299,6 +305,7 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
           failed: false,
           errorText: '',
           inputOldStringLength: typeof oldStr === 'string' ? oldStr.length : 0,
+          failureType: 'UNKNOWN',
         });
         order.push(block.id);
       }
@@ -310,6 +317,9 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
         const { text } = extractToolResultText(block.content);
         call.failed = block.is_error === true || looksLikeError(text);
         call.errorText = text.slice(0, 400);
+        if (call.failed) {
+          call.failureType = classifyEditFailure(text).type;
+        }
       }
     }
   }
@@ -361,11 +371,14 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
       call.inputOldStringLength,
     );
     const granularityHint = checkPatchGranularity(call.inputOldStringLength);
+    const snapshotHash = call.errorText ? hashFileSnapshot(call.errorText) : null;
 
     const guidanceLines = [
       '---',
       `[TOOL_LOOP_STAGNATION] Read→Edit loop detected: \`${call.name}\` on \`${call.rawFilePath ?? 'unknown'}\` failed ${count}× after re-reads.`,
       `• Failure type: ${classification.type} — ${classification.recoveryHint}`,
+      buildStructureAwarePatchGuidance(call.rawFilePath, classification.type),
+      buildFreshSnapshotGuidance(call.rawFilePath, snapshotHash),
     ];
     if (granularityHint) guidanceLines.push(granularityHint);
     guidanceLines.push(recovery.guidance.replace(/^---\n/, '').replace(/\n---$/, ''));
@@ -389,6 +402,7 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
   // Consecutive edit failures on the same file, even without re-reads.
   let runFile: string | null = null;
   let runTool: ToolCall | null = null;
+  let runFailureType: string | null = null;
   let runCount = 0;
 
   for (let i = calls.length - 1; i >= 0; i--) {
@@ -397,8 +411,14 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
     if (runFile === null) {
       runFile = c.filePath;
       runTool = c;
+      runFailureType = c.failureType;
       runCount = 1;
-    } else if (c.filePath === runFile) {
+    } else if (
+      c.filePath === runFile &&
+      runTool &&
+      c.name === runTool.name &&
+      c.failureType === runFailureType
+    ) {
       runCount++;
     } else {
       break;
@@ -407,6 +427,7 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
 
   if (runCount >= 2 && runTool) {
     const classification = classifyEditFailure(runTool.errorText);
+    const snapshotHash = runTool.errorText ? hashFileSnapshot(runTool.errorText) : null;
     const recovery = buildEditRecoveryGuidance(
       runCount,
       classification.type,
@@ -421,6 +442,8 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
         '---',
         `[TOOL_LOOP_STAGNATION] \`${runTool.name}\` failed ${runCount}× consecutively on \`${runTool.rawFilePath ?? 'unknown'}\`.`,
         `• Failure type: ${classification.type} — ${classification.recoveryHint}`,
+        buildStructureAwarePatchGuidance(runTool.rawFilePath, classification.type),
+        buildFreshSnapshotGuidance(runTool.rawFilePath, snapshotHash),
         recovery.guidance.replace(/^---\n/, '').replace(/\n---$/, ''),
         '---',
       ].join('\n'),

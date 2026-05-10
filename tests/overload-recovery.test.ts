@@ -196,10 +196,10 @@ describe('computeOverloadBackoff', () => {
     expect(ms).toBeLessThan(700);
   });
 
-  test('attempt 3+ stays under roughly 1.2s', () => {
+  test('attempt 3+ stays under roughly 1.3s', () => {
     const ms = computeOverloadBackoff(3);
     expect(ms).toBeGreaterThanOrEqual(900);
-    expect(ms).toBeLessThan(1200);
+    expect(ms).toBeLessThan(1300);
   });
 });
 

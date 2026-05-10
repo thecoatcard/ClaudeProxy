@@ -20,7 +20,27 @@ export interface ToolFailureRecord {
   updatedAt: number;
 }
 
+export interface FileSnapshotRecord {
+  filePath: string;
+  contentHash: string;
+  size: number;
+  updatedAt: number;
+}
+
 const TTL_SECS = 3600;
+
+function normalizeContent(content: string): string {
+  return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function makeSnapshotKey(sessionKey: string, filePath: string): string {
+  const sig = stableHash(`snapshot:${filePath}`);
+  return `tool:snapshot:${sessionKey}:${sig}`;
+}
+
+function hashSnapshot(content: string): string {
+  return stableHash(normalizeContent(content));
+}
 
 function makeKey(sessionKey: string, toolName: string, filePath: string | null): string {
   const sig = stableHash(`${toolName}:${filePath ?? '__no_file__'}`);
@@ -125,4 +145,57 @@ export async function clearToolFailures(
   } catch {
     // noncritical
   }
+}
+
+/**
+ * Record a fresh file snapshot hash after a successful read/view tool call.
+ */
+export async function recordFileSnapshot(
+  sessionKey: string,
+  filePath: string,
+  content: string,
+): Promise<FileSnapshotRecord | null> {
+  try {
+    const normalizedPath = filePath.trim();
+    const normalizedContent = normalizeContent(content);
+    const record: FileSnapshotRecord = {
+      filePath: normalizedPath,
+      contentHash: hashSnapshot(normalizedContent),
+      size: normalizedContent.length,
+      updatedAt: Date.now(),
+    };
+    await redis.set(makeSnapshotKey(sessionKey, normalizedPath), JSON.stringify(record), { ex: TTL_SECS });
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get the latest recorded snapshot hash for a file.
+ */
+export async function getFileSnapshot(
+  sessionKey: string,
+  filePath: string,
+): Promise<FileSnapshotRecord | null> {
+  try {
+    const raw = await redis.get(makeSnapshotKey(sessionKey, filePath.trim()));
+    if (!raw) return null;
+    return JSON.parse(raw) as FileSnapshotRecord;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A snapshot is fresh when it exists and is not older than maxAgeMs.
+ */
+export async function isSnapshotFresh(
+  sessionKey: string,
+  filePath: string,
+  maxAgeMs = 120_000,
+): Promise<boolean> {
+  const snap = await getFileSnapshot(sessionKey, filePath);
+  if (!snap) return false;
+  return Date.now() - snap.updatedAt <= maxAgeMs;
 }

@@ -15,6 +15,7 @@ import { transformRequestToGemini } from './request';
 import { executeWithRetry } from '../retry-engine';
 import type { ModelRoute } from '../model-router';
 import { incrementErrorCount } from '../metrics';
+import { performEmergencyCompaction } from '../context/emergency-compactor';
 
 export async function* transformStream(
   anthropicBody: any,
@@ -141,29 +142,88 @@ export async function* transformStream(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    let res: Response;
+    let res: Response | null = null;
     try {
       res = await executeWithRetry(reqModel, geminiReq, true, token, routePlan, requestId, requestContext);
     } catch (e: any) {
       console.error("Gemini request failed before stream start", e);
       const msg = e.message || e.data?.error?.message || "Failed to connect to Gemini";
+      const isOverload = /overload|overloaded|529|resource_exhausted|capacity/i.test(String(msg));
+      if (isOverload) {
+        // Keep connection active: compact + retry once before returning fallback text.
+        try {
+          const compacted = await performEmergencyCompaction(geminiReq, {
+            ...requestContext,
+            requestId,
+            userId: token,
+          });
+          if (compacted.compacted) {
+            const retried = await executeWithRetry(reqModel, compacted.body, true, token, routePlan, requestId, requestContext);
+            if (retried.ok) {
+              res = retried;
+            }
+          }
+        } catch (retryErr) {
+          console.warn('[stream] overload retry after emergency compaction failed', retryErr);
+        }
+      }
+
+      if (!res) {
+        if (isOverload) {
+          const overloadText =
+            'I am experiencing temporary model capacity pressure. I compacted context and attempted fallback models, but capacity is still limited. Please retry this request in a moment.';
+          yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`;
+          yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: overloadText } })}\n\n`;
+          yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`;
+          yield `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: Math.ceil(overloadText.length / 4) } })}\n\n`;
+          yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+          return;
+        }
+        const overloadText =
+          msg;
+        yield `event: error\ndata: ${JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: overloadText }
+        })}\n\n`;
+        // Always close the SSE protocol frame to prevent client-side hangs.
+        yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+        return;
+      }
+    }
+
+    if (!res) {
       yield `event: error\ndata: ${JSON.stringify({
         type: "error",
-        error: { type: "api_error", message: msg }
+        error: { type: "api_error", message: "No response from model" }
       })}\n\n`;
+      yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
       return;
     }
 
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
       console.error("Gemini error response:", errBody);
+      const errMsg = errBody?.error?.message || `Gemini error (status ${res.status})`;
+      const isOverload = res.status === 529 || res.status === 503 || /overload|overloaded|resource_exhausted|capacity/i.test(String(errMsg));
+      if (isOverload) {
+        const overloadText =
+          'I am experiencing temporary model capacity pressure. I compacted context and attempted fallback models, but capacity is still limited. Please retry this request in a moment.';
+        yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`;
+        yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: overloadText } })}\n\n`;
+        yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`;
+        yield `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: Math.ceil(overloadText.length / 4) } })}\n\n`;
+        yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+        return;
+      }
       yield `event: error\ndata: ${JSON.stringify({
         type: "error",
         error: { 
           type: "api_error", 
-          message: errBody?.error?.message || `Gemini error (status ${res.status})` 
+          message: errMsg 
         }
       })}\n\n`;
+      // Always close the SSE protocol frame to prevent client-side hangs.
+      yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
       return;
     }
 

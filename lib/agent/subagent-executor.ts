@@ -155,6 +155,21 @@ export interface SubagentExecutionResult {
   error?: string;
 }
 
+function isEmptySubagentResult(data: any, output: string, outputTokens: number): boolean {
+  const trimmed = (output || '').trim();
+  if (trimmed.length > 0) return false;
+  if (outputTokens > 0) return false;
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return true;
+  const hasSignal = parts.some((p: any) => {
+    if (!p || typeof p !== 'object') return false;
+    if (typeof p.text === 'string' && p.text.trim().length > 0) return true;
+    if (p.functionCall) return true;
+    return false;
+  });
+  return !hasSignal;
+}
+
 // ---------------------------------------------------------------------------
 // Core executor
 // ---------------------------------------------------------------------------
@@ -198,6 +213,12 @@ export async function executeSubagent(
       const inputTokens = data?.usageMetadata?.promptTokenCount ?? 0;
       const outputTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
       const latencyMs = Date.now() - startTime;
+
+      // Phase 5 — Empty agent result detection.
+      // 0-token/empty payload is treated as failure so we can fallback/retry.
+      if (isEmptySubagentResult(data, output, outputTokens)) {
+        throw new Error('EMPTY_SUBAGENT_RESULT');
+      }
 
       await updateSubagentStatus(task.id, 'COMPLETED', []).catch(() => {});
 

@@ -26,6 +26,12 @@ import { detectInteractiveCommandsInHistory, buildInteractiveCommandGuidance } f
 import { detectContradiction } from './contradiction-detector';
 import { checkInstallCompatibility } from './dependency-compatibility';
 import { classifyAndRecover, requiresWebSearch } from './web-recovery';
+import {
+  buildPlatformShellGuidance,
+  buildPythonPatchValidationGuidance,
+  detectPlatformShellPatchRisks,
+  detectPythonPatchValidationRisks,
+} from './tool-reliability-guard';
 
 export interface BehaviorAuditResult {
   hasGuidance: boolean;
@@ -47,6 +53,8 @@ export interface BehaviorAuditResult {
     editStagnationDetected: boolean;
     editStagnationType: 'READ_EDIT_LOOP' | 'REPEATED_EDIT_FAIL' | null;
     editStagnationFailures: number;
+    platformShellRisks: number;
+    pythonPatchValidationRisks: number;
   };
 }
 
@@ -72,6 +80,8 @@ export async function runBehaviorAudit(
     editStagnationDetected: false,
     editStagnationType: null,
     editStagnationFailures: 0,
+    platformShellRisks: 0,
+    pythonPatchValidationRisks: 0,
   };
 
   // 0. Phase 1/3/7 — Edit stagnation detection (highest priority among tool checks).
@@ -211,6 +221,26 @@ export async function runBehaviorAudit(
   }
   if (diagnostics.dependencyRisks > 0) {
     console.warn(`[behavior-auditor] dependency risks: ${diagnostics.dependencyRisks} package(s)`);
+  }
+
+  // 8b. Platform-aware shell patching guard.
+  const shellRiskResult = detectPlatformShellPatchRisks(messages);
+  if (shellRiskResult.risks.length > 0) {
+    diagnostics.platformShellRisks = shellRiskResult.risks.length;
+    const shellGuidance = buildPlatformShellGuidance(shellRiskResult.platform, shellRiskResult.risks);
+    if (shellGuidance) guidanceParts.push(shellGuidance);
+    console.warn(
+      `[behavior-auditor] platform shell patch risks: ${shellRiskResult.risks.length} (${shellRiskResult.platform})`,
+    );
+  }
+
+  // 8c. Generated Python patch script validation guard.
+  const pyPatchRisks = detectPythonPatchValidationRisks(messages);
+  if (pyPatchRisks.length > 0) {
+    diagnostics.pythonPatchValidationRisks = pyPatchRisks.length;
+    const pyGuidance = buildPythonPatchValidationGuidance(pyPatchRisks);
+    if (pyGuidance) guidanceParts.push(pyGuidance);
+    console.warn(`[behavior-auditor] python patch validation risks: ${pyPatchRisks.length}`);
   }
 
   // 9. Web recovery — scan recent error tool results.

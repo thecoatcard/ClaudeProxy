@@ -2,6 +2,47 @@
 
 ---
 
+## JS/HTML Tool Reliability Hardening — Phases 1–8
+
+### New Source Files
+
+| File | Phase | Purpose |
+|---|---|---|
+| `lib/tools/structure-aware-patch.ts` | 1, 2, 8 | AST/DOM-aware patch strategy + snapshot hash guidance |
+| `lib/agent/tool-reliability-guard.ts` | 4, 6 | Platform shell guard + generated Python patch validation |
+
+### Modified Source Files
+
+| File | Phases | Changes |
+|---|---|---|
+| `lib/transformers/loop-detector.ts` | 1, 2, 3, 8 | Same-tool/same-failure loop detection; JS/HTML strategy and snapshot guidance |
+| `lib/tools/tool-failure-memory.ts` | 2 | Added snapshot hash record/load/freshness APIs |
+| `lib/transformers/request.ts` | 2 | Persist read snapshots and mark stale edit failure reasons |
+| `lib/agent/behavior-auditor.ts` | 4, 6 | Platform shell patch risk guidance + Python patch validation guidance |
+| `lib/agent/subagent-executor.ts` | 5 | Empty subagent result detection and fallback retry |
+
+### New Test Files
+
+| File | Tests | Phases |
+|---|---|---|
+| `tests/js-edit-reliability.test.ts` | 3 | 1, 3 |
+| `tests/html-edit-reliability.test.ts` | 3 | 1, 8 |
+| `tests/windows-shell-fallback.test.ts` | 3 | 4 |
+| `tests/empty-agent-result.test.ts` | 2 | 5 |
+| `tests/snapshot-freshness.test.ts` | 4 | 2 |
+
+### New Documentation
+
+| File | Contents |
+|---|---|
+| `docs/TOOL_RELIABILITY_REPORT.md` | Full phase-by-phase reliability hardening summary |
+| `docs/JS_PATCH_REPORT.md` | JS/TS patch reliability deep-dive |
+| `docs/HTML_PATCH_REPORT.md` | HTML selector-specialized patching summary |
+| `docs/FILES_CHANGED.md` | This file (updated) |
+| `docs/TEST_RESULTS.md` | Updated to 83/83 suites and 944 tests |
+
+---
+
 ## Tool Behavior Hardening — 10 Phases (Claude Code-Like Tool Flow)
 
 ### New Source Files

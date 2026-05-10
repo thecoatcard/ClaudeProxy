@@ -10,12 +10,14 @@ import {
 } from '../tool-archive';
 import { runBehaviorAudit } from '../agent/behavior-auditor';
 import { recordToolFailure } from '../tools/tool-failure-memory';
+import { recordFileSnapshot, isSnapshotFresh } from '../tools/tool-failure-memory';
 import {
   isEditTool,
   extractFilePath,
   classifyEditFailure,
   normalizeLineEndings,
 } from '../tools/edit-failure-classifier';
+import { isReadTool } from '../tools/edit-failure-classifier';
 import { getAdaptiveCompactionPolicy } from './adaptive-compaction-policy';
 import { hydrateCompactedMarkers } from '../compactor/ai-compactor';
 import { stableHash } from '../utils/hash';
@@ -505,16 +507,34 @@ export async function transformRequestToGemini(
       for (const block of lastUserMsg.content) {
         if (block?.type !== 'tool_result' || !block.tool_use_id) continue;
         const isError = block.is_error === true;
-        const text = typeof block.content === 'string'
+        const text = typeof block.content === 'string' 
           ? normalizeLineEndings(block.content)
           : Array.isArray(block.content)
             ? block.content.map((c: any) => c?.text ?? '').join('\n')
             : '';
-        if (!isError && !text) continue;
+        if (!isError && !text) continue; 
         const toolUse = toolUseMap.get(block.tool_use_id);
-        if (!toolUse || !isEditTool(toolUse.name)) continue;
+        if (!toolUse) continue; 
         const filePath = extractFilePath(toolUse.input);
+        if (isReadTool(toolUse.name) && !isError && filePath && text) {
+          // Phase 2 — Fresh snapshot enforcement input: persist fresh read hash.
+          recordFileSnapshot(conversationId, filePath, text).catch(() => {});
+          continue;
+        }
+        if (!isEditTool(toolUse.name)) continue;
         const classification = classifyEditFailure(text);
+        // Phase 2 — stale snapshot marker so repeated edit failures can force re-read+hash.
+        if (filePath) {
+          isSnapshotFresh(conversationId, filePath, 120_000)
+            .then((fresh) => {
+              const reason = fresh ? classification.type : `${classification.type}|STALE_SNAPSHOT`;
+              recordToolFailure(conversationId, toolUse.name, filePath, reason).catch(() => {});
+            })
+            .catch(() => {
+              recordToolFailure(conversationId, toolUse.name, filePath, classification.type).catch(() => {});
+            });
+          continue;
+        }
         // Fire-and-forget — Phase 6 failure memory recording
         recordToolFailure(conversationId, toolUse.name, filePath, classification.type).catch(() => {});
       }
