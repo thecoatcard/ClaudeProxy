@@ -16,6 +16,7 @@ import { executeWithRetry } from '../retry-engine';
 import type { ModelRoute } from '../model-router';
 import { incrementErrorCount } from '../metrics';
 import { performEmergencyCompaction } from '../context/emergency-compactor';
+import { recoverFromOverload } from '../recovery/overload-recovery';
 
 export async function* transformStream(
   anthropicBody: any,
@@ -44,6 +45,7 @@ export async function* transformStream(
   let finalFinishReason: string | null = null;
   let finalOutputTokens = 0;
   let sawToolUse = false;
+  let sawAnyOutput = false;
   let firstTokenEmittedAt: number | null = null;
   const streamStartedAt = Date.now();
 
@@ -52,6 +54,51 @@ export async function* transformStream(
     '<tho', '<thou', '<thoug', '<though', '<thought',
     '[', '[A', '[Ac', '[Act', '[Acti', '[Actio', '[Action', '[Action:'
   ];
+
+  function buildEmptyResponseRetryRoute(): ModelRoute | null {
+    const configuredChain = routePlan
+      ? [routePlan.primary, ...(routePlan.fallback || [])]
+      : [internalModel, 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
+    const seen = new Set<string>();
+    const candidates = configuredChain.filter((modelName) => {
+      if (!modelName || modelName === internalModel || seen.has(modelName)) return false;
+      seen.add(modelName);
+      return true;
+    });
+    if (candidates.length === 0) return null;
+
+    const capableFallback = candidates.find((modelName) => !/lite/i.test(modelName)) || candidates[0];
+    const fallback = candidates.filter((modelName) => modelName !== capableFallback);
+    return {
+      ...(routePlan || { fallback: [] }),
+      primary: capableFallback,
+      fallback,
+      taskType: routePlan?.taskType === 'CHAT' ? 'HEAVY_CODING' : routePlan?.taskType,
+      taskReason: 'empty-stream-retry',
+    };
+  }
+
+  function withEmptyResponseRecoveryGuidance(body: any): any {
+    const recoveryText = [
+      '[GATEWAY RECOVERY]',
+      'The previous upstream attempt returned no assistant content.',
+      'Continue the current user request from the conversation history.',
+      'If a tool is needed, emit the tool call. Otherwise provide a concise next step.',
+      'Do not return an empty response.',
+    ].join(' ');
+
+    const existingParts = Array.isArray(body?.systemInstruction?.parts)
+      ? body.systemInstruction.parts
+      : [];
+
+    return {
+      ...body,
+      systemInstruction: {
+        ...(body?.systemInstruction || {}),
+        parts: [...existingParts, { text: recoveryText }],
+      },
+    };
+  }
 
   try {
     // 1. Send initial events IMMEDIATELY to satisfy platform "initial response" timeouts (e.g. 25s on Vercel)
@@ -120,6 +167,8 @@ export async function* transformStream(
           // This is a simple approach: we already have the final answer, emit it.
           const text = lastParts.filter((p: any) => p.text && !p.thought).map((p: any) => p.text).join('');
           if (text) {
+            sawAnyOutput = true;
+            if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
             const blockIdx = contentBlockIndex++;
             yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIdx, content_block: { type: 'text', text: '' } })}\n\n`;
             yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIdx, delta: { type: 'text_delta', text } })}\n\n`;
@@ -170,24 +219,38 @@ export async function* transformStream(
 
       if (!res) {
         if (isOverload) {
-          const overloadText =
-            'I am experiencing temporary model capacity pressure. I compacted context and attempted fallback models, but capacity is still limited. Please retry this request in a moment.';
-          yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`;
-          yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: overloadText } })}\n\n`;
-          yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`;
-          yield `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: Math.ceil(overloadText.length / 4) } })}\n\n`;
+          // Never show the overload message — keep trying across more models and keys.
+          for (let extraAttempt = 1; extraAttempt <= 3 && !res; extraAttempt++) {
+            try {
+              const recovered = await recoverFromOverload({
+                currentModel: reqModel,
+                currentKeyId: 'unknown',
+                triedModels: new Set([reqModel]),
+                attempt: extraAttempt,
+                body: geminiReq,
+                userId: token,
+              });
+              if (recovered.backoffMs) await new Promise(r => setTimeout(r, recovered.backoffMs));
+              const bodyToUse = extraAttempt === 1 ? (await performEmergencyCompaction(geminiReq, { ...requestContext, requestId, userId: token })).body ?? geminiReq : geminiReq;
+              const r = await executeWithRetry(recovered.newModel || reqModel, bodyToUse, true, token, routePlan, requestId, requestContext);
+              if (r.ok) { res = r; }
+            } catch { /* continue */ }
+          }
+          if (!res) {
+            // All attempts exhausted — emit a generic recoverable error instead of capacity text.
+            yield `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Service temporarily unavailable. Please try again.' } })}\n\n`;
+            yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+            return;
+          }
+        } else {
+          yield `event: error\ndata: ${JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: msg }
+          })}\n\n`;
+          // Always close the SSE protocol frame to prevent client-side hangs.
           yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
           return;
         }
-        const overloadText =
-          msg;
-        yield `event: error\ndata: ${JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: overloadText }
-        })}\n\n`;
-        // Always close the SSE protocol frame to prevent client-side hangs.
-        yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
-        return;
       }
     }
 
@@ -206,14 +269,30 @@ export async function* transformStream(
       const errMsg = errBody?.error?.message || `Gemini error (status ${res.status})`;
       const isOverload = res.status === 529 || res.status === 503 || /overload|overloaded|resource_exhausted|capacity/i.test(String(errMsg));
       if (isOverload) {
-        const overloadText =
-          'I am experiencing temporary model capacity pressure. I compacted context and attempted fallback models, but capacity is still limited. Please retry this request in a moment.';
-        yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`;
-        yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: overloadText } })}\n\n`;
-        yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`;
-        yield `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: Math.ceil(overloadText.length / 4) } })}\n\n`;
-        yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
-        return;
+        // Never show the overload message — keep trying across more models and keys.
+        let recovered: Response | null = null;
+        for (let extraAttempt = 1; extraAttempt <= 3 && !recovered; extraAttempt++) {
+          try {
+            const rec = await recoverFromOverload({
+              currentModel: reqModel,
+              currentKeyId: 'unknown',
+              triedModels: new Set([reqModel]),
+              attempt: extraAttempt,
+              body: geminiReq,
+              userId: token,
+            });
+            if (rec.backoffMs) await new Promise(r => setTimeout(r, rec.backoffMs));
+            const bodyToUse = extraAttempt === 1 ? (await performEmergencyCompaction(geminiReq, { ...requestContext, requestId, userId: token })).body ?? geminiReq : geminiReq;
+            const r = await executeWithRetry(rec.newModel || reqModel, bodyToUse, true, token, routePlan, requestId, requestContext);
+            if (r.ok) { recovered = r; }
+          } catch { /* continue */ }
+        }
+        if (recovered) { res = recovered; }
+        else {
+          yield `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Service temporarily unavailable. Please try again.' } })}\n\n`;
+          yield `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+          return;
+        }
       }
       yield `event: error\ndata: ${JSON.stringify({
         type: "error",
@@ -227,13 +306,55 @@ export async function* transformStream(
       return;
     }
 
-    if (!res.body) {
-      throw new Error("No response body from Gemini");
+    yield* drainGeminiResponse(res);
+
+    if (!sawAnyOutput && !sawToolUse) {
+      const retryRoute = buildEmptyResponseRetryRoute();
+      if (retryRoute) {
+        console.warn('[stream] empty model response; retrying fallback model', {
+          requestId,
+          fromModel: internalModel,
+          toModel: retryRoute.primary,
+        });
+        finalFinishReason = null;
+        finalOutputTokens = 0;
+        fullText = '';
+        cleanedText = '';
+        outputTextLength = 0;
+        pendingThinkingSignature = null;
+
+        try {
+          const retryRes = await executeWithRetry(
+            reqModel,
+            withEmptyResponseRecoveryGuidance(geminiReq),
+            true,
+            token,
+            retryRoute,
+            requestId,
+            requestContext,
+          );
+          if (retryRes.ok) {
+            yield* drainGeminiResponse(retryRes);
+          } else {
+            console.warn('[stream] empty-response fallback returned non-ok status', {
+              requestId,
+              status: retryRes.status,
+            });
+          }
+        } catch (retryErr) {
+          console.warn('[stream] empty-response fallback failed', retryErr);
+        }
+      }
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    async function* drainGeminiResponse(response: Response) {
+      if (!response.body) {
+        throw new Error("No response body from Gemini");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
     try {
       while (true) {
@@ -278,6 +399,7 @@ export async function* transformStream(
     } finally {
       try { reader.releaseLock(); } catch(e) {}
     }
+    }
 
     // Helper to process a single SSE data line from Gemini
     async function* processLine(line: string) {
@@ -300,6 +422,8 @@ export async function* transformStream(
         if (part?.thought === true && part?.text) {
           if (inContentBlock) {
             if (outputTextLength < cleanedText.length) {
+              sawAnyOutput = true;
+              if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
@@ -325,6 +449,8 @@ export async function* transformStream(
             inThinking = true;
             pendingThinkingSignature = null;
           }
+          sawAnyOutput = true;
+          if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
           yield `event: content_block_delta\ndata: ${JSON.stringify({
             type: 'content_block_delta',
             index: contentBlockIndex,
@@ -399,6 +525,8 @@ export async function* transformStream(
             // 1. Emit the text delta for anything before the action marker.
             const beforeAction = cleanedText.slice(outputTextLength, absStart);
             if (beforeAction.length > 0) {
+              sawAnyOutput = true;
+              if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
@@ -415,6 +543,7 @@ export async function* transformStream(
             const toolId = 'toolu_' + nanoid(24);
             toolIdMap.set(toolId, originalName);
             sawToolUse = true;
+            sawAnyOutput = true;
 
             yield `event: content_block_start\ndata: ${JSON.stringify({
               type: 'content_block_start',
@@ -466,6 +595,7 @@ export async function* transformStream(
           if (safeLength > outputTextLength) {
             const newText = cleanedText.slice(outputTextLength, safeLength);
             outputTextLength = safeLength;
+            sawAnyOutput = true;
             if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
             yield `event: content_block_delta\ndata: ${JSON.stringify({
               type: 'content_block_delta',
@@ -479,6 +609,8 @@ export async function* transformStream(
         if (part?.functionCall) {
           if (inContentBlock) {
             if (outputTextLength < cleanedText.length) {
+              sawAnyOutput = true;
+              if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
               yield `event: content_block_delta\ndata: ${JSON.stringify({
                 type: 'content_block_delta',
                 index: contentBlockIndex,
@@ -516,6 +648,7 @@ export async function* transformStream(
           toolIdMap.set(currentToolId, originalName);
           inToolCall = true;
           sawToolUse = true;
+          sawAnyOutput = true;
 
           yield `event: content_block_start\ndata: ${JSON.stringify({
             type: 'content_block_start',
@@ -556,6 +689,8 @@ export async function* transformStream(
 
     // FINAL CLEANUP AND CLOSING EVENTS
     if (inContentBlock && outputTextLength < cleanedText.length) {
+      sawAnyOutput = true;
+      if (firstTokenEmittedAt === null) firstTokenEmittedAt = Date.now();
       yield `event: content_block_delta\ndata: ${JSON.stringify({
         type: 'content_block_delta',
         index: contentBlockIndex,
@@ -574,11 +709,11 @@ export async function* transformStream(
       yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: contentBlockIndex })}\n\n`;
     }
 
-    // When the model returns 0 tokens with no tool use, inject a visible
+    // When the model returns no content with no tool use, inject a visible
     // placeholder so the client does not silently hang waiting for content.
-    // This surfaces the empty response to the user rather than leaving the
-    // conversation in an unrecoverable stall state.
-    if (finalOutputTokens === 0 && !sawToolUse && !inContentBlock) {
+    // Use emitted-content state instead of usage tokens; some providers omit
+    // usageMetadata even when they streamed valid text.
+    if (!sawAnyOutput && !sawToolUse) {
       const idx = contentBlockIndex + (inContentBlock || inToolCall || inThinking ? 1 : 0);
       yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'text', text: '' } })}\n\n`;
       yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: '[Model returned an empty response. Please retry.]' } })}\n\n`;

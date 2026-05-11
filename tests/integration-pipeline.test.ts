@@ -284,6 +284,76 @@ describe('Integration — SSE Pipeline', () => {
     expect(msgStart?.data?.message?.type).toBe('message');
   });
 
+  test('text response without usage metadata is not treated as empty', async () => {
+    CALL_GEMINI_MOCK().mockResolvedValueOnce(
+      createGeminiSSEResponse([
+        {
+          candidates: [{ content: { parts: [{ text: 'Valid text without usage.' }] }, finishReason: 'STOP' }],
+          usageMetadata: {},
+        },
+      ])
+    );
+
+    const gen = transformStream(
+      makeBody(),
+      'claude-opus-4-5',
+      'gemini-2.5-flash',
+      'test-token',
+      { inputTokens: 0, outputTokens: 0 },
+      TEST_ROUTE,
+      'req_test_no_usage_not_empty',
+    );
+    const events = await collectStreamEvents(gen);
+    const text = events
+      .filter((e) => e.event === 'content_block_delta')
+      .map((e) => e.data?.delta?.text || '')
+      .join('');
+
+    expect(text).toContain('Valid text without usage.');
+    expect(text).not.toContain('[Model returned an empty response. Please retry.]');
+    expect(CALL_GEMINI_MOCK()).toHaveBeenCalledTimes(1);
+  });
+
+  test('empty 200 stream retries on fallback before emitting placeholder', async () => {
+    CALL_GEMINI_MOCK()
+      .mockResolvedValueOnce(
+        createGeminiSSEResponse([
+          {
+            candidates: [{ content: { parts: [] }, finishReason: 'STOP' }],
+            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0 },
+          },
+        ])
+      )
+      .mockResolvedValueOnce(
+        createGeminiSSEResponse([
+          {
+            candidates: [{ content: { parts: [{ text: 'Recovered after empty stream.' }] }, finishReason: 'STOP' }],
+            usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 5 },
+          },
+        ])
+      );
+
+    const gen = transformStream(
+      makeBody(),
+      'claude-opus-4-5',
+      'gemini-2.5-flash',
+      'test-token',
+      { inputTokens: 0, outputTokens: 0 },
+      TEST_ROUTE,
+      'req_test_empty_retry',
+    );
+    const events = await collectStreamEvents(gen);
+    const text = events
+      .filter((e) => e.event === 'content_block_delta')
+      .map((e) => e.data?.delta?.text || '')
+      .join('');
+
+    expect(CALL_GEMINI_MOCK()).toHaveBeenCalledTimes(2);
+    expect(CALL_GEMINI_MOCK().mock.calls[1][0]).toBe('gemini-3-flash-preview');
+    expect(text).toContain('Recovered after empty stream.');
+    expect(text).not.toContain('[Model returned an empty response. Please retry.]');
+  });
+
   test('tool use functionCall produces tool_use content block with stop_reason tool_use', async () => {
     CALL_GEMINI_MOCK().mockResolvedValueOnce(
       createGeminiSSEResponse([

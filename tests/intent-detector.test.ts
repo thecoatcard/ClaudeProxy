@@ -52,6 +52,26 @@ describe('IntentDetector', () => {
       expect(detectIntent(makeBody('continue')).intent).toBe('TRIVIAL_CHAT');
     });
 
+    test('detects continuation in active tool session as TASK', () => {
+      const body = {
+        tools: [{ name: 'Read' }],
+        messages: [
+          { role: 'user', content: 'inspect the file' },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'app/page.tsx' } }],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'file contents' }],
+          },
+          { role: 'user', content: 'continue' },
+        ],
+      };
+      expect(detectIntent(body).intent).toBe('TASK');
+      expect(detectIntent(body).reason).toBe('active-session-continuation');
+    });
+
     test('detects questions as QUESTION', () => {
       expect(detectIntent(makeBody('What is TypeScript?')).intent).toBe('QUESTION');
       expect(detectIntent(makeBody('How does Redis work?')).intent).toBe('QUESTION');

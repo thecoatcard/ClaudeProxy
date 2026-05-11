@@ -41,6 +41,29 @@ describe('Trivial Routing', () => {
     expect(route.primary).toBe('gemini-2.5-flash-lite');
   });
 
+  test('Claude Code continuation with tool context does not route as chat', async () => {
+    const route = await getModelMapping('claude-sonnet-4-5', {
+      requestBody: {
+        tools: [{ name: 'Read' }],
+        messages: [
+          { role: 'user', content: 'inspect the file' },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'app/page.tsx' } }],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'file contents' }],
+          },
+          { role: 'user', content: 'continue' },
+        ],
+      },
+    });
+
+    expect(route.taskType).not.toBe('CHAT');
+    expect(route.primary).toBe('gemini-2.5-flash');
+  });
+
   test('health check only triggers on explicit health keywords', () => {
     // Explicit health check
     const healthCls = classifyTaskType(makeBody('check health of the gateway'));

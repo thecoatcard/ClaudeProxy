@@ -14,6 +14,21 @@ jest.mock('../lib/metrics', () => ({
   incrementErrorCount: jest.fn(async () => {}),
 }));
 
+jest.mock('../lib/context/emergency-compactor', () => ({
+  performEmergencyCompaction: jest.fn(async () => ({ compacted: false, body: null })),
+}));
+
+jest.mock('../lib/recovery/overload-recovery', () => ({
+  recoverFromOverload: jest.fn(async () => ({
+    recovered: false,
+    newModel: null,
+    newKeyId: null,
+    compacted: false,
+    backoffMs: 0,
+    attempt: 1,
+  })),
+}));
+
 import { transformStream } from '../lib/transformers/stream';
 import { executeWithRetry } from '../lib/retry-engine';
 
@@ -28,14 +43,13 @@ describe('stream overload protocol', () => {
     jest.clearAllMocks();
   });
 
-  test('overload before stream start returns assistant text and message_stop (no gateway error event)', async () => {
-    (executeWithRetry as jest.Mock).mockRejectedValueOnce(new Error('overloaded_error'));
+  test('overload before stream start never shows capacity pressure text, emits message_stop', async () => {
+    (executeWithRetry as jest.Mock).mockRejectedValue(new Error('overloaded_error'));
 
     const output = await collect(transformStream({ messages: [] }, 'claude-opus', 'gemini-2.5-flash', 'u1'));
-    expect(output).toContain('event: message_start');
-    expect(output).toContain('temporary model capacity pressure');
+    expect(output).not.toContain('temporary model capacity pressure');
+    expect(output).not.toContain('compacted context and attempted fallback');
     expect(output).toContain('event: message_stop');
-    expect(output).not.toContain('event: error');
   });
 
   test('non-overload failure still emits gateway error and message_stop', async () => {
@@ -47,16 +61,16 @@ describe('stream overload protocol', () => {
     expect(output).toContain('event: message_stop');
   });
 
-  test('overload non-ok response returns assistant text and message_stop', async () => {
-    (executeWithRetry as jest.Mock).mockResolvedValueOnce({
+  test('overload non-ok response never shows capacity pressure text, emits message_stop', async () => {
+    (executeWithRetry as jest.Mock).mockResolvedValue({
       ok: false,
       status: 529,
       json: async () => ({ error: { message: 'resource_exhausted overload' } }),
     });
 
     const output = await collect(transformStream({ messages: [] }, 'claude-opus', 'gemini-2.5-flash', 'u1'));
-    expect(output).toContain('temporary model capacity pressure');
+    expect(output).not.toContain('temporary model capacity pressure');
+    expect(output).not.toContain('compacted context and attempted fallback');
     expect(output).toContain('event: message_stop');
-    expect(output).not.toContain('event: error');
   });
 });

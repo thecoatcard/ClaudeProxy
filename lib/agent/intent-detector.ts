@@ -39,6 +39,13 @@ const QUESTION_PATTERNS = [
   /\?$/,
 ];
 
+/** Continuation commands are trivial only in isolation. In an established
+ * coding/tool session they mean "resume the task". */
+const CONTINUATION_PATTERNS = [
+  /^(continue|resume|proceed|carry\s+on|keep\s+going|go\s+on|next)[\s!.?]*$/i,
+  /^(continue|resume|pick\s+up|carry\s+on)\s+(from\s+)?(where\s+we\s+left\s+off|the\s+task|working)[\s!.?]*$/i,
+];
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -67,6 +74,24 @@ export function extractUserMessage(requestBody: unknown): string {
   return '';
 }
 
+function hasActiveAgentContext(requestBody: unknown): boolean {
+  if (!requestBody || typeof requestBody !== 'object') return false;
+  const body = requestBody as Record<string, unknown>;
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+
+  if (tools.length > 0 && messages.length > 1) return true;
+
+  return messages.some((m) => {
+    if (!m || typeof m !== 'object') return false;
+    const content = (m as Record<string, unknown>).content;
+    if (!Array.isArray(content)) return false;
+    return (content as Array<Record<string, unknown>>).some((block) =>
+      block?.type === 'tool_use' || block?.type === 'tool_result'
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -81,6 +106,13 @@ export function detectIntent(requestBody: unknown): IntentResult {
   // Empty message → trivial
   if (!text) {
     return { intent: 'TRIVIAL_CHAT', reason: 'empty-message' };
+  }
+
+  if (
+    hasActiveAgentContext(requestBody) &&
+    CONTINUATION_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return { intent: 'TASK', reason: 'active-session-continuation' };
   }
 
   // Check trivial chat patterns (exact match on user message only)
