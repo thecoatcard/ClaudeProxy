@@ -168,22 +168,40 @@ export async function raceKeys(opts: {
     }
   });
 
-  // Wait for all to settle — first non-null result wins
-  const results = await Promise.allSettled(racePromises);
+  // Wait for the first success, or until all have failed
+  const winner = await new Promise<any>((resolve) => {
+    let completed = 0;
+    let resolved = false;
+
+    racePromises.forEach((p) => {
+      p.then((val) => {
+        completed++;
+        if (val && !resolved) {
+          resolved = true;
+          resolve(val);
+        } else if (completed === racePromises.length && !resolved) {
+          resolve(null);
+        }
+      }).catch(() => {
+        completed++;
+        if (completed === racePromises.length && !resolved) {
+          resolve(null);
+        }
+      });
+    });
+  });
+
   const latency = Date.now() - start;
 
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value) {
-      const winner = result.value;
-      logInfo('KEY_RACE', `Won race: key=${winner.keyId} from ${keys.length} racers in ${latency}ms`);
-      return {
-        response: winner.response,
-        keyId: winner.keyId,
-        latencyMs: latency,
-        racedKeys: keys.length,
-        winnerId: winner.keyId,
-      };
-    }
+  if (winner) {
+    logInfo('KEY_RACE', `Won race: key=${winner.keyId} from ${keys.length} racers in ${latency}ms`);
+    return {
+      response: winner.response,
+      keyId: winner.keyId,
+      latencyMs: latency,
+      racedKeys: keys.length,
+      winnerId: winner.keyId,
+    };
   }
 
   logWarn('KEY_RACE', `All ${keys.length} keys failed in race (${latency}ms)`);

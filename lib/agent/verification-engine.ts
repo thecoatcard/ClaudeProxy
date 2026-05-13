@@ -170,9 +170,14 @@ export function verifyToolResult(
 export function verifyAllToolResults(messages: any[]): VerificationResult[] {
   const results: VerificationResult[] = [];
 
+  // Optimization: Scan only the last 50 messages. Tool verification is
+  // usually most relevant for the most recent actions.
+  const scanLimit = 50;
+  const messagesToScan = (messages || []).slice(-scanLimit);
+
   // Build id → tool_use map from assistant messages.
   const toolUseByID = new Map<string, { name: string; input: any }>();
-  for (const msg of messages || []) {
+  for (const msg of messagesToScan) {
     if (msg.role === 'assistant' && Array.isArray(msg.content)) {
       for (const block of msg.content) {
         if (block?.type === 'tool_use' && typeof block.id === 'string') {
@@ -183,7 +188,7 @@ export function verifyAllToolResults(messages: any[]): VerificationResult[] {
   }
 
   // Walk tool_result blocks in user messages.
-  for (const msg of messages || []) {
+  for (const msg of messagesToScan) {
     if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
       if (block?.type !== 'tool_result') continue;

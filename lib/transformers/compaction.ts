@@ -142,14 +142,42 @@ function messageText(message: any, raw: boolean = false): string {
 
 function estimateTokens(messages: any[]): number {
   return messages.reduce((sum, msg) => {
-    // For estimation, we MUST use the raw text length, not the clipped summary text
-    let tokens = messageText(msg, true).length * TOKEN_WEIGHTS.CHAR;
-    if (Array.isArray(msg.content)) {
+    if (!msg) return sum;
+    let tokens = 0;
+
+    if (typeof msg.content === 'string') {
+      tokens = msg.content.length * TOKEN_WEIGHTS.CHAR;
+    } else if (Array.isArray(msg.content)) {
       msg.content.forEach((b: any) => {
-        if (b.type === 'image') tokens += TOKEN_WEIGHTS.IMAGE;
-        if (b.type === 'tool_use') tokens += TOKEN_WEIGHTS.TOOL_CALL;
+        if (!b) return;
+
+        // Base text contribution
+        if (b.type === 'text' && typeof b.text === 'string') {
+          tokens += b.text.length * TOKEN_WEIGHTS.CHAR;
+        } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
+          tokens += (b.thinking.length + 11) * TOKEN_WEIGHTS.CHAR; // "[thinking] " prefix
+        } else if (b.type === 'tool_use') {
+          tokens += TOKEN_WEIGHTS.TOOL_CALL;
+          // Add input JSON length
+          tokens += JSON.stringify(b.input || {}).length * TOKEN_WEIGHTS.CHAR;
+        } else if (b.type === 'tool_result') {
+          // The "raw" logic from messageText: use full content length
+          if (typeof b.content === 'string') {
+            tokens += b.content.length * TOKEN_WEIGHTS.CHAR;
+          } else if (Array.isArray(b.content)) {
+            b.content.forEach((c: any) => {
+              if (c.text) tokens += c.text.length * TOKEN_WEIGHTS.CHAR;
+              if (c.type === 'image') tokens += TOKEN_WEIGHTS.IMAGE;
+            });
+          } else if (b.content) {
+            tokens += JSON.stringify(b.content).length * TOKEN_WEIGHTS.CHAR;
+          }
+        } else if (b.type === 'image') {
+          tokens += TOKEN_WEIGHTS.IMAGE;
+        }
       });
     }
+
     return sum + Math.ceil(tokens);
   }, 0);
 }

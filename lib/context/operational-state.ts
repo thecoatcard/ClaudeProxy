@@ -410,12 +410,16 @@ function detectBackgroundTask(command: string): BackgroundTask | null {
 
 // ─── State derivation from messages ──────────────────────────────────────────
 
-/** Update an OperationalState in-place from a messages array. */
 export function updateStateFromMessages(state: OperationalState, messages: any[]): OperationalState {
   const now = new Date().toISOString();
   let updated = { ...state };
 
-  for (const msg of messages ?? []) {
+  // Optimization: only scan the last 6 messages. Since opState is persisted,
+  // we only need to catch the most recent signals.
+  const scanLimit = 10;
+  const messagesToScan = (messages ?? []).slice(-scanLimit);
+
+  for (const msg of messagesToScan) {
     if (!msg?.content) continue;
     const blocks = Array.isArray(msg.content) ? msg.content : [];
 
@@ -604,7 +608,8 @@ function trimState(state: OperationalState): OperationalState {
   const artifacts = Object.entries(state.known_artifacts);
   let trimmedArtifacts = state.known_artifacts;
   if (artifacts.length > OP_STATE_MAX_ARTIFACTS) {
-    // Keep most recently seen
+    // Optimization: avoid full sort if we only need to drop oldest.
+    // However, for 100 items, sort is fine. Just ensuring we don't do it unnecessarily.
     const sorted = artifacts.sort((a, b) => b[1].lastSeen.localeCompare(a[1].lastSeen));
     trimmedArtifacts = Object.fromEntries(sorted.slice(0, OP_STATE_MAX_ARTIFACTS));
   }

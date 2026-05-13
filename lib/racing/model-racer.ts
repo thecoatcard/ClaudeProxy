@@ -163,22 +163,41 @@ export async function raceModels(opts: {
     }
   });
 
-  const results = await Promise.allSettled(racePromises);
+  // Wait for the first success, or until all have failed
+  const winner = await new Promise<any>((resolve) => {
+    let completed = 0;
+    let resolved = false;
+
+    racePromises.forEach((p) => {
+      p.then((val) => {
+        completed++;
+        if (val && !resolved) {
+          resolved = true;
+          resolve(val);
+        } else if (completed === racePromises.length && !resolved) {
+          resolve(null);
+        }
+      }).catch(() => {
+        completed++;
+        if (completed === racePromises.length && !resolved) {
+          resolve(null);
+        }
+      });
+    });
+  });
+
   const latency = Date.now() - start;
 
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value) {
-      const winner = result.value;
-      logInfo('MODEL_RACE', `Won race: ${winner.model} from ${racers.length} models in ${latency}ms`);
-      return {
-        response: winner.response,
-        model: winner.model,
-        keyId: winner.keyId,
-        latencyMs: latency,
-        racedModels: racers.length,
-        winnerModel: winner.model,
-      };
-    }
+  if (winner) {
+    logInfo('MODEL_RACE', `Won race: ${winner.model} from ${racers.length} models in ${latency}ms`);
+    return {
+      response: winner.response,
+      model: winner.model,
+      keyId: winner.keyId,
+      latencyMs: latency,
+      racedModels: racers.length,
+      winnerModel: winner.model,
+    };
   }
 
   logWarn('MODEL_RACE', `All ${racers.length} models failed in race (${latency}ms)`);

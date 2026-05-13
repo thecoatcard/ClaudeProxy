@@ -124,52 +124,50 @@ export async function hydrateCompactedMarkers(
   conversationId: string,
   store: CompactorStore = redisStore,
 ): Promise<any[]> {
-  const hydrated = [...(messages || [])];
+  if (!Array.isArray(messages)) return [];
 
-  for (let i = 0; i < hydrated.length; i++) {
-    const msg = hydrated[i];
-    if (!msg) continue;
+  return Promise.all(messages.map(async (msg) => {
+    if (!msg) return msg;
 
     if (typeof msg.content === 'string') {
       const rangeId = parseCompactedRangeId(msg.content);
       if (!rangeId) {
-        // BUG-009 FIX: v1 compacted messages use a different sentinel and have no
-        // range_id. Pass them through unchanged — they carry their summary inline.
-        if (msg.content.includes(COMPACTED_MARKER_SENTINEL_V1)) continue;
-        continue;
+        if (msg.content.includes(COMPACTED_MARKER_SENTINEL_V1)) return msg;
+        return msg;
       }
       const record = await loadCompactedSummary(conversationId, rangeId, store);
-      if (record) hydrated[i] = { ...msg, content: buildStoredSummaryMessage(rangeId, record.summary) };
-      continue;
+      if (record) return { ...msg, content: buildStoredSummaryMessage(rangeId, record.summary) };
+      return msg;
     }
 
     if (Array.isArray(msg.content)) {
       let changed = false;
       const nextBlocks = msg.content.map((b: any) => {
-        if (b?.type !== 'text' || typeof b.text !== 'string') return b;
-        // BUG-009 FIX: skip v1 compacted blocks — they carry inline summaries, no lookup needed.
-        if (b.text.includes(COMPACTED_MARKER_SENTINEL_V1)) return b;
-        const rangeId = parseCompactedRangeId(b.text);
-        if (!rangeId) return b;
-        changed = true;
-        return { ...b, __rangeId: rangeId };
+        if (b?.type === 'text' && typeof b.text === 'string') {
+           if (b.text.includes(COMPACTED_MARKER_SENTINEL_V1)) return b;
+           const rid = parseCompactedRangeId(b.text);
+           if (rid) {
+             changed = true;
+             return { ...b, __rangeId: rid };
+           }
+        }
+        return b;
       });
 
-      if (!changed) continue;
-      const resolvedBlocks: any[] = [];
-      for (const b of nextBlocks) {
+      if (!changed) return msg;
+
+      const resolvedBlocks = await Promise.all(nextBlocks.map(async (b: any) => {
         if (b?.__rangeId) {
           const record = await loadCompactedSummary(conversationId, b.__rangeId, store);
-          resolvedBlocks.push({ type: 'text', text: record ? buildStoredSummaryMessage(b.__rangeId, record.summary) : b.text });
-        } else {
-          resolvedBlocks.push(b);
+          return { type: 'text', text: record ? buildStoredSummaryMessage(b.__rangeId, record.summary) : b.text };
         }
-      }
-      hydrated[i] = { ...msg, content: resolvedBlocks };
+        return b;
+      }));
+      return { ...msg, content: resolvedBlocks };
     }
-  }
 
-  return hydrated;
+    return msg;
+  }));
 }
 
 async function callGeminiForCompaction(model: string, body: any, fallbackApiKey?: string): Promise<string | null> {

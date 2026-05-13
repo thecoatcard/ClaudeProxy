@@ -104,7 +104,12 @@ function buildPairs(messages: any[]): ToolPair[] {
   const byId = new Map<string, ToolPair>();
   const order: string[] = [];
 
-  for (const msg of messages || []) {
+  // Optimization: Scan only the last 50 messages. Loop detection usually
+  // only cares about recent history to prevent immediate repetitions.
+  const scanLimit = 50;
+  const messagesToScan = (messages || []).slice(-scanLimit);
+
+  for (const msg of messagesToScan) {
     if (!Array.isArray(msg.content)) continue;
     if (msg.role === 'assistant') {
       for (const block of msg.content) {

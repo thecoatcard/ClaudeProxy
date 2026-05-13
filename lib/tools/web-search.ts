@@ -327,15 +327,26 @@ export async function executeWebSearch(
   }
 
   const providers = getProviderPriority();
-
-  for (const providerName of providers) {
+  const searchPromises = providers.map(async (providerName) => {
     const adapter = PROVIDER_ADAPTERS[providerName];
-    if (!adapter) continue;
+    if (!adapter) return null;
+    return adapter(query.trim(), config);
+  });
 
-    const result = await adapter(query.trim(), config);
-    if (result.ok && result.results.length > 0) return result;
-    // Try next provider on failure or empty results
-    console.warn(`[web-search] provider=${providerName} failed: ${result.error ?? 'empty results'}`);
+  // Wait for all to settle and pick the best successful result
+  const results = await Promise.allSettled(searchPromises);
+  
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value && result.value.ok && result.value.results.length > 0) {
+      return result.value;
+    }
+  }
+
+  // Fallback to the first error if none succeeded
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value && !result.value.ok) {
+      return result.value;
+    }
   }
 
   return {

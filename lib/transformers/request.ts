@@ -310,8 +310,11 @@ export async function transformRequestToGemini(
       ? evaluateHydrationForEstablishedSession(hydrationCtx)
       : evaluateHydration(hydrationCtx);
 
-    // Phase 5: CRITICAL Redis write — stale key deletion must be awaited so
-    // the next request doesn't read partially-deleted state.
+    // Phase 4 & 5: CRITICAL Redis writes.
+    // Deletion and session binding must be completed before proceeding to ensure
+    // state consistency, but they can run in parallel.
+    const criticalWrites: Promise<any>[] = [];
+
     if (
       hydrationVerdict.reason === 'HYDRATION_SKIPPED_FRESH_SESSION' ||
       hydrationVerdict.reason === 'HYDRATION_SKIPPED_NULL_WORKSPACE' ||
@@ -323,17 +326,15 @@ export async function transformRequestToGemini(
         `context:emergency:${conversationId}`,
         `context:workspace:${conversationId}`,
       ];
-      // Phase 5: await this critical write (was fire-and-forget).
-      await redis.del(...staleKeys).catch(() => {});
-      logInfo('RETRIEVAL', 'Stale session keys deleted', {
-        requestId,
-        metadata: { conversationId, deletedKeys: staleKeys.length, reason: hydrationVerdict.reason },
-      });
+      criticalWrites.push(redis.del(...staleKeys).catch(() => {}));
     }
 
-    // Phase 4: Save session binding for new sessions (CRITICAL write — await).
     if (bindingStatus === 'new') {
-      await saveSessionBinding(conversationId, userId || 'anon', workspaceFp.fingerprint, legacyId).catch(() => {});
+      criticalWrites.push(saveSessionBinding(conversationId, userId || 'anon', workspaceFp.fingerprint, legacyId).catch(() => {}));
+    }
+
+    if (criticalWrites.length > 0) {
+      await Promise.all(criticalWrites);
     }
 
     logInfo('RETRIEVAL', `Hydration verdict: ${hydrationVerdict.reason}`, {
