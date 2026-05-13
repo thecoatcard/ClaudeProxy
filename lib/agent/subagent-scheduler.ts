@@ -14,7 +14,7 @@ import { type SubagentTask } from './subagent-memory';
 import { executeSubagent, type SubagentExecutionResult } from './subagent-executor';
 import { rankModelsByPerformance } from './subagent-performance';
 
-const MAX_PARALLEL = 4;
+const MAX_PARALLEL = Number(process.env.SUBAGENT_MAX_PARALLEL || 4);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,6 +79,17 @@ export async function scheduleSubagentTasks(
     if (ready.length === 0 && inProgress.size === 0 && remaining.size > 0) {
       // Deadlock: remaining tasks have unsatisfied deps (likely all failed/skipped)
       for (const id of remaining) {
+        const task = taskMap.get(id)!;
+        const failedDep = task.dependencies.find(dep => failed.has(dep));
+        const skippedDep = task.dependencies.find(dep => skipped.has(dep));
+        
+        if (failedDep) {
+          console.warn(`[Scheduler] Marking task ${id} as skipped — dependency ${failedDep} FAILED`);
+        } else if (skippedDep) {
+          console.warn(`[Scheduler] Marking task ${id} as skipped — dependency ${skippedDep} SKIPPED`);
+        } else {
+          console.error(`[Scheduler] Marking task ${id} as skipped — DEADLOCK (unmet dependency chain)`);
+        }
         skipped.add(id);
       }
       remaining.clear();

@@ -9,7 +9,7 @@
 //
 // Pure functions, no I/O, edge-runtime safe.
 
-import { verifyAllToolResults, type VerificationVerdict } from './verification-engine';
+import { verifyAllToolResults, type VerificationResult } from './verification-engine';
 
 export interface Requirement {
   index: number;
@@ -71,11 +71,15 @@ function normalizeTool(toolName: string): string {
  *   a. A tool of the matching family was called AND its result was not a failure, OR
  *   b. Any text in an assistant turn directly references key words from the requirement.
  */
-export function trackRequirements(requirements: Requirement[], messages: any[]): Requirement[] {
+export function trackRequirements(
+  requirements: Requirement[], 
+  messages: any[],
+  preCalculatedResults?: VerificationResult[]
+): Requirement[] {
   if (requirements.length === 0) return [];
 
   // Collect successful tool verdicts from history.
-  const toolResults = verifyAllToolResults(messages);
+  const toolResults = preCalculatedResults ?? verifyAllToolResults(messages);
   const successfulFamilies = new Set<string>();
   const allFamilies = new Set<string>();
   for (const result of toolResults) {
@@ -137,14 +141,18 @@ export function buildSpecGuidance(requirements: Requirement[]): string {
 }
 
 /** Combined entry point: extract from a text source and immediately track. */
-export function validateSpec(sourceText: string, messages: any[]): {
+export function validateSpec(
+  sourceText: string, 
+  messages: any[],
+  preCalculatedResults?: VerificationResult[]
+): {
   requirements: Requirement[];
   guidance: string;
 } {
   const requirements = extractRequirements(sourceText);
   if (requirements.length === 0) return { requirements: [], guidance: '' };
 
-  const tracked = trackRequirements(requirements, messages);
+  const tracked = trackRequirements(requirements, messages, preCalculatedResults);
   const guidance = buildSpecGuidance(tracked);
   return { requirements: tracked, guidance };
 }

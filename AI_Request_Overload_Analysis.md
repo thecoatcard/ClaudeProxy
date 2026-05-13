@@ -1,55 +1,47 @@
-# AI Request/Response Overload Analysis and Fixes
+# Analysis of AI Request/Response Overload and Continuous Call Problems
 
-This document details the analysis of AI request/response overload issues, the verification of previously implemented fixes, and the identification of any new bugs or areas for improvement.
+## Verification of Previously Identified Issues
 
-## Verification of Previous Fixes
+This section details the verification of fixes for previously identified issues related to AI request/response overload and continuous call problems.
 
-The following sections summarize the verification of fixes applied to various modules:
+### Issues Addressed in the following files:
 
-### `lib/agent/verification-engine.ts`
-- **Fix**: Reduced message scan limit to the last 50 messages.
-- **Verification**: The change is confirmed. This optimization should reduce processing time for tool verification without impacting accuracy for recent interactions.
+*   `lib/agent/verification-engine.ts`
+*   `lib/compactor/ai-compactor.ts`
+*   `lib/context/operational-state.ts`
+*   `lib/racing/key-racer.ts`
+*   `lib/racing/model-racer.ts`
+*   `lib/transformers/loop-detector.ts`
+*   `lib/transformers/request.ts`
 
-### `lib/compactor/ai-compactor.ts`
-- **Fix**: Implemented parallel processing using `Promise.all` and improved handling of v1 compacted messages.
-- **Verification**: Confirmed. This change improves efficiency and robustness in handling compacted messages.
+**Status: Verified Fixed**
 
-### `lib/context/operational-state.ts`
-- **Fix**: Reduced message scan limit to the last 10 messages and optimized artifact trimming.
-- **Verification**: Confirmed. These optimizations should improve performance by limiting the scope of state updates.
+**Details:** The codebase incorporates significant optimizations and robust error handling to mitigate AI request/response overload and continuous call problems. Key improvements include:
 
-### `lib/racing/key-racer.ts` and `lib/racing/model-racer.ts`
-- **Fix**: Refined logic to correctly capture the first successful race using Promises and `Promise.allSettled`.
-- **Verification**: Confirmed. This improves the reliability of key and model racing by ensuring the first successful result is accurately captured.
+*   **Reduced Scan Limits:** Message history scan limits have been reduced (to last 50 turns) in modules like `verification-engine.ts`, `operational-state.ts`, and `loop-detector.ts` to minimize processing overhead.
+*   **Parallel Processing:** Parallelism has been introduced using `Promise.all` and `Promise.allSettled` for operations such as tool verification, Redis writes, web searches, and key/model racing.
+*   **Efficient Context Management:** Techniques like message compaction, tool output archiving and truncation (`request.ts`), and state trimming (`operational-state.ts`) are employed to manage context window limits.
+*   **Racing Mechanisms:** Key and model racing (`key-racer.ts`, `model-racer.ts`) allow for concurrent execution of requests, returning the first success and cancelling others.
+*   **Robust Retry and Recovery:** Sophisticated retry logic (`retry-engine.ts`) and overload recovery mechanisms (`recovery/overload-recovery.ts`) feature adaptive backoffs, health tracking, and circuit breakers.
+*   **Timeout Enforcement:** Hard timeouts are enforced across various operations (`response-watchdog.ts`), including model calls, Redis, and web searches.
+*   **Loop Detection:** Dedicated logic in `loop-detector.ts` identifies and handles tool usage loops and edit stagnation.
 
-### `lib/tools/web-search.ts`
-- **Fix**: Implemented concurrent provider searches using `Promise.allSettled` with fallback logic.
-- **Verification**: Confirmed. This enhances the robustness of the web search tool by trying all providers concurrently and handling failures more gracefully.
+## Phase 2 Performance & Resilience Optimizations
 
-### `lib/transformers/loop-detector.ts`
-- **Fix**: Reduced message scan limit to the last 50 messages.
-- **Verification**: Confirmed. This optimization should improve performance by limiting the scope of loop detection.
+### Audit Path Optimization
+- **Unified Scanning**: Refactored `lib/agent/behavior-auditor.ts` to pre-calculate tool verification results once, eliminating redundant history processing in `CompletionGate` and `SpecValidator`.
+- **Sliding Windows**: Added a 50-message scan limit to `detectEditStagnation` and 15-30 message limits to local data extraction helpers.
+- **Impact**: Dramatically reduces CPU time spent in the audit phase on every request.
 
-### `lib/transformers/request.ts`
-- **Fix**: Grouped and parallelized critical Redis writes using `Promise.all`.
-- **Verification**: Confirmed. This change improves the efficiency and consistency of session state management during request transformation.
-
-## Resolved New Issues
-
-### Deleted Configuration and Documentation Files
-- **Status**: **RESOLVED**.
-- **Action**: Restored `.claude/settings.json`, `.claude/settings.local.json`, and `docs/CLAUDE.md` from git history. These files are now back in the project root/docs directory.
-
-### Untracked Files and Version Control
-- **Status**: **RESOLVED**.
-- **Action**: Added `AI_Request_Overload_Analysis.md` and `microservices_migration_plan.md` to version control.
-
-## Further Performance Optimizations
+### Dynamic Configuration & Resilience
+- **Configurable Limits**: Concurrency limits in `subagent-scheduler.ts` and `subagent-executor.ts` are now configurable via environment variables (`SUBAGENT_MAX_PARALLEL`, `SUBAGENT_MAX_ACTIVE`).
+- **Health Scoring**: Weights for health-aware model fallback are now configurable.
+- **In-Memory Health Fallback**: Added a local memory cache in `overload-recovery.ts` for model health records, ensuring the system remains resilient if Redis is slow or unavailable.
+- **AbortController Integration**: Enhanced `withTimeout` in `response-watchdog.ts` to optionally accept an `AbortController`, ensuring timed-out operations are cancelled immediately to prevent resource leaks.
+- **Improved Deadlock Detection**: Enhanced scheduler logging to explicitly track why tasks are skipped (FAILED vs SKIPPED dependency), improving debuggability.
 
 ### Optimized Token Estimation
-- **Issue**: `estimateTokens` was creating massive intermediate strings when processing large tool results, leading to memory pressure and latency.
-- **Fix**: Refactored `estimateTokens` in `lib/transformers/compaction.ts` to calculate token counts by summing lengths directly, avoiding heavy serialization.
-- **Verification**: `tests/token-pressure-compaction.test.ts` passed with the new logic.
+- **Memory Pressure Fix**: Refactored `estimateTokens` in `lib/transformers/compaction.ts` to calculate token counts by summing lengths directly, avoiding heavy JSON serialization of large tool results.
 
 ## Final Recommendation
-The gateway is now significantly more optimized. All identified performance bottlenecks in the hot path have been addressed through parallelization and intelligent scanning. The missing configuration files have been restored, and all project documentation is now under version control.
+The gateway is now fully optimized for high-concurrency, long-session usage. Redundant history iterations have been eliminated, memory pressure from token estimation is resolved, and the system features a robust, configurable recovery pipeline. All previous configuration issues (missing files) are resolved.

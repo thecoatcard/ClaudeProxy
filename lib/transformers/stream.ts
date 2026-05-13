@@ -55,7 +55,7 @@ export async function* transformStream(
     '[', '[A', '[Ac', '[Act', '[Acti', '[Actio', '[Action', '[Action:'
   ];
 
-  function buildEmptyResponseRetryRoute(): ModelRoute | null {
+  function buildEmptyResponseRetryRoute(retryCount = 0): ModelRoute | null {
     const configuredChain = routePlan
       ? [routePlan.primary, ...(routePlan.fallback || [])]
       : [internalModel, 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
@@ -65,16 +65,30 @@ export async function* transformStream(
       seen.add(modelName);
       return true;
     });
-    if (candidates.length === 0) return null;
+    
+    if (candidates.length === 0) {
+      // If no configured fallbacks, force a move to Gemma as a last resort
+      // for "empty" errors since it's much more likely to return text.
+      if (!internalModel.startsWith('gemma')) return {
+        primary: 'gemma-4-31b-it',
+        fallback: ['gemma-4-26b-a4b-it'],
+        taskType: 'REASONING',
+        taskReason: 'empty-stream-forced-gemma',
+      };
+      return null;
+    }
 
-    const capableFallback = candidates.find((modelName) => !/lite/i.test(modelName)) || candidates[0];
-    const fallback = candidates.filter((modelName) => modelName !== capableFallback);
+    // On second retry, skip straight to the best available fallback
+    const idx = Math.min(retryCount, candidates.length - 1);
+    const capableFallback = candidates[idx];
+    const fallback = candidates.slice(idx + 1);
+
     return {
       ...(routePlan || { fallback: [] }),
       primary: capableFallback,
       fallback,
       taskType: routePlan?.taskType === 'CHAT' ? 'HEAVY_CODING' : routePlan?.taskType,
-      taskReason: 'empty-stream-retry',
+      taskReason: `empty-stream-retry-${retryCount + 1}`,
     };
   }
 
@@ -96,6 +110,11 @@ export async function* transformStream(
       systemInstruction: {
         ...(body?.systemInstruction || {}),
         parts: [...existingParts, { text: recoveryText }],
+      },
+      // Lower temperature slightly to encourage a more deterministic/stable response
+      generationConfig: {
+        ...(body?.generationConfig || {}),
+        temperature: Math.max(0, (body?.generationConfig?.temperature ?? 0.4) - 0.2),
       },
     };
   }
@@ -309,13 +328,17 @@ export async function* transformStream(
     yield* drainGeminiResponse(res);
 
     if (!sawAnyOutput && !sawToolUse) {
-      const retryRoute = buildEmptyResponseRetryRoute();
-      if (retryRoute) {
-        console.warn('[stream] empty model response; retrying fallback model', {
+      let retryRoute = buildEmptyResponseRetryRoute(0);
+      let retryCount = 0;
+      
+      while (retryRoute && !sawAnyOutput && !sawToolUse && retryCount < 2) {
+        console.warn(`[stream] empty model response (attempt ${retryCount + 1}); retrying with ${retryRoute.primary}`, {
           requestId,
           fromModel: internalModel,
           toModel: retryRoute.primary,
+          finishReason: finalFinishReason,
         });
+
         finalFinishReason = null;
         finalOutputTokens = 0;
         fullText = '';
@@ -340,10 +363,15 @@ export async function* transformStream(
               requestId,
               status: retryRes.status,
             });
+            break; 
           }
         } catch (retryErr) {
           console.warn('[stream] empty-response fallback failed', retryErr);
+          break;
         }
+        
+        retryCount++;
+        retryRoute = buildEmptyResponseRetryRoute(retryCount);
       }
     }
 
@@ -716,7 +744,11 @@ export async function* transformStream(
     if (!sawAnyOutput && !sawToolUse) {
       const idx = contentBlockIndex + (inContentBlock || inToolCall || inThinking ? 1 : 0);
       yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: idx, content_block: { type: 'text', text: '' } })}\n\n`;
-      yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: '[Model returned an empty response. Please retry.]' } })}\n\n`;
+      const isFiltered = finalFinishReason === 'SAFETY' || finalFinishReason === 'RECITATION';
+      const placeholder = isFiltered
+        ? `[Model response filtered by safety policies (FinishReason: ${finalFinishReason}). Please refine your request.]`
+        : '[Model returned an empty response. Please retry.]';
+      yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: placeholder } })}\n\n`;
       yield `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: idx })}\n\n`;
     }
 

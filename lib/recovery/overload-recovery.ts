@@ -38,6 +38,11 @@ export interface ModelHealthRecord {
 const MODEL_HEALTH_KEY = (model: string) => `provider:health:${model.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 const MODEL_HEALTH_TTL = 3600; // 1 h — reset health scores after sustained idle
 
+// Phase 8: In-memory fallback for health records (resilient to Redis outages)
+const localHealthCache = new Map<string, ModelHealthRecord>();
+const getLocalHealth = (model: string): ModelHealthRecord => 
+  localHealthCache.get(model) || { failures: 0, successes: 0, totalLatencyMs: 0, overloadCount: 0, updatedAt: 0 };
+
 /**
  * Record an outcome for a model after a response.
  * Called from the retry engine on each model attempt.
@@ -67,6 +72,7 @@ export async function recordModelHealth(
     };
 
     await redis.set(key, JSON.stringify(updated), { ex: MODEL_HEALTH_TTL });
+    localHealthCache.set(model, updated);
   } catch {
     // best-effort — health tracking must not affect the request path
   }
@@ -79,9 +85,13 @@ export async function recordModelHealth(
 export async function getModelHealth(model: string): Promise<ModelHealthRecord> {
   try {
     const raw = await redis.get<string>(MODEL_HEALTH_KEY(model));
-    if (raw) return JSON.parse(raw) as ModelHealthRecord;
+    if (raw) {
+      const record = JSON.parse(raw) as ModelHealthRecord;
+      localHealthCache.set(model, record);
+      return record;
+    }
   } catch { /* ignore */ }
-  return { failures: 0, successes: 0, totalLatencyMs: 0, overloadCount: 0, updatedAt: 0 };
+  return getLocalHealth(model);
 }
 
 /**
@@ -114,12 +124,16 @@ export async function getHealthAwareFallbackChain(
   const healthRecords = await Promise.all(candidates.map(getModelHealth));
 
   // Score each candidate
+  const failureWeight = Number(process.env.HEALTH_SCORE_FAILURE_WEIGHT || 10);
+  const overloadWeight = Number(process.env.HEALTH_SCORE_OVERLOAD_WEIGHT || 5);
+  const successWeight = Number(process.env.HEALTH_SCORE_SUCCESS_WEIGHT || 1);
+  const gemmaPenalty = Number(process.env.HEALTH_SCORE_GEMMA_PENALTY || 50);
+
   const scored = candidates.map((model, i) => {
     const h = healthRecords[i];
-    // Gemma penalty: add 50 to score to ensure Gemma stays near the end
-    // unless Gemini models are all critically degraded.
-    const gemmaBase = model.startsWith('gemma-') ? 50 : 0;
-    const score = gemmaBase + (h.failures * 10) + (h.overloadCount * 5) - h.successes;
+    // Gemma penalty: ensure Gemma stays near the end unless Gemini is degraded.
+    const gemmaBase = model.startsWith('gemma-') ? gemmaPenalty : 0;
+    const score = gemmaBase + (h.failures * failureWeight) + (h.overloadCount * overloadWeight) - (h.successes * successWeight);
     return { model, score };
   });
 
@@ -310,8 +324,8 @@ export function compactBodyForOverload(body: any): any {
   // Keep the original opening prompt verbatim and preserve the active tail.
   // Under overload we aggressively drop the middle 60%+ of turns so the next
   // retry has a materially smaller payload while still retaining the current task.
-  const headCount = 1;
-  const tailCount = Math.min(Math.max(Math.ceil(contents.length * 0.3), 4), 8);
+  const headCount = Number(process.env.OVERLOAD_COMPACTION_HEAD || 1);
+  const tailCount = Number(process.env.OVERLOAD_COMPACTION_TAIL || Math.min(Math.max(Math.ceil(contents.length * 0.3), 4), 8));
   const keptCount = Math.min(contents.length, headCount + tailCount);
   const removedCount = contents.length - keptCount;
   if (removedCount <= 0) return body;

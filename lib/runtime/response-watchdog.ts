@@ -37,17 +37,20 @@ export const STALL_DETECTION_MS = Number(process.env.STALL_DETECTION_MS || 30_00
 
 /**
  * Wraps a promise with a hard timeout. On timeout, rejects with a descriptive error.
- * The original promise is NOT cancelled — callers should use AbortController if
- * the underlying operation supports it.
+ * If controller is provided, it will be aborted automatically on timeout.
  */
 export function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   label: string,
+  controller?: AbortController,
 ): Promise<T> {
   if (timeoutMs <= 0) return promise;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
+      if (controller) {
+        try { controller.abort(`Timeout: ${label} exceeded ${timeoutMs}ms`); } catch { /* ignore */ }
+      }
       reject(new Error(`Timeout: ${label} exceeded ${timeoutMs}ms`));
     }, timeoutMs);
 

@@ -8,7 +8,7 @@
 //
 // Pure functions, no I/O, no Node APIs. Edge-runtime safe.
 
-import { verifyAllToolResults } from './verification-engine';
+import { verifyAllToolResults, type VerificationResult } from './verification-engine';
 
 export interface CompletionGateResult {
   prematureCompletion: boolean;
@@ -49,7 +49,10 @@ function findCompletionSignals(text: string): string[] {
   return signals;
 }
 
-export function detectPrematureCompletion(messages: any[]): CompletionGateResult {
+export function detectPrematureCompletion(
+  messages: any[], 
+  preCalculatedResults?: VerificationResult[]
+): CompletionGateResult {
   if (!Array.isArray(messages) || messages.length === 0) {
     return { prematureCompletion: false, guidance: '', unverifiedClaims: [], failedToolCount: 0, uncertainToolCount: 0 };
   }
@@ -77,7 +80,7 @@ export function detectPrematureCompletion(messages: any[]): CompletionGateResult
   }
 
   // There is a completion signal. Now check if the tool record supports it.
-  const allResults = verifyAllToolResults(messages);
+  const allResults = preCalculatedResults ?? verifyAllToolResults(messages);
   const failedCount = allResults.filter(r => r.verdict === 'failure').length;
   const uncertainCount = allResults.filter(r => r.verdict === 'uncertain').length;
 

@@ -76,7 +76,7 @@ function isOverloadError(message: string): boolean {
 // Phase 5: Concurrency semaphore (MAX_ACTIVE = 3)
 // ---------------------------------------------------------------------------
 
-const MAX_ACTIVE_EXECUTIONS = 3;
+const MAX_ACTIVE_EXECUTIONS = Number(process.env.SUBAGENT_MAX_ACTIVE || 3);
 let _activeExecutions = 0;
 const _executionQueue: Array<() => void> = [];
 

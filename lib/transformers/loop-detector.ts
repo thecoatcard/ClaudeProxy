@@ -291,7 +291,12 @@ export function detectEditStagnation(messages: any[]): EditStagnationResult {
   const byId = new Map<string, ToolCall>();
   const order: string[] = [];
 
-  for (const msg of messages) {
+  // Optimization: Scan only the last 50 messages. Edit stagnation detection 
+  // only cares about recent history to catch immediate loops.
+  const scanLimit = 50;
+  const messagesToScan = (messages || []).slice(-scanLimit);
+
+  for (const msg of messagesToScan) {
     if (!Array.isArray(msg?.content)) continue;
 
     if (msg.role === 'assistant') {

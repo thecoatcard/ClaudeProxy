@@ -26,6 +26,7 @@ import { detectInteractiveCommandsInHistory, buildInteractiveCommandGuidance } f
 import { detectContradiction } from './contradiction-detector';
 import { checkInstallCompatibility } from './dependency-compatibility';
 import { classifyAndRecover, requiresWebSearch } from './web-recovery';
+import { verifyAllToolResults } from './verification-engine';
 import {
   buildPlatformShellGuidance,
   buildPythonPatchValidationGuidance,
@@ -84,6 +85,9 @@ export async function runBehaviorAudit(
     pythonPatchValidationRisks: 0,
   };
 
+  // Pre-calculate tool verification results once (limited to last 50 turns).
+  const toolResults = verifyAllToolResults(messages);
+
   // 0. Phase 1/3/7 — Edit stagnation detection (highest priority among tool checks).
   // Detects Read→Edit fail→Read→Edit fail loops and repeated consecutive edit failures.
   // Fires BEFORE the generic loop detector so the model gets targeted edit guidance first.
@@ -136,7 +140,7 @@ export async function runBehaviorAudit(
   }
 
   // 2. Premature completion gate.
-  const completionResult = detectPrematureCompletion(messages);
+  const completionResult = detectPrematureCompletion(messages, toolResults);
   if (completionResult.prematureCompletion) {
     diagnostics.prematureCompletion = true;
     guidanceParts.push(completionResult.guidance);
@@ -163,7 +167,7 @@ export async function runBehaviorAudit(
   // Only run when systemText is non-trivial (>100 chars) to avoid false positives
   // on short single-line prompts.
   if (systemText.length > 100) {
-    const specResult = validateSpec(systemText, messages);
+    const specResult = validateSpec(systemText, messages, toolResults);
     const unaddressed = specResult.requirements.filter(r => !r.addressed).length;
     if (unaddressed > 0) {
       diagnostics.unaddressedRequirements = unaddressed;
@@ -274,7 +278,11 @@ export async function runBehaviorAudit(
 function extractInstallCommands(messages: any[]): string[] {
   const cmds: string[] = [];
   const installRe = /(?:npm\s+install|npm\s+i|yarn\s+add|pnpm\s+add)\s+[^;|\n]{5,}/i;
-  for (const msg of messages) {
+  // Optimization: Scan only recent history (last 30 messages)
+  const scanLimit = 30;
+  const messagesToScan = messages.slice(-scanLimit);
+  
+  for (const msg of messagesToScan) {
     if (!Array.isArray(msg?.content)) continue;
     for (const block of msg.content) {
       if (block?.type !== 'tool_use') continue;
@@ -287,7 +295,11 @@ function extractInstallCommands(messages: any[]): string[] {
 
 function extractToolErrors(messages: any[]): Array<{ errorText: string; toolInput?: any }> {
   const errors: Array<{ errorText: string; toolInput?: any }> = [];
-  for (const msg of messages) {
+  // Optimization: Already scoped to last 15 in call site, but we ensure it here.
+  const scanLimit = 15;
+  const messagesToScan = messages.slice(-scanLimit);
+
+  for (const msg of messagesToScan) {
     if (msg?.role !== 'user' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
       if (block?.type !== 'tool_result') continue;
