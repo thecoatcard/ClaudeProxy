@@ -162,21 +162,31 @@ async function finalizeConversationId(
   legacyId: string,
   workspaceFingerprint: string,
 ): Promise<string> {
-  // Explicit IDs do not need upgrading.
+  // 1. Explicit IDs (from metadata or tool headers) take absolute precedence.
   const explicitId = anthropicReq?.metadata?.conversation_id
     || anthropicReq?.conversation_id
     || anthropicReq?.session_id
     || anthropicReq?.thread_id;
   if (typeof explicitId === 'string' && explicitId.trim()) return explicitId.trim();
 
-  // Derive the slot hash from the legacy anchor.
+  // 2. Session Resume logic: If we have a stable workspace fingerprint,
+  // try to resume the last session used in this directory for this user.
+  // This enables "claude-magic -p 'task'" to be stateful across CLI runs.
+  if (workspaceFingerprint && workspaceFingerprint !== '00000000') {
+    const resumeKey = `session:last:${userId}:${workspaceFingerprint}`;
+    const lastId = await redis.get<string>(resumeKey).catch(() => null);
+    if (lastId) {
+      console.info(`[session] Resuming last session for workspace ${workspaceFingerprint}: ${lastId}`);
+      return lastId;
+    }
+  }
+
+  // 3. Fallback: Derive a nonce-based ID from the first message anchor.
   const systemText = typeof anthropicReq?.system === 'string' ? anthropicReq.system : '';
   const firstUser = (anthropicReq?.messages || []).find((msg: any) => msg?.role === 'user');
   const slotHash = deriveSlotHash(userId, systemText, extractText(firstUser?.content));
 
-  // Retrieve or create the nonce for this slot.
   const nonce = await getOrCreateSessionNonce(slotHash);
-
   return deriveHardSessionId(userId, workspaceFingerprint, nonce);
 }
 
@@ -434,6 +444,12 @@ export async function transformRequestToGemini(
     // can detect cross-workspace context leakage even when the op-state root is null.
     if (currentWorkspaceRoot) {
       redis.set(workspaceRootKey, currentWorkspaceRoot, { ex: SUMMARY_TTL_SECONDS }).catch(() => {});
+    }
+
+    // Phase 2: Persist the Session Resume mapping.
+    if (workspaceFp.fingerprint && workspaceFp.fingerprint !== '00000000') {
+      const resumeKey = `session:last:${userId || 'anon'}:${workspaceFp.fingerprint}`;
+      redis.set(resumeKey, conversationId, { ex: 86400 }).catch(() => {}); // 24h TTL for session resume
     }
   }
 

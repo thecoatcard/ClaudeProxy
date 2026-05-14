@@ -56,6 +56,7 @@ export interface BehaviorAuditResult {
     editStagnationFailures: number;
     platformShellRisks: number;
     pythonPatchValidationRisks: number;
+    idleTurnDetected: boolean;
   };
 }
 
@@ -83,6 +84,7 @@ export async function runBehaviorAudit(
     editStagnationFailures: 0,
     platformShellRisks: 0,
     pythonPatchValidationRisks: 0,
+    idleTurnDetected: false,
   };
 
   // Pre-calculate tool verification results once (limited to last 50 turns).
@@ -262,6 +264,33 @@ export async function runBehaviorAudit(
         );
         break; // one recovery guidance per turn is enough
       }
+    }
+  }
+
+  // 10. Autonomous Enforcement — check for "instructional idling".
+  // If the last assistant message contains text instructions but NO tool calls,
+  // and the user hasn't explicitly asked for an explanation, nudge the model to act.
+  if (lastAssistantMsg && Array.isArray(lastAssistantMsg.content)) {
+    const hasToolCalls = lastAssistantMsg.content.some((b: any) => b.type === 'tool_use');
+    const hasThinking = lastAssistantMsg.content.some((b: any) => b.type === 'thinking');
+    const textBlocks = lastAssistantMsg.content.filter((b: any) => b.type === 'text' && b.text?.length > 20);
+    
+    const isPurelyInstructional = !hasToolCalls && textBlocks.length > 0;
+    const containsTaskDelegation = textBlocks.some((b: any) => 
+      /\b(?:you (?:should|could|can)|please (?:add|modify|run|include)|manually)\b/i.test(b.text)
+    );
+
+    if (isPurelyInstructional && containsTaskDelegation) {
+      diagnostics.idleTurnDetected = true;
+      guidanceParts.push(
+        '---\n' +
+        '[AUTONOMOUS_ENFORCEMENT] CRITICAL: You provided instructions to the user but took NO action.\n' +
+        '• DO NOT ask the user to perform implementation steps. You have tools (write_to_file, run_command, etc.).\n' +
+        '• If a dependency or CDN is needed, add it to the file yourself.\n' +
+        '• Perform the requested task using tool calls NOW.\n' +
+        '---'
+      );
+      console.warn('[behavior-auditor] idle turn detected: model delegated task to user');
     }
   }
 

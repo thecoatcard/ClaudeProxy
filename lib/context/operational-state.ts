@@ -764,6 +764,14 @@ export function buildOperationalGuidance(state: OperationalState): string {
     lines.push('WARNING: Interactive stdin not supported. Always use non-interactive flags for CLI tools.');
   }
 
+  // Efficiency & Discovery Tips
+  if (state.tool_chain_state.length > 5) {
+    lines.push('Efficiency Tip: Emit multiple tool calls (e.g. 3+ write_file calls) in a single turn if tasks are independent.');
+  }
+  if (state.workspace_root && existingFiles.length < 5) {
+    lines.push('Discovery Tip: Use list_dir recursively (ls -R) or search to locate project files like index.html or package.json.');
+  }
+
   lines.push('---');
   return lines.join('\n');
 }
