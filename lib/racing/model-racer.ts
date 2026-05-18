@@ -1,18 +1,8 @@
 /**
  * lib/racing/model-racer.ts
  *
- * Parallel model racing — for overload-sensitive requests, race multiple models
- * simultaneously. First healthy response wins, others are cancelled.
- *
- * Dynamic model racing by task type:
- *   CHAT             → off  (single model, too cheap to race)
- *   HEALTH_CHECK     → off
- *   COMPACTION       → off  (background)
- *   LIGHT_CODING     → 2 models
- *   HEAVY_CODING     → 3 models
- *   REASONING        → off  (gemma primary — race only on failure, not default)
- *   WEB_SEARCH       → 2 models
- *   overload         → enable (any task type becomes 2-3 model race)
+ * Parallel model racing: race multiple models and keep first healthy response.
+ * Uses distinct keys when possible and aborts losing model requests.
  */
 
 import { getHealthiestKeyObj, reportKeyFailure, recordKeyUsage } from '../key-manager';
@@ -29,31 +19,17 @@ export interface ModelRaceResult {
   winnerModel: string;
 }
 
-/** Default models to race for overload-sensitive requests. */
 const DEFAULT_RACE_MODELS = [
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
 
-// ---------------------------------------------------------------------------
-// Dynamic model race config by task type
-// ---------------------------------------------------------------------------
-
 export interface ModelRaceConfig {
-  /** Whether model racing is enabled for this task type */
   enabled: boolean;
-  /** Number of models to race (taken from head of task chain) */
   modelCount: number;
 }
 
-/**
- * Get the dynamic model race config for a given task type.
- *
- * REASONING uses Gemma primary — racing Gemma vs Gemini defeats the purpose.
- * CHAT and HEALTH_CHECK are too cheap to race.
- * HEAVY_CODING benefits most from racing (highest latency sensitivity).
- */
 export function getDynamicModelRaceConfig(taskType: TaskType, isOverload = false, racingEnabled = false): ModelRaceConfig {
   if (!racingEnabled) return { enabled: false, modelCount: 1 };
   if (isOverload) return { enabled: true, modelCount: 3 };
@@ -74,28 +50,21 @@ export function getDynamicModelRaceConfig(taskType: TaskType, isOverload = false
   }
 }
 
-/**
- * Get the models to use for a racing config, pulled from the task's chain.
- */
 export function getModelsForRace(taskType: TaskType, count: number): string[] {
   const chain = getTaskModelChain(taskType);
   return chain.slice(0, count);
 }
 
-/**
- * Race multiple models in parallel with independent keys.
- *
- * Each model gets its own healthy API key. All fire simultaneously.
- * First 2xx response wins; others are abandoned.
- *
- * Returns null if no models produce a successful response.
- */
+function isAbortLike(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return msg.toLowerCase().includes('abort');
+}
+
 export async function raceModels(opts: {
   models?: string[];
   body: any;
   stream: boolean;
   userId?: string;
-  /** Body transformers per model (e.g., strip images for text-only). */
   bodyTransformer?: (model: string, body: any) => any;
 }): Promise<ModelRaceResult | null> {
   const { models = DEFAULT_RACE_MODELS, body, stream, userId, bodyTransformer } = opts;
@@ -103,20 +72,21 @@ export async function raceModels(opts: {
 
   if (models.length === 0) return null;
 
-  // Gather one key per model (different keys preferred for true parallelism)
+  // Gather one distinct key per model when possible. If the account has only one
+  // key, skip fan-out to avoid burning rate limits on duplicate requests.
   const racers: Array<{ model: string; keyId: string; apiKey: string }> = [];
   const usedKeyIds = new Set<string>();
 
   for (const model of models) {
     const keyObj = await getHealthiestKeyObj(userId);
     if (!keyObj) continue;
+    if (usedKeyIds.has(keyObj.id)) continue;
     racers.push({ model, keyId: keyObj.id, apiKey: keyObj.key });
     usedKeyIds.add(keyObj.id);
   }
 
   if (racers.length === 0) return null;
 
-  // Single model — no race
   if (racers.length === 1) {
     const racer = racers[0];
     const transformedBody = bodyTransformer ? bodyTransformer(racer.model, body) : body;
@@ -142,28 +112,35 @@ export async function raceModels(opts: {
     }
   }
 
-  // Multi-model race
+  const controllers = racers.map(() => new AbortController());
+
   const racePromises = racers.map(async (racer, idx) => {
     const transformedBody = bodyTransformer ? bodyTransformer(racer.model, body) : body;
     try {
-      const res = await callGemini(racer.model, racer.apiKey, transformedBody, stream);
+      const res = await callGemini(racer.model, racer.apiKey, transformedBody, stream, {
+        signal: controllers[idx].signal,
+      });
 
       if (res.ok) {
+        for (let j = 0; j < controllers.length; j++) {
+          if (j !== idx) {
+            try { controllers[j].abort('lost model race'); } catch { /* noop */ }
+          }
+        }
         await recordKeyUsage(racer.keyId);
         return { response: res, model: racer.model, keyId: racer.keyId, idx };
       }
 
-      // Report failures
       if (res.status === 429) await reportKeyFailure(racer.keyId, 'ratelimit');
       else if (res.status === 403) await reportKeyFailure(racer.keyId, 'auth');
       else if (res.status >= 500) await reportKeyFailure(racer.keyId, 'server');
       return null;
-    } catch {
+    } catch (err) {
+      if (isAbortLike(err)) return null;
       return null;
     }
   });
 
-  // Wait for the first success, or until all have failed
   const winner = await new Promise<any>((resolve) => {
     let completed = 0;
     let resolved = false;
@@ -174,7 +151,9 @@ export async function raceModels(opts: {
         if (val && !resolved) {
           resolved = true;
           resolve(val);
-        } else if (completed === racePromises.length && !resolved) {
+          return;
+        }
+        if (completed === racePromises.length && !resolved) {
           resolve(null);
         }
       }).catch(() => {

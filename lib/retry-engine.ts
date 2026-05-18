@@ -472,10 +472,16 @@ export async function executeWithRetry(
 
     try {
       const modelCallStart = Date.now();
+      const modelCallTimeoutMs = getAttemptModelCallTimeoutMs(modelMap.taskType, attempt);
+      const modelCallController = new AbortController();
       const res = await withTimeout(
-        callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream),
-        getAttemptModelCallTimeoutMs(modelMap.taskType, attempt),
+        callGemini(currentInternalModel, keyObj.key, bodyForThisAttempt, stream, {
+          signal: modelCallController.signal,
+          timeoutMs: modelCallTimeoutMs + 1000,
+        }),
+        modelCallTimeoutMs,
         `callGemini(${currentInternalModel})`,
+        modelCallController,
       );
       logInfo('MODEL_CALL', 'Gemini model call completed', {
         requestId,

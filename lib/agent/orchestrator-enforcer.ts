@@ -40,7 +40,6 @@ import {
   transitionOrchestrationState,
   finalizeMerge,
   checkAndIncrementLoopCount,
-  isTerminalState,
 } from './orchestrator-state';
 import {
   buildRequestFingerprint,
@@ -162,6 +161,23 @@ export async function prepareOrchestration(
   const fingerprint = buildRequestFingerprint(userId, requestBody);
   const dedupResult = await checkOrchestrationDedup(fingerprint);
   if (dedupResult.reuse) {
+    const loopGuard = await checkAndIncrementLoopCount(dedupResult.parentId);
+    if (!loopGuard.allowed) {
+      logOrchestrator('orchestrator-status', {
+        action: 'dedup-blocked-loop-guard',
+        parentId: dedupResult.parentId,
+        entryCount: loopGuard.entryCount,
+      });
+      const blockedCtx: OrchestratorContext = {
+        parentId: dedupResult.parentId,
+        complexity: { ...complexity, orchestratorRequired: false },
+        subagentTasks: dedupResult.tasks,
+        orchestratorEnabled: false,
+        systemPromptInjected: false,
+      };
+      return { enrichedBody: requestBody, ctx: blockedCtx };
+    }
+
     logOrchestrator('orchestrator-status', { action: 'dedup-reuse', parentId: dedupResult.parentId });
     const ctx: OrchestratorContext = {
       parentId: dedupResult.parentId,
@@ -181,7 +197,36 @@ export async function prepareOrchestration(
   await transitionOrchestrationState(parentId, 'RUNNING');
 
   // ── Phase 2: Register fingerprint for dedup ────────────────────────────────
-  await registerOrchestrationFingerprint(fingerprint, parentId);
+  const canonicalParentId = await registerOrchestrationFingerprint(fingerprint, parentId);
+  if (canonicalParentId !== parentId) {
+    await transitionOrchestrationState(parentId, 'FAILED', {
+      finalOutput: `[dedup-lost-race] canonical parent is ${canonicalParentId}`,
+      completedAt: Date.now(),
+    }).catch(() => {});
+
+    const existingTasks = await waitForSubagentTasks(canonicalParentId, 600);
+    if (existingTasks.length > 0) {
+      const ctx: OrchestratorContext = {
+        parentId: canonicalParentId,
+        complexity,
+        subagentTasks: existingTasks,
+        orchestratorEnabled: true,
+        systemPromptInjected: true,
+      };
+      return { enrichedBody: injectOrchestratorPrompt(requestBody), ctx };
+    }
+
+    // Canonical parent exists but task graph is not ready yet; fail closed to avoid
+    // creating a duplicate orchestration path in parallel.
+    const ctx: OrchestratorContext = {
+      parentId: canonicalParentId,
+      complexity: { ...complexity, orchestratorRequired: false },
+      subagentTasks: [],
+      orchestratorEnabled: false,
+      systemPromptInjected: false,
+    };
+    return { enrichedBody: requestBody, ctx };
+  }
 
   // ── Inject coordinator system prompt ──────────────────────────────────────
   const enrichedBody = injectOrchestratorPrompt(requestBody);
@@ -239,29 +284,55 @@ export async function finalizeOrchestration(
 ): Promise<void> {
   if (!ctx.orchestratorEnabled) return;
 
+  const liveTasks = ctx.parentId
+    ? await getSubagentTasksByParent(ctx.parentId).catch(() => [])
+    : [];
+  const liveMap = new Map(liveTasks.map((task) => [task.id, task]));
+  let hasFailure = false;
+
   for (const task of ctx.subagentTasks) {
-    await updateSubagentStatus(task.id, 'COMPLETED', artifacts).catch(() => {});
-    // Record performance data for dashboard metrics
+    const liveTask = liveMap.get(task.id) ?? task;
+    const status = liveTask.status;
+    const execution = liveTask.execution;
+    const success = execution?.success ?? (status === 'COMPLETED');
+    const isIncomplete = status === 'PENDING' || status === 'RUNNING' || status === 'SKIPPED';
+
+    if (status === 'COMPLETED') {
+      await updateSubagentStatus(task.id, 'COMPLETED', artifacts).catch(() => {});
+    }
+    if (status === 'FAILED' || execution?.success === false || isIncomplete) {
+      hasFailure = true;
+    }
+
+    // Record performance from checkpoints when available.
     const role = inferRoleFromDescription(task.description);
     await recordSubagentPerformance({
-      model: task.model,
+      model: execution?.model ?? task.model,
       taskType: role,
-      latencyMs: latencyMs || (Date.now() - task.createdAt),
-      inputTokens: 0,
-      outputTokens: 0,
-      success: true,
+      latencyMs: execution?.latencyMs ?? (latencyMs || (Date.now() - task.createdAt)),
+      inputTokens: execution?.inputTokens ?? 0,
+      outputTokens: execution?.outputTokens ?? 0,
+      success,
     }).catch(() => {});
   }
 
-  // Phase 7: Persist final output and transition to COMPLETED (prevents reopen)
+  // Persist final state based on real execution status.
   if (ctx.parentId) {
-    await finalizeMerge(ctx.parentId, finalOutput).catch(() => {});
+    if (hasFailure) {
+      await transitionOrchestrationState(ctx.parentId, 'FAILED', {
+        finalOutput: finalOutput || '[orchestration failed before merge completion]',
+        completedAt: Date.now(),
+      }).catch(() => {});
+    } else {
+      await finalizeMerge(ctx.parentId, finalOutput).catch(() => {});
+    }
   }
 
   logOrchestrator('merge-completed', {
     parentId: ctx.parentId,
     subTaskCount: ctx.subagentTasks.length,
     artifactCount: artifacts.length,
+    hasFailure,
   });
 }
 
@@ -343,9 +414,20 @@ export async function resumeOrchestratedExecution(
   const liveTasks = await getSubagentTasksByParent(ctx.parentId);
   if (liveTasks.length === 0) return runOrchestratedExecution(ctx);
 
-  // Filter to only tasks that still need execution
+  const preCompletedIds = liveTasks
+    .filter((t) => t.status === 'COMPLETED' || t.execution?.success === true)
+    .map((t) => t.id);
+
+  const preResolvedOutputs = new Map(
+    liveTasks
+      .map((task) => [task.id, taskToExecutionResult(task)] as const)
+      .filter((entry): entry is [string, NonNullable<ReturnType<typeof taskToExecutionResult>>] => Boolean(entry[1]))
+      .filter(([, result]) => result.success),
+  );
+
+  // Include RUNNING as resumable: interrupted requests can leave stale RUNNING state.
   const remainingTasks = liveTasks.filter(
-    (t) => t.status === 'PENDING' || t.status === 'FAILED'
+    (t) => t.status === 'PENDING' || t.status === 'FAILED' || t.status === 'RUNNING'
   );
 
   if (remainingTasks.length === 0) {
@@ -353,11 +435,18 @@ export async function resumeOrchestratedExecution(
       parentId: ctx.parentId,
       action: 'resume-all-already-completed',
     });
-    // All tasks already done — just merge
-    const allTasks = liveTasks;
-    // Build a synthetic scheduler result from completed tasks
-    const schedulerResult = await scheduleSubagentTasks(allTasks);
-    const mergeResult = mergeSubagentOutputs(allTasks, schedulerResult);
+
+    const schedulerResult = {
+      outputs: preResolvedOutputs,
+      completed: [...preCompletedIds],
+      failed: liveTasks
+        .filter((t) => t.status === 'FAILED' || t.execution?.success === false)
+        .map((t) => t.id),
+      skipped: [],
+      totalLatencyMs: 0,
+    };
+
+    const mergeResult = mergeSubagentOutputs(liveTasks, schedulerResult);
     await finalizeOrchestration(ctx, mergeResult.sourceTaskIds, mergeResult.output);
     return mergeResult.output;
   }
@@ -369,8 +458,11 @@ export async function resumeOrchestratedExecution(
     completedTasks: liveTasks.length - remainingTasks.length,
   });
 
-  // Re-run only remaining tasks
-  const schedulerResult = await scheduleSubagentTasks(remainingTasks);
+  // Re-run only remaining tasks while preserving completed dependency graph.
+  const schedulerResult = await scheduleSubagentTasks(remainingTasks, {
+    preCompletedTaskIds: preCompletedIds,
+    preResolvedOutputs,
+  });
 
   logOrchestrator('subagent-completed', {
     parentId: ctx.parentId,
@@ -411,6 +503,31 @@ function inferRoleFromDescription(description: string): SubagentRole {
   if (d.includes('verify') || d.includes('check')) return 'VERIFIER';
   if (d.includes('merge')) return 'MERGER';
   return 'GENERIC';
+}
+
+function taskToExecutionResult(task: SubagentTask) {
+  if (!task.execution) return null;
+  return {
+    taskId: task.id,
+    model: task.execution.model,
+    output: task.execution.output,
+    inputTokens: task.execution.inputTokens,
+    outputTokens: task.execution.outputTokens,
+    latencyMs: task.execution.latencyMs,
+    retries: task.execution.retries,
+    success: task.execution.success,
+    error: task.execution.error,
+  };
+}
+
+async function waitForSubagentTasks(parentId: string, timeoutMs: number): Promise<SubagentTask[]> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const tasks = await getSubagentTasksByParent(parentId);
+    if (tasks.length > 0) return tasks;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return [];
 }
 
 async function createSubagentStubs(

@@ -74,6 +74,25 @@ describe('validateMergeInputs', () => {
     const result = validateMergeInputs([t], sr);
     expect(result.warnings.length).toBeGreaterThan(0);
   });
+
+  test('persisted successful snapshot counts as completed during resume', () => {
+    const t = createSubagentTask({ parentId: 'p', owner: 'u', description: 'plan', model: 'gemma-4-31b-it' });
+    t.status = 'COMPLETED';
+    t.execution = {
+      model: t.model,
+      output: 'snapshot-plan-output',
+      inputTokens: 20,
+      outputTokens: 10,
+      latencyMs: 80,
+      retries: 0,
+      success: true,
+      updatedAt: Date.now(),
+    };
+    const sr: SchedulerResult = { outputs: new Map(), completed: [], failed: [], skipped: [], totalLatencyMs: 0 };
+    const result = validateMergeInputs([t], sr);
+    expect(result.valid).toBe(true);
+    expect(result.missingTasks).toHaveLength(0);
+  });
 });
 
 describe('mergeSubagentOutputs', () => {
@@ -122,5 +141,26 @@ describe('mergeSubagentOutputs', () => {
     const sr: SchedulerResult = { outputs: new Map(), completed: [], failed: [t.id], skipped: [], totalLatencyMs: 0 };
     const result = mergeSubagentOutputs([t], sr);
     expect(result.output).toContain('[No subagent outputs available]');
+  });
+
+  test('merges from persisted snapshots when scheduler outputs are absent', () => {
+    const t = createSubagentTask({ parentId: 'p', owner: 'u', description: 'plan', model: 'gemma-4-31b-it' });
+    t.status = 'COMPLETED';
+    t.execution = {
+      model: t.model,
+      output: 'snapshot output',
+      inputTokens: 11,
+      outputTokens: 7,
+      latencyMs: 60,
+      retries: 0,
+      success: true,
+      updatedAt: Date.now(),
+    };
+    const sr: SchedulerResult = { outputs: new Map(), completed: [t.id], failed: [], skipped: [], totalLatencyMs: 0 };
+    const result = mergeSubagentOutputs([t], sr);
+    expect(result.output).toContain('snapshot output');
+    expect(result.sourceTaskIds).toContain(t.id);
+    expect(result.totalInputTokens).toBe(11);
+    expect(result.totalOutputTokens).toBe(7);
   });
 });

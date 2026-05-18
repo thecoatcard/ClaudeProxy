@@ -9,7 +9,11 @@
 
 import { callGemini } from '@/lib/gemini-adapter';
 import { getHealthiestKeyObj } from '@/lib/key-manager';
-import { updateSubagentStatus, type SubagentTask } from './subagent-memory';
+import {
+  saveSubagentExecution,
+  updateSubagentStatus,
+  type SubagentTask,
+} from './subagent-memory';
 import { recordSubagentPerformance } from './subagent-performance';
 
 // ---------------------------------------------------------------------------
@@ -186,102 +190,121 @@ export async function executeSubagent(
   dependencyOutputs: Map<string, string> = new Map()
 ): Promise<SubagentExecutionResult> {
   await acquireSlot();
-  const startTime = Date.now();
-  const models = [task.model, ...getFallbackChain(task.model)];
-  let lastError = '';
-  let retries = 0;
+  try {
+    const startTime = Date.now();
+    const models = [task.model, ...getFallbackChain(task.model)];
+    let lastError = '';
+    let retries = 0;
 
-  await updateSubagentStatus(task.id, 'RUNNING').catch(() => {});
+    await updateSubagentStatus(task.id, 'RUNNING').catch(() => {});
 
-  for (const model of models) {
-    try {
-      const keyObj = await getHealthiestKeyObj();
-      if (!keyObj) {
-        throw new Error('No API keys available');
-      }
+    for (const model of models) {
+      try {
+        const keyObj = await getHealthiestKeyObj(task.owner);
+        if (!keyObj) {
+          throw new Error('No API keys available');
+        }
 
-      const body = buildSubagentPrompt(task, dependencyOutputs);
-      const res = await callGemini(model, keyObj.key, body, false);
+        const body = buildSubagentPrompt(task, dependencyOutputs);
+        const res = await callGemini(model, keyObj.key, body, false);
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => 'unknown error');
-        throw new Error(`HTTP ${res.status}: ${errText}`);
-      }
+        if (!res.ok) {
+          const errText = await res.text().catch(() => 'unknown error');
+          throw new Error(`HTTP ${res.status}: ${errText}`);
+        }
 
-      const data = await res.json();
-      const output = extractGeminiText(data);
-      const inputTokens = data?.usageMetadata?.promptTokenCount ?? 0;
-      const outputTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
-      const latencyMs = Date.now() - startTime;
+        const data = await res.json();
+        const output = extractGeminiText(data);
+        const inputTokens = data?.usageMetadata?.promptTokenCount ?? 0;
+        const outputTokens = data?.usageMetadata?.candidatesTokenCount ?? 0;
+        const latencyMs = Date.now() - startTime;
 
-      // Phase 5 — Empty agent result detection.
-      // 0-token/empty payload is treated as failure so we can fallback/retry.
-      if (isEmptySubagentResult(data, output, outputTokens)) {
-        throw new Error('EMPTY_SUBAGENT_RESULT');
-      }
+        // Phase 5: empty agent result detection.
+        if (isEmptySubagentResult(data, output, outputTokens)) {
+          throw new Error('EMPTY_SUBAGENT_RESULT');
+        }
 
-      await updateSubagentStatus(task.id, 'COMPLETED', []).catch(() => {});
+        const successResult: SubagentExecutionResult = {
+          taskId: task.id,
+          model,
+          output,
+          inputTokens,
+          outputTokens,
+          latencyMs,
+          retries,
+          success: true,
+        };
 
-      // Record performance
-      await recordSubagentPerformance({
-        model,
-        taskType: detectRole(task.description),
-        latencyMs,
-        inputTokens,
-        outputTokens,
-        success: true,
-      }).catch(() => {});
+        await saveSubagentExecution(task.id, {
+          model: successResult.model,
+          output: successResult.output,
+          inputTokens: successResult.inputTokens,
+          outputTokens: successResult.outputTokens,
+          latencyMs: successResult.latencyMs,
+          retries: successResult.retries,
+          success: true,
+        }).catch(() => {});
 
-      releaseSlot();
-      return {
-        taskId: task.id,
-        model,
-        output,
-        inputTokens,
-        outputTokens,
-        latencyMs,
-        retries,
-        success: true,
-      };
-    } catch (err: unknown) {
-      lastError = err instanceof Error ? err.message : String(err);
-      retries++;
-      console.warn(
-        `[SubagentExecutor] task=${task.id} model=${model} attempt=${retries} error=${lastError}`
-      );
+        await recordSubagentPerformance({
+          model,
+          taskType: detectRole(task.description),
+          latencyMs,
+          inputTokens,
+          outputTokens,
+          success: true,
+        }).catch(() => {});
 
-      // Record the failure
-      const isOverload = isOverloadError(lastError);
-      await recordSubagentPerformance({
-        model,
-        taskType: detectRole(task.description),
-        latencyMs: Date.now() - startTime,
-        inputTokens: 0,
-        outputTokens: 0,
-        success: false,
-      }).catch(() => {});
+        return successResult;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : String(err);
+        retries++;
+        console.warn(
+          `[SubagentExecutor] task=${task.id} model=${model} attempt=${retries} error=${lastError}`
+        );
 
-      if (isOverload) {
-        console.warn(`[SubagentExecutor] task=${task.id} model=${model} OVERLOADED — skipping to next model immediately`);
+        const isOverload = isOverloadError(lastError);
+        await recordSubagentPerformance({
+          model,
+          taskType: detectRole(task.description),
+          latencyMs: Date.now() - startTime,
+          inputTokens: 0,
+          outputTokens: 0,
+          success: false,
+        }).catch(() => {});
+
+        if (isOverload) {
+          console.warn(`[SubagentExecutor] task=${task.id} model=${model} OVERLOADED: skipping to next model immediately`);
+        }
       }
     }
+
+    const failedResult: SubagentExecutionResult = {
+      taskId: task.id,
+      model: task.model,
+      output: '',
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - startTime,
+      retries,
+      success: false,
+      error: lastError,
+    };
+
+    await saveSubagentExecution(task.id, {
+      model: failedResult.model,
+      output: failedResult.output,
+      inputTokens: failedResult.inputTokens,
+      outputTokens: failedResult.outputTokens,
+      latencyMs: failedResult.latencyMs,
+      retries: failedResult.retries,
+      success: false,
+      error: failedResult.error,
+    }).catch(() => {});
+
+    return failedResult;
+  } finally {
+    releaseSlot();
   }
-
-  // All models failed
-  await updateSubagentStatus(task.id, 'FAILED').catch(() => {});
-  releaseSlot();
-
-  return {
-    taskId: task.id,
-    model: task.model,
-    output: '',
-    inputTokens: 0,
-    outputTokens: 0,
-    latencyMs: Date.now() - startTime,
-    retries,
-    success: false,
-    error: lastError,
-  };
 }
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,19 @@ import { redis } from '@/lib/redis';
 // Types
 // ---------------------------------------------------------------------------
 
-export type SubagentStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type SubagentStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+
+export interface SubagentExecutionSnapshot {
+  model: string;
+  output: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  retries: number;
+  success: boolean;
+  error?: string;
+  updatedAt: number;
+}
 
 export interface SubagentTask {
   /** Unique task identifier (uuid v4 recommended). */
@@ -36,6 +48,8 @@ export interface SubagentTask {
   updatedAt: number;
   /** Epoch ms when the task completed (null until then). */
   completedAt: number | null;
+  /** Durable execution snapshot used for resume/merge reconstruction. */
+  execution: SubagentExecutionSnapshot | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +106,40 @@ export async function updateSubagentStatus(
     ...task,
     status,
     updatedAt: Date.now(),
-    completedAt: status === 'COMPLETED' || status === 'FAILED' ? Date.now() : task.completedAt,
+    completedAt:
+      status === 'COMPLETED' || status === 'FAILED' || status === 'SKIPPED'
+        ? Date.now()
+        : task.completedAt,
     artifacts: artifacts !== undefined ? artifacts : task.artifacts,
+  };
+  await saveSubagentTask(updated);
+}
+
+/**
+ * Persist the latest execution snapshot for a task.
+ * This checkpoint allows deterministic resume/merge without re-running work.
+ */
+export async function saveSubagentExecution(
+  taskId: string,
+  execution: Omit<SubagentExecutionSnapshot, 'updatedAt'>,
+): Promise<void> {
+  const task = await getSubagentTask(taskId);
+  if (!task) {
+    console.warn(`[SubagentMemory] saveSubagentExecution: task ${taskId} not found`);
+    return;
+  }
+
+  const now = Date.now();
+  const status: SubagentStatus = execution.success ? 'COMPLETED' : 'FAILED';
+  const updated: SubagentTask = {
+    ...task,
+    status,
+    updatedAt: now,
+    completedAt: status === 'COMPLETED' || status === 'FAILED' ? now : task.completedAt,
+    execution: {
+      ...execution,
+      updatedAt: now,
+    },
   };
   await saveSubagentTask(updated);
 }
@@ -167,5 +213,6 @@ export function createSubagentTask(params: {
     createdAt: now,
     updatedAt: now,
     completedAt: null,
+    execution: null,
   };
 }

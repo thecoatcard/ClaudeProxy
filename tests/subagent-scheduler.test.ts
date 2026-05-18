@@ -79,6 +79,52 @@ describe('subagent-scheduler', () => {
     expect(coderOut.success).toBe(true);
   });
 
+  test('resume mode honors pre-completed dependencies', async () => {
+    const planner = await makeSavedTask({ parentId: 'sched-resume-1', description: 'plan task', model: 'gemma-4-31b-it' });
+    const coder = await makeSavedTask({
+      parentId: 'sched-resume-1',
+      description: 'code task',
+      model: 'gemini-2.5-flash',
+      dependencies: [planner.id],
+    });
+
+    const capturedPrompts: string[] = [];
+    const { callGemini } = require('../lib/gemini-adapter');
+    callGemini.mockImplementation((_model: string, _k: string, body: any) => {
+      const prompt = body?.contents?.[0]?.parts?.[0]?.text ?? '';
+      capturedPrompts.push(prompt);
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'coder-output' }] } }],
+          usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 8 },
+        }),
+      });
+    });
+
+    const preResolved = new Map([
+      [planner.id, {
+        taskId: planner.id,
+        model: planner.model,
+        output: 'planner-output',
+        inputTokens: 10,
+        outputTokens: 5,
+        latencyMs: 50,
+        retries: 0,
+        success: true,
+      }],
+    ]);
+
+    const result = await scheduleSubagentTasks([coder], {
+      preCompletedTaskIds: [planner.id],
+      preResolvedOutputs: preResolved,
+    });
+
+    expect(result.completed).toContain(coder.id);
+    expect(result.skipped).toHaveLength(0);
+    expect(capturedPrompts.join('\n')).toContain('planner-output');
+  });
+
   test('skips task when dependency fails', async () => {
     // Force the mock to fail for all calls (all models in fallback chain)
     const { callGemini } = require('../lib/gemini-adapter');

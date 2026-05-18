@@ -47,16 +47,30 @@ export function withTimeout<T>(
 ): Promise<T> {
   if (timeoutMs <= 0) return promise;
   return new Promise<T>((resolve, reject) => {
+    let settled = false;
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       if (controller) {
         try { controller.abort(`Timeout: ${label} exceeded ${timeoutMs}ms`); } catch { /* ignore */ }
       }
       reject(new Error(`Timeout: ${label} exceeded ${timeoutMs}ms`));
     }, timeoutMs);
+    timer.unref?.();
 
     promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
+      (val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      },
     );
   });
 }

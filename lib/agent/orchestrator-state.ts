@@ -170,7 +170,12 @@ export async function setFingerprintParent(
   fingerprint: string,
   parentId: string
 ): Promise<void> {
-  await (redis as any).set(FINGERPRINT_KEY(fingerprint), parentId, { ex: 300 }); // 5-min TTL
+  const key = FINGERPRINT_KEY(fingerprint);
+  const res = await (redis as any).set(key, parentId, { ex: 300, nx: true }).catch(() => null);
+  if (!res) {
+    // Fingerprint already registered by a concurrent request.
+    await (redis as any).expire(key, 300).catch(() => {});
+  }
 }
 
 export async function getFingerprintParent(

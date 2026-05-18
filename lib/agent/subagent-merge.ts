@@ -4,7 +4,7 @@
  * Merge engine for subagent execution results.
  *
  * Responsibilities:
- *   1. Validate all required tasks completed (Phase 9).
+ *   1. Validate all required tasks completed.
  *   2. Collect outputs in dependency order.
  *   3. Deduplicate repeated content.
  *   4. Resolve conflicts (later-stage task wins).
@@ -35,12 +35,12 @@ export interface MergeResult {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 9 — Merge Validation
+// Validation
 // ---------------------------------------------------------------------------
 
 /**
- * Validate that all required tasks completed before merging.
- * Required = tasks with no dependents (leaf nodes) plus planner.
+ * Validate that all tasks are complete before merging.
+ * Uses both current scheduler outputs and persisted task snapshots.
  */
 export function validateMergeInputs(
   tasks: SubagentTask[],
@@ -54,19 +54,30 @@ export function validateMergeInputs(
   const missingTasks: string[] = [];
   const failedTaskIds: string[] = [];
   const warnings: string[] = [];
+  let hasSkipped = false;
 
   for (const task of tasks) {
-    if (failedSet.has(task.id)) {
+    const persistedSuccess = task.execution?.success === true || task.status === 'COMPLETED';
+    const persistedFailure = task.execution?.success === false || task.status === 'FAILED';
+
+    if (failedSet.has(task.id) || persistedFailure) {
       failedTaskIds.push(`${task.id} (${task.description})`);
-    } else if (skippedSet.has(task.id)) {
-      warnings.push(`Task skipped (dependency failed): ${task.id} — ${task.description}`);
-    } else if (!completedSet.has(task.id)) {
+      continue;
+    }
+
+    if (skippedSet.has(task.id)) {
+      warnings.push(`Task skipped (dependency failed): ${task.id} - ${task.description}`);
+      hasSkipped = true;
+      continue;
+    }
+
+    if (!completedSet.has(task.id) && !persistedSuccess) {
       missingTasks.push(`${task.id} (${task.description})`);
     }
   }
 
   return {
-    valid: failedTaskIds.length === 0 && missingTasks.length === 0,
+    valid: failedTaskIds.length === 0 && missingTasks.length === 0 && !hasSkipped,
     missingTasks,
     failedTasks: failedTaskIds,
     warnings,
@@ -77,10 +88,6 @@ export function validateMergeInputs(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Topological sort of tasks by dependency order.
- * Tasks with no dependencies come first.
- */
 function topologicalSort(tasks: SubagentTask[]): SubagentTask[] {
   const taskMap = new Map<string, SubagentTask>(tasks.map((t) => [t.id, t]));
   const sorted: SubagentTask[] = [];
@@ -99,37 +106,51 @@ function topologicalSort(tasks: SubagentTask[]): SubagentTask[] {
   return sorted;
 }
 
-/**
- * Deduplicate repeated paragraphs/sentences across outputs.
- * Simple approach: normalise whitespace and skip exact duplicates.
- */
 function deduplicateContent(texts: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const text of texts) {
-    const normalised = text.replace(/\s+/g, ' ').trim();
-    if (!normalised || seen.has(normalised)) continue;
-    seen.add(normalised);
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
     result.push(text.trim());
   }
   return result;
 }
 
+function getResultForTask(
+  task: SubagentTask,
+  schedulerResult: SchedulerResult,
+): SubagentExecutionResult | null {
+  const runtimeResult = schedulerResult.outputs.get(task.id);
+  if (runtimeResult) return runtimeResult;
+
+  const snapshot = task.execution;
+  if (!snapshot) return null;
+
+  return {
+    taskId: task.id,
+    model: snapshot.model,
+    output: snapshot.output,
+    inputTokens: snapshot.inputTokens,
+    outputTokens: snapshot.outputTokens,
+    latencyMs: snapshot.latencyMs,
+    retries: snapshot.retries,
+    success: snapshot.success,
+    error: snapshot.error,
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Phase 4 — Merge Engine
+// Merge engine
 // ---------------------------------------------------------------------------
 
-/**
- * Merge all successful subagent outputs into a coherent final response.
- */
 export function mergeSubagentOutputs(
   tasks: SubagentTask[],
   schedulerResult: SchedulerResult
 ): MergeResult {
   const validation = validateMergeInputs(tasks, schedulerResult);
 
-  // Collect outputs in topological order (later stages overwrite earlier ones
-  // for the same semantic section — conflict resolution).
   const sorted = topologicalSort(tasks);
   const sourceTaskIds: string[] = [];
   const outputSegments: string[] = [];
@@ -137,7 +158,7 @@ export function mergeSubagentOutputs(
   let totalOutputTokens = 0;
 
   for (const task of sorted) {
-    const result = schedulerResult.outputs.get(task.id);
+    const result = getResultForTask(task, schedulerResult);
     if (!result?.success || !result.output.trim()) continue;
 
     sourceTaskIds.push(task.id);
@@ -146,10 +167,7 @@ export function mergeSubagentOutputs(
     totalOutputTokens += result.outputTokens;
   }
 
-  // Deduplicate
   const deduped = deduplicateContent(outputSegments);
-
-  // Build final output: planner summary first, then coder, verifier, merger
   const finalOutput = deduped.join('\n\n---\n\n');
 
   if (validation.warnings.length > 0) {

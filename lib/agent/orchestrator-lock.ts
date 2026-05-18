@@ -76,6 +76,8 @@ export async function checkOrchestrationDedup(
 export async function registerOrchestrationFingerprint(
   fingerprint: string,
   parentId: string
-): Promise<void> {
+): Promise<string> {
   await setFingerprintParent(fingerprint, parentId);
+  const resolvedParentId = await getFingerprintParent(fingerprint);
+  return resolvedParentId || parentId;
 }
