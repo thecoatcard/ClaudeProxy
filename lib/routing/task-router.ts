@@ -31,34 +31,33 @@ export const ALLOWED_MODEL_POOL = new Set<string>([
 // ── Per-task model chains ────────────────────────────────────────────────────
 // Primary = best-fit model for the task type.
 // Fallbacks = ordered by capability for graceful degradation.
+// All primary chains use thinking-capable models (gemini-2.5-flash, gemini-3-flash-preview).
 
-/** Explicit reasoning (chain-of-thought, proof, causal analysis) → Gemma */
+/** Explicit reasoning (chain-of-thought, proof, causal analysis) → best reasoning models */
 const REASONING_CHAIN = [
-  'gemma-4-31b-it',
-  'gemma-4-26b-a4b-it',
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
 ];
 
-/** Large multi-file coding, architecture, full-stack work → Gemini 2.5 Flash */
+/** Large multi-file coding, architecture, full-stack work → strongest models */
 const HEAVY_CODING_CHAIN = [
   'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
 
-/** Fast, small coding tasks → Gemini 3 Flash Preview (lower latency) */
+/** Fast, small coding tasks → balanced speed + quality */
 const LIGHT_CODING_CHAIN = [
   'gemini-3-flash-preview',
+  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
-  'gemini-flash-latest',
 ];
 
 /** Health checks → cheapest healthy model */
 const HEALTH_CHECK_CHAIN = [
   'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
-  'gemini-flash-latest',
 ];
 
 /** Quick chat / trivial responses → cheapest model */

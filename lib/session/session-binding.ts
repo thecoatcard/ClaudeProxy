@@ -71,14 +71,12 @@ export async function saveSessionBinding(
     nonce,
     createdAt: Date.now(),
   };
-  // NX semantics: only write if key doesn't exist.
-  // ioredis set with NX option:
+  // Atomic NX: only write if key doesn't exist (first-writer wins).
+  // This eliminates the TOCTOU race from the previous get-then-set pattern.
   try {
-    const existing = await redis.get<string>(key);
-    if (!existing) {
-      await redis.set(key, JSON.stringify(binding), { ex: BINDING_TTL });
-    } else {
-      // Refresh TTL on existing binding so active sessions don't expire.
+    const result = await redis.set(key, JSON.stringify(binding), { ex: BINDING_TTL, nx: true });
+    if (result === null) {
+      // Key already exists — just refresh TTL so active sessions don't expire.
       redis.expire(key, BINDING_TTL).catch(() => {});
     }
   } catch {

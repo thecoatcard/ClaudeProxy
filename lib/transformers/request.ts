@@ -64,7 +64,37 @@ const opStateStore: OperationalStateStore = {
   },
 };
 
-// Per-model max output token ceilings (Gemini rejects values above these).
+// ── Agentic System Prompt ─────────────────────────────────────────────────────
+// This prompt is prepended to the system instruction for every request.
+// It ensures Gemini behaves like a production-grade coding agent with
+// tool-use discipline, structured output, and agentic reasoning.
+const AGENTIC_SYSTEM_PROMPT = `You are an expert AI coding agent operating as the backend for Claude Code. You think step-by-step, reason carefully, and take precise actions.
+
+<core_behavior>
+- ALWAYS use tools when you need to interact with the filesystem, run commands, or gather information. Never guess file contents.
+- When given a task, break it into steps internally. Execute each step using the appropriate tool.
+- After each tool result, analyze the output and decide your next action. Never skip error analysis.
+- If a tool call fails, diagnose WHY, then fix and retry with a corrected approach. Do not repeat the same failing call.
+- Produce COMPLETE implementations. Never use placeholders like "// ... rest of code" or "TODO".
+- When editing files, always read the file first to get current content, then make precise edits.
+</core_behavior>
+
+<tool_discipline>
+- Emit exactly ONE tool call per response when tools are needed. Wait for the result before proceeding.
+- Tool arguments must be valid JSON. File paths must be absolute.
+- For file edits: the old_string must match the file content EXACTLY (whitespace-sensitive).
+- Never fabricate tool results. If you need information, call the appropriate tool.
+- When multiple independent actions are needed, prefer doing them sequentially for reliability.
+</tool_discipline>
+
+<output_quality>
+- Be concise in explanations but complete in code.
+- Match the user's language style and technical level.
+- When asked to explain, be thorough. When asked to implement, focus on working code.
+- Never apologize unnecessarily. State what you're doing and do it.
+- If you lack information to complete a task, use tools to gather it rather than asking the user.
+</output_quality>`;
+
 // Per-model max output token ceilings (Gemini rejects values above these).
 // NOTE: The *actual* API limits differ slightly from Google's documentation:
 //   - gemini-3-flash-preview API limit = 64,000 (error message confirms this)
@@ -473,11 +503,11 @@ export async function transformRequestToGemini(
     }
   }
 
-  let systemText = "";
+  let systemText = AGENTIC_SYSTEM_PROMPT + '\n\n';
   if (typeof anthropicReq.system === 'string') {
-    systemText = anthropicReq.system;
+    systemText += anthropicReq.system;
   } else if (Array.isArray(anthropicReq.system)) {
-    systemText = anthropicReq.system
+    systemText += anthropicReq.system
       .map((s: any) => {
         if (typeof s === 'string') return s;
         if (s?.type === 'text' && typeof s.text === 'string') return s.text;
@@ -841,20 +871,31 @@ export async function transformRequestToGemini(
     generationConfig.stopSequences = anthropicReq.stop_sequences.slice(0, 5);
   }
 
-  // Map Anthropic extended thinking → Gemini thinkingConfig.
-  // Claude Code sends `thinking: { type: "enabled", budget_tokens: N }`.
-  // Flipping `includeThoughts: true` makes Gemini return reasoning as thought
-  // parts so we can surface them back as Anthropic thinking blocks.
+  // ── Thinking Configuration ──────────────────────────────────────────────────
+  // Gemini 2.5 series: use thinkingBudget (0-24576, -1 for dynamic)
+  // Gemini 3.x series: use thinkingLevel (minimal/low/medium/high)
+  // We enable thinking BY DEFAULT with a 4096 token budget for better reasoning.
+  // If the client explicitly requests thinking, we respect their budget.
   const thinking = anthropicReq.thinking;
+  const GEMINI_MAX_THINKING_BUDGET = 24576;
+  const DEFAULT_THINKING_BUDGET = 4096;
+
+  // Models that support thinking natively
+  const THINKING_CAPABLE_MODELS = new Set([
+    'gemini-2.5-flash',       // thinkingBudget: 0-24576
+    'gemini-2.5-flash-lite',  // thinkingBudget: 512-24576
+    'gemini-3-flash-preview', // thinkingLevel: minimal/low/medium/high
+    'gemini-3.1-flash-lite-preview', // thinkingLevel: minimal/low/medium/high
+  ]);
+  const supportsThinking = !!internalModel && THINKING_CAPABLE_MODELS.has(internalModel);
+  const isGemini3Series = internalModel?.startsWith('gemini-3');
 
   if (
     thinking &&
     typeof thinking === "object" &&
     thinking.type === "enabled"
   ) {
-    // Gemini 2.0 Flash/Pro supports up to 24k thinking budget.
-    // Claude 3.7 Sonnet supports up to 128k (but we must clamp to Gemini's limit).
-    const GEMINI_MAX_THINKING_BUDGET = 24576;
+    // Client explicitly requested thinking — respect their budget
     const budget = Number(thinking.budget_tokens);
 
     const thinkingConfig: any = {
@@ -879,26 +920,27 @@ export async function transformRequestToGemini(
       // Invalid/missing budget → dynamic
       thinkingConfig.thinkingBudget = -1;
     }
-    // Explicit set of models known to support thinkingConfig.
-    // gemini-3-flash-preview is our primary reasoning/high-capability model
-    // and MUST be included — substring checks like '3.1' or '3.5' would miss it.
-    const THINKING_CAPABLE_MODELS = new Set([
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-3.1-flash-lite-preview',
-      'gemini-3-flash-preview',
-      'gemini-flash-latest',      // alias — tracks stable flash which supports thinking
-    ]);
-    const supportsThinking = !!internalModel && THINKING_CAPABLE_MODELS.has(internalModel);
-
     if (supportsThinking) {
-      generationConfig.thinkingConfig = thinkingConfig;
+      if (isGemini3Series) {
+        // Gemini 3.x: use thinkingLevel instead of thinkingBudget
+        generationConfig.thinkingConfig = { thinkingLevel: 'medium' };
+      } else {
+        generationConfig.thinkingConfig = thinkingConfig;
+      }
     }
 
     // Claude 3.7 Sonnet defaults to temp 1.0 when thinking is enabled, 
     // but Gemini performs better at 0.7 for reasoning tasks.
     if (anthropicReq.temperature === undefined) {
       generationConfig.temperature = 0.7;
+    }
+  } else if (supportsThinking) {
+    // Client did NOT request thinking, but model supports it.
+    // Enable thinking by default with a conservative budget for better quality.
+    if (isGemini3Series) {
+      generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    } else {
+      generationConfig.thinkingConfig = { thinkingBudget: DEFAULT_THINKING_BUDGET };
     }
   }
 

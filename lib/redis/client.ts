@@ -195,14 +195,23 @@ export class RedisClient {
 
   /**
    * set(key, value) or set(key, value, { ex: ttlSeconds })
-   * Supports the Upstash { ex } options object.
+   * Supports the Upstash { ex, nx } options object.
+   * When nx=true, returns 'OK' if set, null if key already exists.
    */
-  async set(key: string, value: unknown, opts?: { ex?: number }): Promise<void> {
+  async set(key: string, value: unknown, opts?: { ex?: number; nx?: boolean }): Promise<string | null> {
     const str = serialize(value);
-    if (opts?.ex) {
+    if (opts?.nx && opts?.ex) {
+      const result = await getClient().set(key, str, 'EX', opts.ex, 'NX');
+      return result; // 'OK' or null
+    } else if (opts?.nx) {
+      const result = await getClient().set(key, str, 'NX');
+      return result;
+    } else if (opts?.ex) {
       await getClient().set(key, str, 'EX', opts.ex);
+      return 'OK';
     } else {
       await getClient().set(key, str);
+      return 'OK';
     }
   }
 

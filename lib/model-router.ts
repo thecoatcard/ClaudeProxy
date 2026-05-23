@@ -94,7 +94,7 @@ interface RoutingDiagnostics {
 
 interface RedisLike {
   get<T = string>(key: string): Promise<T | null>;
-  set(key: string, value: unknown, opts?: { ex?: number }): Promise<void>;
+  set(key: string, value: unknown, opts?: { ex?: number; nx?: boolean }): Promise<string | null | void>;
   incr(key: string): Promise<number>;
 }
 

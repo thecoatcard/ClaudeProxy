@@ -567,28 +567,9 @@ export async function executeWithRetry(
         const err = await res.json().catch(() => ({}));
         const msg = err?.error?.message || err?.message || '';
 
-        // Handle 503 Service Unavailable or 500 Internal Server Error
+        // Handle 500+ Internal Server Errors (503 already handled above)
         // Also handle transient 400 "unexpected error" as a server-side glitch
         const isTransientBackendErr = (res.status === 400 && /unexpected error|internal error/i.test(msg));
-        
-        if (res.status === 503) {
-          overloadedModels.add(currentInternalModel);
-          if (fallbackIndex < fallbacks.length) {
-            const prev = currentInternalModel;
-            await clearStickyRoute();
-            currentInternalModel = fallbacks[fallbackIndex++];
-            logWarn('OVERLOAD', 'FALLBACK_MODEL_SELECTED', {
-              requestId,
-              metadata: { fromModel: prev, toModel: currentInternalModel, status: 503, attempt },
-            });
-          } else {
-            logError('OVERLOAD', `No fallback model left after 503 on ${currentInternalModel}`);
-            break;
-          }
-          lastError = { status: 503, message: msg };
-          await sleep(computeOverloadBackoff(attempt));
-          continue;
-        }
 
         if (res.status >= 500 || isTransientBackendErr) {
           await maybeEmergencyCompact({ status: res.status, message: msg || 'capacity_error' }, attempt);
