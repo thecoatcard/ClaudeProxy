@@ -14,7 +14,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'REASONING');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemma-4-31b-it');
+    assert.equal(chain[0], 'gemini-2.5-flash');
   });
 
   test('"analyze this bug" does NOT route to REASONING (stays coding)', () => {

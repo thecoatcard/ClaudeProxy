@@ -80,9 +80,9 @@ describe('getModelsForRace — model selection from task chain', () => {
     assert.equal(models.length, 2);
   });
 
-  test('REASONING 1-model does not race past gemma primary', () => {
+  test('REASONING 1-model does not race past primary', () => {
     const models = getModelsForRace('REASONING', 1);
-    assert.equal(models[0], 'gemma-4-31b-it');
+    assert.equal(models[0], 'gemini-2.5-flash');
     assert.equal(models.length, 1);
   });
 
