@@ -15,8 +15,8 @@ function getClientIp(req: Request): string {
 
 export async function POST(req: Request) {
   const { email, password } = await req.json();
-  const adminEmail = process.env.ADMIN_EMAIL || 'admin@example.com';
-  const adminPassword = process.env.ADMIN_PASSWORD || 'admin';
+  const adminEmail = (process.env.ADMIN_EMAIL || 'admin@example.com').trim();
+  const adminPassword = (process.env.ADMIN_PASSWORD || 'admin').trim();
   const rateLimitKey = `admin:login:attempts:${getClientIp(req)}`;
 
   try {
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     // Best-effort protection only. Do not block all admin logins on Redis issues.
   }
 
-  if (email !== adminEmail || password !== adminPassword) {
+  if (email?.trim() !== adminEmail || password?.trim() !== adminPassword) {
     return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
   }
 
