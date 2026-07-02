@@ -11,7 +11,7 @@ import { validateAdminKey } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
-const VALIDATION_MODEL = 'gemini-2.0-flash-lite';
+const VALIDATION_MODEL = 'gemini-2.5-flash';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 async function testGeminiKey(key: string): Promise<{ valid: boolean; latencyMs: number; error?: string; model?: string }> {

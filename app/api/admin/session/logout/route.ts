@@ -7,7 +7,10 @@ export async function POST(req: Request) {
   const response = NextResponse.json({ success: true });
 
   if (match) {
-    await redis.del(`admin:session:${match[1]}`);
+    // Signed sessions are invalidated by clearing the cookie. Keep deletion for
+    // legacy opaque Redis sessions and do not fail logout during Redis outages.
+    const sid = decodeURIComponent(match[1]);
+    if (!sid.includes('.')) await redis.del(`admin:session:${sid}`).catch(() => {});
   }
 
   response.cookies.set('admin_session', '', {

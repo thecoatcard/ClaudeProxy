@@ -14,7 +14,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'REASONING');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemini-2.5-flash');
+    assert.equal(chain[0], 'gemma-4-31b-it');
   });
 
   test('"analyze this bug" does NOT route to REASONING (stays coding)', () => {
@@ -39,7 +39,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'HEAVY_CODING');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemini-2.5-flash');
+    assert.equal(chain[0], 'gemini-3.5-flash');
   });
 
   test('heavy coding — architecture signal routes to heavy chain', () => {
@@ -64,7 +64,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'LIGHT_CODING');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemini-3-flash-preview');
+    assert.equal(chain[0], 'gemini-3.5-flash');
   });
 
   test('light coding — code block present routes to light', () => {
@@ -81,7 +81,7 @@ describe('task-router classification', () => {
     assert.equal(cls.type, 'WEB_SEARCH');
 
     const chain = getTaskModelChain(cls.type);
-    assert.equal(chain[0], 'gemini-3-flash-preview');
+    assert.equal(chain[0], 'gemini-2.5-flash-lite');
   });
 
   test('health checks route to lite chain', () => {
@@ -102,7 +102,6 @@ describe('task-router classification', () => {
 
     const chain = getTaskModelChain(cls.type);
     assert.equal(chain[0], 'gemini-2.5-flash-lite');
-    assert.ok(chain.includes('gemma-4-26b-a4b-it'), 'Gemma should still be in the compaction chain as fallback');
   });
 
   test('trivial greeting routes to CHAT', () => {

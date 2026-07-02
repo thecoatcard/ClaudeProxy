@@ -1,70 +1,30 @@
 {
-  "claude-opus-4-5": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3-flash-preview", "gemma-4-31b-it"]
-  },
-  "claude-opus-4": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3-flash-preview", "gemma-4-31b-it"]
-  },
-  "claude-4-opus": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3-flash-preview", "gemma-4-31b-it"]
-  },
-  "claude-sonnet-4-6": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3.1-flash-lite-preview", "gemini-flash-latest"]
-  },
-  "claude-sonnet-4-5": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3.1-flash-lite-preview", "gemini-flash-latest"]
-  },
-  "claude-4-sonnet": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3.1-flash-lite-preview", "gemini-flash-latest"]
-  },
-  "claude-haiku-4-5": {
-    "primary": "gemini-2.5-flash-lite",
-    "fallback": ["gemini-flash-lite-latest", "gemini-flash-latest"]
-  },
-  "claude-4-haiku": {
-    "primary": "gemini-2.5-flash-lite",
-    "fallback": ["gemini-flash-lite-latest", "gemini-flash-latest"]
-  },
-  "claude-3-7-sonnet": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3.1-flash-lite-preview", "gemini-flash-latest"]
-  },
-  "claude-3-5-sonnet": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3.1-flash-lite-preview", "gemini-flash-latest"]
-  },
-  "claude-3-5-haiku": {
-    "primary": "gemini-2.5-flash-lite",
-    "fallback": ["gemini-flash-lite-latest", "gemini-flash-latest"]
-  },
-  "claude-3-opus": {
-    "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3-flash-preview", "gemma-4-31b-it"]
-  },
-  "claude-3-haiku": {
-    "primary": "gemini-2.5-flash-lite",
-    "fallback": ["gemini-flash-lite-latest", "gemini-flash-latest"]
-  },
   "gemma-4-31b-it": {
     "primary": "gemma-4-31b-it",
-    "fallback": ["gemma-4-26b-a4b-it", "gemini-2.5-flash"]
+    "fallback": ["gemma-4-26b-a4b-it"]
   },
   "gemma-4-26b-a4b-it": {
     "primary": "gemma-4-26b-a4b-it",
-    "fallback": ["gemma-4-31b-it", "gemini-2.5-flash"]
+    "fallback": ["gemma-4-31b-it"]
+  },
+  "gemini-3.5-flash": {
+    "primary": "gemini-3.5-flash",
+    "fallback": ["gemini-flash-latest", "gemini-2.5-flash"]
+  },
+  "gemini-flash-latest": {
+    "primary": "gemini-flash-latest",
+    "fallback": ["gemini-3.5-flash", "gemini-2.5-flash"]
   },
   "gemini-2.5-flash": {
     "primary": "gemini-2.5-flash",
-    "fallback": ["gemini-3-flash-preview", "gemini-flash-latest"]
+    "fallback": ["gemini-3.5-flash", "gemini-flash-latest"]
   },
   "gemini-2.5-flash-lite": {
     "primary": "gemini-2.5-flash-lite",
-    "fallback": ["gemini-flash-lite-latest", "gemini-flash-latest"]
+    "fallback": ["gemini-3.1-flash-lite-preview"]
+  },
+  "gemini-3.1-flash-lite-preview": {
+    "primary": "gemini-3.1-flash-lite-preview",
+    "fallback": ["gemini-2.5-flash-lite"]
   }
 }

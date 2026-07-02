@@ -38,36 +38,20 @@ function enforceModelPool(models: string[]): string[] {
 
 function enforceRoutePool(route: ModelRoute): ModelRoute {
   const primary = normalizeModelName(route.primary);
-  const safePrimary = ALLOWED_MODEL_POOL.has(primary) ? primary : 'gemini-2.5-flash';
+  const safePrimary = ALLOWED_MODEL_POOL.has(primary) ? primary : 'gemini-3.5-flash';
   const safeFallback = enforceModelPool(route.fallback);
   return { ...route, primary: safePrimary, fallback: safeFallback };
 }
 
 // Final emergency fallback if Redis + local JSON are both unavailable.
 export const HARD_DEFAULT_MODEL_ROUTING: Record<string, ModelRoute> = {
-  'claude-opus-4-5': { primary: 'gemini-2.5-flash', fallback: ['gemini-3-flash-preview', 'gemma-4-31b-it'] },
-  'claude-opus-4': { primary: 'gemini-2.5-flash', fallback: ['gemini-3-flash-preview', 'gemma-4-31b-it'] },
-  'claude-4-opus': { primary: 'gemini-2.5-flash', fallback: ['gemini-3-flash-preview', 'gemma-4-31b-it'] },
-  'claude-sonnet-4-6': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'] },
-  'claude-sonnet-4-5': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'] },
-  'claude-4-sonnet': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'] },
-  'claude-haiku-4-5': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-flash-lite-latest', 'gemini-flash-latest'] },
-  'claude-4-haiku': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-flash-lite-latest', 'gemini-flash-latest'] },
-  'claude-3-7-sonnet': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'] },
-  'claude-3-5-sonnet': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'] },
-  'claude-3-5-haiku': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-flash-lite-latest', 'gemini-flash-latest'] },
-  'claude-3-opus': { primary: 'gemini-2.5-flash', fallback: ['gemini-3-flash-preview', 'gemma-4-31b-it'] },
-  'claude-3-haiku': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-flash-lite-latest', 'gemini-flash-latest'] },
-
-  // Direct mappings
-  'gemma-4-31b-it': { primary: 'gemma-4-31b-it', fallback: ['gemma-4-26b-a4b-it', 'gemini-2.5-flash'] },
-  'gemma-4-26b-a4b-it': { primary: 'gemma-4-26b-a4b-it', fallback: ['gemma-4-31b-it', 'gemini-2.5-flash'] },
-  'gemini-2.5-flash': { primary: 'gemini-2.5-flash', fallback: ['gemini-3-flash-preview', 'gemini-flash-latest'] },
-  'gemini-2.5-flash-lite': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-flash-lite-latest', 'gemini-flash-latest'] },
-  'gemini-3-flash-preview': { primary: 'gemini-3-flash-preview', fallback: ['gemini-2.5-flash', 'gemini-flash-latest'] },
-  'gemini-3.1-flash-lite-preview': { primary: 'gemini-3.1-flash-lite-preview', fallback: ['gemini-2.5-flash', 'gemini-flash-latest'] },
-  'gemini-flash-lite-latest': { primary: 'gemini-flash-lite-latest', fallback: ['gemini-2.5-flash-lite'] },
-  'gemini-flash-latest': { primary: 'gemini-flash-latest', fallback: ['gemini-2.5-flash'] },
+  'gemma-4-31b-it': { primary: 'gemma-4-31b-it', fallback: ['gemma-4-26b-a4b-it'] },
+  'gemma-4-26b-a4b-it': { primary: 'gemma-4-26b-a4b-it', fallback: ['gemma-4-31b-it'] },
+  'gemini-3.5-flash': { primary: 'gemini-3.5-flash', fallback: ['gemini-flash-latest', 'gemini-2.5-flash'] },
+  'gemini-flash-latest': { primary: 'gemini-flash-latest', fallback: ['gemini-3.5-flash', 'gemini-2.5-flash'] },
+  'gemini-2.5-flash': { primary: 'gemini-2.5-flash', fallback: ['gemini-3.5-flash', 'gemini-flash-latest'] },
+  'gemini-2.5-flash-lite': { primary: 'gemini-2.5-flash-lite', fallback: ['gemini-3.1-flash-lite-preview'] },
+  'gemini-3.1-flash-lite-preview': { primary: 'gemini-3.1-flash-lite-preview', fallback: ['gemini-2.5-flash-lite'] },
 };
 
 export const DEFAULT_MODEL_ROUTING = HARD_DEFAULT_MODEL_ROUTING;
@@ -217,12 +201,12 @@ async function readRegistry(forceReload = false): Promise<RoutingReadResult> {
 }
 
 function resolveGlobalDefaultRoute(): ModelRoute {
-  const fallbackRaw = process.env.FALLBACK_MODEL || 'gemini-2.5-flash';
+  const fallbackRaw = process.env.FALLBACK_MODEL || 'gemini-3.5-flash';
   const fallback = fallbackRaw.includes(',')
     ? fallbackRaw.split(',').map((s) => s.trim()).filter(Boolean)
     : [fallbackRaw];
   return {
-    primary: process.env.DEFAULT_MODEL || 'gemini-2.5-flash',
+    primary: process.env.DEFAULT_MODEL || 'gemini-3.5-flash',
     fallback,
   };
 }
@@ -245,13 +229,6 @@ function resolveBaseRoute(
         fallback: dedupeChain(value.fallback || []),
       };
     }
-  }
-
-  if (normalizedModel.startsWith('claude-')) {
-    return {
-      primary: 'gemini-2.5-flash',
-      fallback: ['gemini-3.1-flash-lite-preview', 'gemini-flash-latest'],
-    };
   }
 
   return resolveGlobalDefaultRoute();
@@ -303,7 +280,7 @@ export async function saveRoutingRegistry(models: unknown): Promise<RoutingDiagn
 }
 
 export async function getModelMapping(
-  anthropicModel: string,
+  requestedModel: string,
   optionsOrThinking: boolean | ModelRoutingOptions = false
 ): Promise<ModelRoute> {
   const options: ModelRoutingOptions =
@@ -311,24 +288,11 @@ export async function getModelMapping(
       ? { thinkingEnabled: optionsOrThinking }
       : optionsOrThinking;
 
-  const normalizedModel = normalizeModelName(anthropicModel);
+  const normalizedModel = normalizeModelName(requestedModel);
   const thinkingEnabled = Boolean(options.thinkingEnabled);
 
   const loaded = await readRegistry(false);
   const baseRoute = resolveBaseRoute(normalizedModel, loaded.registry);
-
-  if (!normalizedModel.startsWith('claude-')) {
-    const chain = enforceModelPool(dedupeChain([baseRoute.primary, ...baseRoute.fallback]));
-    const safeChain = chain.length > 0 ? chain : ['gemini-2.5-flash'];
-    return {
-      primary: safeChain[0],
-      fallback: safeChain.slice(1),
-      routingSource: loaded.source,
-      routeVersion: loaded.version,
-      taskType: 'LIGHT_CODING',
-      taskReason: 'direct-model-routing',
-    };
-  }
 
   const task = classifyTaskType(options.requestBody, thinkingEnabled);
   const taskChain = getTaskModelChain(task.type);
@@ -339,21 +303,19 @@ export async function getModelMapping(
     const stickyRaw = await redisClient.get<string>(stickyKey).catch(() => null);
     if (typeof stickyRaw === 'string' && stickyRaw.trim()) {
       const candidate = normalizeModelName(stickyRaw);
-      // Only respect sticky if it's in the allowed pool
       if (ALLOWED_MODEL_POOL.has(candidate)) stickyModel = candidate;
     }
   }
 
   const taskFirst =
     task.type === 'REASONING' ||
+    task.type === 'PLANNING' ||
+    task.type === 'VERIFICATION' ||
     task.type === 'COMPACTION' ||
     task.type === 'CHAT' ||
     task.type === 'HEALTH_CHECK' ||
     task.type === 'WEB_SEARCH';
 
-  // Source-of-truth priority:
-  // Redis/local/hardcoded configured route remains first for normal traffic.
-  // Reasoning/compaction tasks may prioritize Gemma chain first.
   const finalChain = enforceModelPool(
     taskFirst
       ? dedupeChain([
@@ -371,7 +333,7 @@ export async function getModelMapping(
           ...resolveGlobalDefaultRoute().fallback,
         ])
   );
-  const safeChain = finalChain.length > 0 ? finalChain : ['gemini-2.5-flash'];
+  const safeChain = finalChain.length > 0 ? finalChain : ['gemini-3.5-flash'];
 
   return enforceRoutePool({
     primary: safeChain[0],

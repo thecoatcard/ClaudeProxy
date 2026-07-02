@@ -1,4 +1,5 @@
 import { redis } from './redis';
+import { verifyAdminSession } from './admin-session';
 
 export function extractToken(req: Request): string | null {
   const authHeader = req.headers.get('authorization');
@@ -38,10 +39,15 @@ export async function validateAdminKey(req: Request): Promise<boolean> {
   const cookieHeader = req.headers.get('cookie') || '';
   const match = cookieHeader.match(/admin_session=([^;]+)/);
   if (match) {
-    const sid = match[1];
-    const session = await redis.get(`admin:session:${sid}`);
-    if (session) {
-      return true;
+    const sid = decodeURIComponent(match[1]);
+    if (verifyAdminSession(sid)) return true;
+
+    // Backward compatibility for sessions created before signed cookies.
+    try {
+      const session = await redis.get(`admin:session:${sid}`);
+      if (session) return true;
+    } catch {
+      // A Redis outage must not turn an unauthenticated request into a 500.
     }
   }
 

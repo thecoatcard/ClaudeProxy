@@ -18,6 +18,8 @@ envLines.forEach(line => {
 const checks = {
   'ADMIN_EMAIL': { value: env.ADMIN_EMAIL || 'NOT SET', required: true },
   'ADMIN_PASSWORD': { value: env.ADMIN_PASSWORD ? '***' + env.ADMIN_PASSWORD.slice(-3) : 'NOT SET', required: true },
+  'MONGODB_URI': { value: env.MONGODB_URI ? 'SET (MongoDB Atlas)' : 'NOT SET', required: true },
+  'MONGODB_DB': { value: env.MONGODB_DB || 'NOT SET', required: true },
   'REDIS_URL': { value: env.REDIS_URL ? 'SET (Cloud Redis)' : 'NOT SET', required: true },
   'MASTER_API_KEY': { value: env.MASTER_API_KEY ? '***' + env.MASTER_API_KEY.slice(-3) : 'NOT SET', required: true },
   'DEFAULT_MODEL': { value: env.DEFAULT_MODEL || 'NOT SET', required: true },

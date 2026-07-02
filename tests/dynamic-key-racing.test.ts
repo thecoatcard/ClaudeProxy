@@ -43,7 +43,7 @@ describe('getDynamicKeyCount — key count per task type', () => {
   });
 
   test('overload flag forces 3 keys for any task type', () => {
-    const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH'];
+    const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH', 'PLANNING', 'VERIFICATION'];
     for (const t of taskTypes) {
       assert.equal(getDynamicKeyCount(t, true, true), 3, `Expected 3 for ${t} on overload`);
     }

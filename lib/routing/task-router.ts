@@ -7,7 +7,9 @@ export type TaskType =
   | 'CHAT'
   | 'HEALTH_CHECK'
   | 'COMPACTION'
-  | 'WEB_SEARCH';
+  | 'WEB_SEARCH'
+  | 'PLANNING'
+  | 'VERIFICATION';
 
 export interface TaskClassification {
   type: TaskType;
@@ -19,68 +21,77 @@ export interface TaskClassification {
 // this set is a bug — the pool enforcer in model-router.ts filters them out.
 export const ALLOWED_MODEL_POOL = new Set<string>([
   'gemma-4-31b-it',
-  'gemini-2.5-flash',
   'gemma-4-26b-a4b-it',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
   'gemini-3.1-flash-lite-preview',
-  'gemini-flash-latest',
-  'gemini-flash-lite-latest',
-  'gemini-3-flash-preview',
 ]);
 
 // ── Per-task model chains ────────────────────────────────────────────────────
 // Primary = best-fit model for the task type.
 // Fallbacks = ordered by capability for graceful degradation.
-// All primary chains use thinking-capable models (gemini-2.5-flash, gemini-3-flash-preview).
 
 /** Explicit reasoning (chain-of-thought, proof, causal analysis) → best reasoning models */
 const REASONING_CHAIN = [
-  'gemini-2.5-flash',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite-preview',
+  'gemma-4-31b-it',
+  'gemma-4-26b-a4b-it',
+  'gemini-3.5-flash',
 ];
 
-/** Large multi-file coding, architecture, full-stack work → strongest models */
+/** Planning, decomposition, and task generation → Gemma priority */
+const PLANNING_CHAIN = [
+  'gemma-4-31b-it',
+  'gemma-4-26b-a4b-it',
+  'gemini-3.5-flash',
+];
+
+/** Verification, validation, and reflection → Gemma priority */
+const VERIFICATION_CHAIN = [
+  'gemma-4-31b-it',
+  'gemma-4-26b-a4b-it',
+  'gemini-3.5-flash',
+];
+
+/** Large multi-file coding, architecture, full-stack work → coding models */
 const HEAVY_CODING_CHAIN = [
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
   'gemini-2.5-flash',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite-preview',
 ];
 
 /** Fast, small coding tasks → balanced speed + quality */
 const LIGHT_CODING_CHAIN = [
-  'gemini-3-flash-preview',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
   'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
 ];
 
 /** Health checks → cheapest healthy model */
 const HEALTH_CHECK_CHAIN = [
   'gemini-2.5-flash-lite',
-  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
 ];
 
 /** Quick chat / trivial responses → cheapest model */
 const CHAT_CHAIN = [
   'gemini-2.5-flash-lite',
-  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite-preview',
 ];
 
-/** Context compaction (summarise large histories) → fast Gemini lite, Gemma as last resort */
+/** Context compaction (summarise large histories) → fast Gemini lite */
 const COMPACTION_CHAIN = [
   'gemini-2.5-flash-lite',
   'gemini-3.1-flash-lite-preview',
-  'gemini-2.5-flash',
-  'gemma-4-26b-a4b-it',
-  'gemma-4-31b-it',
 ];
 
 /** Web search tasks → fast model to avoid compounding latency */
 const WEB_SEARCH_CHAIN = [
-  'gemini-3-flash-preview',
-  'gemini-2.5-flash',
-  'gemini-flash-latest',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-flash-lite-preview',
 ];
+
 
 // ---------------------------------------------------------------------------
 // Behavioral signal extraction
@@ -260,6 +271,16 @@ export function classifyTaskType(requestBody: any, thinkingEnabled = false): Tas
     return { type: 'COMPACTION', reason: 'compaction-keywords' };
   }
 
+  // PLANNING: explicit planning or architecture decomposition
+  if (/\b(plan|planning|decomposition|decompose|task\s+generation|architecture\s+decision|architecture\s+design|system\s+design)\b/i.test(text)) {
+    return { type: 'PLANNING', reason: 'planning-keywords' };
+  }
+
+  // VERIFICATION: explicit verification or reflection triggers
+  if (/\b(verify|verification|reflect|reflection|validate|validation|test\s+pass|lint\s+pass)\b/i.test(text)) {
+    return { type: 'VERIFICATION', reason: 'verification-keywords' };
+  }
+
   // All other tasks: classify by behavioral signals
   const signals = extractBehavioralSignals(requestBody);
   return classifyFromBehavior(signals, thinkingEnabled);
@@ -269,6 +290,10 @@ export function getTaskModelChain(taskType: TaskType): string[] {
   switch (taskType) {
     case 'REASONING':
       return [...REASONING_CHAIN];
+    case 'PLANNING':
+      return [...PLANNING_CHAIN];
+    case 'VERIFICATION':
+      return [...VERIFICATION_CHAIN];
     case 'HEAVY_CODING':
       return [...HEAVY_CODING_CHAIN];
     case 'LIGHT_CODING':

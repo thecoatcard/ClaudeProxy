@@ -32,8 +32,8 @@ describe('Trivial Routing', () => {
     expect(chain).not.toContain('gemma-4-31b-it');
   });
 
-  test('Claude trivial chat prioritizes lite route before base mapping', async () => {
-    const route = await getModelMapping('claude-sonnet-4-5', {
+  test('Gemini trivial chat prioritizes lite route before base mapping', async () => {
+    const route = await getModelMapping('gemini-3.5-flash', {
       requestBody: makeBody('hi'),
     });
 
@@ -41,8 +41,8 @@ describe('Trivial Routing', () => {
     expect(route.primary).toBe('gemini-2.5-flash-lite');
   });
 
-  test('Claude Code continuation with tool context does not route as chat', async () => {
-    const route = await getModelMapping('claude-sonnet-4-5', {
+  test('Gemini Code continuation with tool context does not route as chat', async () => {
+    const route = await getModelMapping('gemini-3.5-flash', {
       requestBody: {
         tools: [{ name: 'Read' }],
         messages: [
@@ -61,7 +61,7 @@ describe('Trivial Routing', () => {
     });
 
     expect(route.taskType).not.toBe('CHAT');
-    expect(route.primary).toBe('gemini-2.5-flash');
+    expect(route.primary).toBe('gemini-3.5-flash');
   });
 
   test('health check only triggers on explicit health keywords', () => {

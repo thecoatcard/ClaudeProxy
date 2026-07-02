@@ -29,8 +29,6 @@ function fmt(n: number) { return new Intl.NumberFormat('en-US').format(Math.max(
 function compact(n: number) { return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(Math.max(0, n || 0)); }
 function pct(a: number, b: number) { if (!b) return '0%'; return `${((a / b) * 100).toFixed(2)}%`; }
 
-const TOOLTIP_STYLE = { background: '#1c2230', border: '1px solid #2a3345', borderRadius: 8, fontSize: 12 };
-
 export default function StatsPage() {
   const { isAuthenticated } = useAuth();
   const [stats, setStats] = useState<StatsData | null>(null);
@@ -71,6 +69,14 @@ export default function StatsPage() {
     }));
   }, [stats]);
 
+  const TOOLTIP_STYLE = useMemo(() => ({
+    background: 'var(--bg-elev-2)',
+    border: '1px solid var(--line)',
+    borderRadius: 'var(--radius-sm)',
+    fontSize: '12px',
+    color: 'var(--text)'
+  }), []);
+
   if (loading) {
     return (
       <div className="dashboard-page">
@@ -83,8 +89,8 @@ export default function StatsPage() {
   if (!isAuthenticated) {
     return (
       <div className="panel" style={{ maxWidth: 440, margin: '60px auto', textAlign: 'center', padding: 32 }}>
-        <h2 className="section-title" style={{ marginBottom: 8 }}>Authentication Required</h2>
-        <p className="muted-text">Sign in from the sidebar to view statistics.</p>
+        <h2 className="section-title" style={{ marginBottom: 12 }}>Authentication Required</h2>
+        <p className="muted-text">Sign in from the sidebar to view observability stats.</p>
       </div>
     );
   }
@@ -95,10 +101,11 @@ export default function StatsPage() {
 
   return (
     <div className="dashboard-page">
-      <header className="page-header">
+      <header className="page-header" style={{ border: 'none', paddingBottom: 0 }}>
         <div>
-          <h1 className="page-title">Observability</h1>
-          <p className="muted-text">Token accounting, request trends, and model utilization.</p>
+          <p className="brand-eyebrow" style={{ fontSize: '13px', color: 'var(--primary)' }}>System Observability</p>
+          <h1 className="page-title" style={{ fontSize: '32px' }}>Operational Metrics</h1>
+          <p className="muted-text">Token accounting, latency telemetry, and model consumption distribution.</p>
         </div>
         <div className="toolbar-row">
           <div className="tab-bar">
@@ -110,45 +117,47 @@ export default function StatsPage() {
         </div>
       </header>
 
-      {/* KPI cards */}
+      {/* Observability KPIs */}
       <section className="kpi-grid">
         <article className="kpi-card kpi-card-ok">
-          <p className="kpi-label">Total Tokens</p>
+          <p className="kpi-label">Cumulative Token Pool</p>
           <p className="kpi-value">{compact(stats.totalTokens)}</p>
           <p className="kpi-subtle">{fmt(stats.inputTokens)} in / {fmt(stats.outputTokens)} out</p>
         </article>
         <article className="kpi-card">
-          <p className="kpi-label">Total Requests</p>
+          <p className="kpi-label">Total Requests Routed</p>
           <p className="kpi-value">{fmt(stats.requests)}</p>
-          <p className="kpi-subtle">Today: {fmt(t.requests)}</p>
+          <p className="kpi-subtle">Today: {fmt(t.requests)} requests</p>
         </article>
         <article className={`kpi-card ${stats.errors > 0 ? 'kpi-card-warn' : ''}`}>
-          <p className="kpi-label">Error Rate</p>
+          <p className="kpi-label">System Error Rate</p>
           <p className="kpi-value">{pct(stats.errors, stats.requests)}</p>
-          <p className="kpi-subtle">Today: {pct(t.errors, t.requests)}</p>
+          <p className="kpi-subtle">Today: {pct(t.errors, t.requests)} rate</p>
         </article>
         <article className="kpi-card">
-          <p className="kpi-label">Avg Latency</p>
+          <p className="kpi-label">Operational Latency</p>
           <p className="kpi-value">{fmt(stats.avgLatency)} ms</p>
-          <p className="kpi-subtle">Today: {fmt(t.avgLatency)} ms</p>
+          <p className="kpi-subtle">Today Average: {fmt(t.avgLatency)} ms</p>
         </article>
       </section>
 
-      {/* Charts */}
+      {/* Observability Charts */}
       <section className="panel-grid two-col">
         <article className="panel">
           <div className="panel-header">
-            <h2 className="section-title">Tokens/Day ({range})</h2>
-            <span className="muted-text" style={{ fontSize: 11 }}>thousands</span>
+            <div>
+              <h2 className="section-title">Tokens Consumed per Day ({range})</h2>
+              <p className="muted-text" style={{ fontSize: '12px' }}>Volume measured in thousands</p>
+            </div>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
-              <LineChart data={slicedDaily} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#9dacbf' }} />
-                <Line type="monotone" dataKey="Tokens (K)" stroke="#38bdf8" strokeWidth={2} dot={false} />
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={slicedDaily} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line-soft)" vertical={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Line type="monotone" dataKey="Tokens (K)" stroke="var(--primary)" strokeWidth={2.5} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -156,49 +165,54 @@ export default function StatsPage() {
 
         <article className="panel">
           <div className="panel-header">
-            <h2 className="section-title">Requests &amp; Errors ({range})</h2>
+            <div>
+              <h2 className="section-title">Traffic Analysis ({range})</h2>
+              <p className="muted-text" style={{ fontSize: '12px' }}>Requests volumes compared to errors</p>
+            </div>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
-              <LineChart data={slicedDaily} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#9dacbf' }} />
-                <Legend wrapperStyle={{ fontSize: 11, color: '#9dacbf' }} />
-                <Line type="monotone" dataKey="Requests" stroke="#22c55e" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="Errors" stroke="#f43f5e" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={slicedDaily} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line-soft)" vertical={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 11, color: 'var(--text-muted)' }} />
+                <Line type="monotone" dataKey="Requests" stroke="var(--ok)" strokeWidth={2.5} dot={false} />
+                <Line type="monotone" dataKey="Errors" stroke="var(--bad)" strokeWidth={1.5} dot={false} strokeDasharray="3 3" />
               </LineChart>
             </ResponsiveContainer>
           </div>
         </article>
       </section>
 
-      {/* Model bar chart */}
+      {/* Model Distribution bar chart */}
       {barData.length > 0 && (
         <section className="panel">
           <div className="panel-header">
-            <h2 className="section-title">All-Time Token Distribution by Model</h2>
-            <span className="muted-text" style={{ fontSize: 11 }}>thousands</span>
+            <div>
+              <h2 className="section-title">Context Token Distribution by Model (All-Time)</h2>
+              <p className="muted-text" style={{ fontSize: '12px' }}>Volume measured in thousands</p>
+            </div>
           </div>
           <div className="chart-wrap-lg">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
-              <BarChart data={barData} margin={{ top: 4, right: 8, bottom: 40, left: -20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1c2a3a" vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#9dacbf' }} angle={-30} textAnchor="end" interval={0} />
-                <YAxis tick={{ fontSize: 10, fill: '#9dacbf' }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} labelStyle={{ color: '#9dacbf' }} />
-                <Bar dataKey="Tokens" fill="#38bdf8" radius={[4, 4, 0, 0]} />
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={barData} margin={{ top: 10, right: 10, bottom: 30, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--line-soft)" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'var(--text-muted)' }} angle={-25} textAnchor="end" interval={0} />
+                <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Bar dataKey="Tokens" fill="var(--primary)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </section>
       )}
 
-      {/* Daily table */}
+      {/* Daily breakdown table */}
       <section className="panel">
         <div className="panel-header">
-          <h2 className="section-title">Daily Breakdown</h2>
+          <h2 className="section-title">Daily Breakdown Log</h2>
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table className="data-table" style={{ minWidth: 700 }}>
@@ -216,9 +230,9 @@ export default function StatsPage() {
             <tbody>
               {stats.daily.slice(-RANGE_DAYS[range]).map((day) => (
                 <tr key={day.date}>
-                  <td>{day.date}</td>
+                  <td style={{ fontWeight: 600 }}>{day.date}</td>
                   <td>{fmt(day.requests)}</td>
-                  <td style={{ color: day.errors > 0 ? 'var(--bad)' : undefined }}>{fmt(day.errors)}</td>
+                  <td style={{ color: day.errors > 0 ? 'var(--bad)' : undefined, fontWeight: day.errors > 0 ? 600 : 400 }}>{fmt(day.errors)}</td>
                   <td>{fmt(day.inputTokens)}</td>
                   <td>{fmt(day.outputTokens)}</td>
                   <td>{compact(day.totalTokens)}</td>
@@ -230,37 +244,68 @@ export default function StatsPage() {
         </div>
       </section>
 
-      {/* Model breakdown table */}
+      {/* Models breakdown usage lists */}
       <section className="panel-grid two-col">
         <article className="panel">
-          <div className="panel-header"><h2 className="section-title">Model Usage Today</h2></div>
+          <div className="panel-header"><h2 className="section-title">Model Utilization (Today)</h2></div>
           <table className="data-table">
-            <thead><tr><th>Model</th><th>Tokens</th><th>Requests</th><th>Errors</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Model Profile</th>
+                <th>Tokens</th>
+                <th>Requests</th>
+                <th>Errors</th>
+              </tr>
+            </thead>
             <tbody>
-              {stats.topModels.todayTokens.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--text-muted)' }}>No activity yet.</td></tr>}
+              {stats.topModels.todayTokens.length === 0 && (
+                <tr>
+                  <td colSpan={4} style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>
+                    No operations today.
+                  </td>
+                </tr>
+              )}
               {stats.topModels.todayTokens.map((row) => (
                 <tr key={row.key}>
                   <td><code>{row.key}</code></td>
                   <td>{compact(row.value)}</td>
                   <td>{fmt(stats.topModels.todayRequests.find((r) => r.key === row.key)?.value || 0)}</td>
-                  <td>{fmt(stats.topModels.todayErrors.find((r) => r.key === row.key)?.value || 0)}</td>
+                  <td style={{ color: (stats.topModels.todayErrors.find((r) => r.key === row.key)?.value || 0) > 0 ? 'var(--bad)' : 'inherit' }}>
+                    {fmt(stats.topModels.todayErrors.find((r) => r.key === row.key)?.value || 0)}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </article>
+
         <article className="panel">
-          <div className="panel-header"><h2 className="section-title">Model Usage All Time</h2></div>
+          <div className="panel-header"><h2 className="section-title">Model Utilization (All-Time)</h2></div>
           <table className="data-table">
-            <thead><tr><th>Model</th><th>Tokens</th><th>Requests</th><th>Errors</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Model Profile</th>
+                <th>Tokens</th>
+                <th>Requests</th>
+                <th>Errors</th>
+              </tr>
+            </thead>
             <tbody>
-              {stats.topModels.totalTokens.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--text-muted)' }}>No data.</td></tr>}
+              {stats.topModels.totalTokens.length === 0 && (
+                <tr>
+                  <td colSpan={4} style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>
+                    No aggregate data recorded.
+                  </td>
+                </tr>
+              )}
               {stats.topModels.totalTokens.map((row) => (
                 <tr key={row.key}>
                   <td><code>{row.key}</code></td>
                   <td>{compact(row.value)}</td>
                   <td>{fmt(stats.topModels.totalRequests.find((r) => r.key === row.key)?.value || 0)}</td>
-                  <td>{fmt(stats.topModels.totalErrors.find((r) => r.key === row.key)?.value || 0)}</td>
+                  <td style={{ color: (stats.topModels.totalErrors.find((r) => r.key === row.key)?.value || 0) > 0 ? 'var(--bad)' : 'inherit' }}>
+                    {fmt(stats.topModels.totalErrors.find((r) => r.key === row.key)?.value || 0)}
+                  </td>
                 </tr>
               ))}
             </tbody>

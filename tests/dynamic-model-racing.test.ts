@@ -56,7 +56,7 @@ describe('getDynamicModelRaceConfig — model race config per task type', () => 
   });
 
   test('overload flag enables 3-model race for all task types', () => {
-    const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH'];
+    const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH', 'PLANNING', 'VERIFICATION'];
     for (const t of taskTypes) {
       const cfg = getDynamicModelRaceConfig(t, true, true);
       assert.equal(cfg.enabled, true, `Expected enabled=true for ${t} on overload`);
@@ -82,7 +82,7 @@ describe('getModelsForRace — model selection from task chain', () => {
 
   test('REASONING 1-model does not race past primary', () => {
     const models = getModelsForRace('REASONING', 1);
-    assert.equal(models[0], 'gemini-2.5-flash');
+    assert.equal(models[0], 'gemma-4-31b-it');
     assert.equal(models.length, 1);
   });
 
@@ -92,18 +92,22 @@ describe('getModelsForRace — model selection from task chain', () => {
     assert.ok(models.length <= 2);
   });
 
-  test('models for WEB_SEARCH start with gemini-3-flash-preview', () => {
+  test('models for WEB_SEARCH start with gemini-2.5-flash-lite', () => {
     const models = getModelsForRace('WEB_SEARCH', 2);
-    assert.equal(models[0], 'gemini-3-flash-preview');
+    assert.equal(models[0], 'gemini-2.5-flash-lite');
   });
 });
 
 describe('model race — all models stay within allowed pool', () => {
-  const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH'];
+  const taskTypes: TaskType[] = ['CHAT', 'HEALTH_CHECK', 'COMPACTION', 'LIGHT_CODING', 'REASONING', 'HEAVY_CODING', 'WEB_SEARCH', 'PLANNING', 'VERIFICATION'];
   const ALLOWED = new Set([
-    'gemma-4-31b-it', 'gemini-2.5-flash', 'gemma-4-26b-a4b-it',
-    'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite-preview',
-    'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-3-flash-preview',
+    'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it',
+    'gemini-3.5-flash',
+    'gemini-flash-latest',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-3.1-flash-lite-preview',
   ]);
 
   for (const taskType of taskTypes) {

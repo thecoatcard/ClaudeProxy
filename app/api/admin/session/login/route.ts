@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { redis } from '@/lib/redis';
-import { nanoid } from 'nanoid';
+import { createAdminSession } from '@/lib/admin-session';
 
 const LOGIN_WINDOW_SECS = 60;
 const MAX_LOGIN_ATTEMPTS = 5;
@@ -14,9 +14,16 @@ function getClientIp(req: Request): string {
 }
 
 export async function POST(req: Request) {
+  const adminEmail = process.env.ADMIN_EMAIL?.trim();
+  const adminPassword = process.env.ADMIN_PASSWORD?.trim();
+  if (!adminEmail || !adminPassword) {
+    return NextResponse.json(
+      { error: 'Admin authentication is not configured' },
+      { status: 503 },
+    );
+  }
+
   const { email, password } = await req.json();
-  const adminEmail = (process.env.ADMIN_EMAIL || 'admin@example.com').trim();
-  const adminPassword = (process.env.ADMIN_PASSWORD || 'admin').trim();
   const rateLimitKey = `admin:login:attempts:${getClientIp(req)}`;
 
   try {
@@ -35,8 +42,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
   }
 
-  const sid = nanoid(32);
-  await redis.setex(`admin:session:${sid}`, 24 * 60 * 60, email);
+  const sid = createAdminSession(adminEmail);
   await redis.del(rateLimitKey).catch(() => {});
 
   const response = NextResponse.json({ success: true });

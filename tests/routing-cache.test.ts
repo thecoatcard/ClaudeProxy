@@ -39,27 +39,27 @@ describe('routing cache invalidation', () => {
     await __setRoutingTestAdapters({ redisClient: fake, localRegistry: null });
 
     await fake.set('models:registry', JSON.stringify({
-      'claude-sonnet-4-5': { primary: 'gemini-2.5-flash', fallback: [] },
+      'gemini-3.5-flash': { primary: 'gemini-3.5-flash', fallback: [] },
     }));
     await fake.set('models:registry:version', '1');
 
-    const first = await getModelMapping('claude-sonnet-4-5', {
+    const first = await getModelMapping('gemini-3.5-flash', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
     assert.equal(first.routeVersion, '1');
 
     await fake.set('models:registry', JSON.stringify({
-      'claude-sonnet-4-5': { primary: 'gemini-3-flash-preview', fallback: [] },
+      'gemini-3.5-flash': { primary: 'gemini-flash-latest', fallback: [] },
     }));
     await fake.set('models:registry:version', '2');
 
     const reloaded = await forceReloadRouting();
     assert.equal(reloaded.version, '2');
 
-    const second = await getModelMapping('claude-sonnet-4-5', {
+    const second = await getModelMapping('gemini-3.5-flash', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
-    assert.equal(second.primary, 'gemini-3-flash-preview');
+    assert.equal(second.primary, 'gemini-flash-latest');
     assert.equal(second.routeVersion, '2');
   });
 
@@ -67,23 +67,23 @@ describe('routing cache invalidation', () => {
     const fake = new FakeRedis();
     await __setRoutingTestAdapters({ redisClient: fake, localRegistry: null });
 
-    const before = await getModelMapping('claude-opus-4-5', {
+    const before = await getModelMapping('gemma-4-31b-it', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
     const initialVersion = before.routeVersion ?? '0';
 
     const diag = await saveRoutingRegistry({
-      'claude-opus-4-5': {
-        primary: 'gemini-3-flash-preview',
-        fallback: ['gemini-2.5-flash'],
+      'gemma-4-31b-it': {
+        primary: 'gemma-4-26b-a4b-it',
+        fallback: ['gemma-4-31b-it'],
       },
     });
 
-    const after = await getModelMapping('claude-opus-4-5', {
+    const after = await getModelMapping('gemma-4-31b-it', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
     assert.equal(diag.source, 'redis');
     assert.notEqual(diag.version, initialVersion);
-    assert.equal(after.primary, 'gemini-3-flash-preview');
+    assert.equal(after.primary, 'gemma-4-26b-a4b-it');
   });
 });

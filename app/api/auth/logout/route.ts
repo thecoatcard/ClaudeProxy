@@ -1,15 +1,2 @@
-import { NextResponse } from 'next/server';
-import { redis } from '@/lib/redis';
-
-export async function POST(req: Request) {
-  const cookieHeader = req.headers.get('cookie') || '';
-  const match = cookieHeader.match(/admin_session=([^;]+)/);
-  if (match) {
-    const sid = match[1];
-    await redis.del(`admin:session:${sid}`);
-  }
-
-  const response = NextResponse.json({ success: true });
-  response.cookies.delete('admin_session');
-  return response;
-}
+// Backward-compatible alias. Keep auth behavior centralized in one implementation.
+export { POST } from '@/app/api/admin/session/logout/route';

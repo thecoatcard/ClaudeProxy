@@ -1,7 +1,5 @@
 export {};
 
-jest.mock('nanoid', () => ({ nanoid: () => 'session-test-id' }));
-
 const counters = new Map<string, number>();
 const values = new Map<string, string>();
 
@@ -46,6 +44,16 @@ describe('admin session login route', () => {
     process.env.ADMIN_PASSWORD = 'secret';
   });
 
+  it('fails closed when admin auth is not configured', async () => {
+    delete process.env.ADMIN_EMAIL;
+    delete process.env.ADMIN_PASSWORD;
+    const { POST } = await import('@/app/api/admin/session/login/route');
+
+    const res = await POST(makeRequest({ email: 'admin@example.com', password: 'secret' }));
+    expect(res.status).toBe(503);
+    expect(redisMock.incr).not.toHaveBeenCalled();
+  });
+
   it('rate limits repeated invalid login attempts', async () => {
     const { POST } = await import('@/app/api/admin/session/login/route');
 
@@ -64,7 +72,9 @@ describe('admin session login route', () => {
 
     const res = await POST(makeRequest({ email: 'admin@example.com', password: 'secret' }, '10.0.0.5'));
     expect(res.status).toBe(200);
-    expect(redisMock.setex).toHaveBeenCalledWith('admin:session:session-test-id', 24 * 60 * 60, 'admin@example.com');
+    const cookie = res.headers.get('set-cookie');
+    expect(cookie).toContain('admin_session=');
+    expect(redisMock.setex).not.toHaveBeenCalled();
     expect(redisMock.del).toHaveBeenCalledWith('admin:login:attempts:10.0.0.5');
   });
 });

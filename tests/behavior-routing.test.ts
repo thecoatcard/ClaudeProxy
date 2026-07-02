@@ -156,9 +156,9 @@ describe('LIGHT_CODING — behavioral signals', () => {
     assert.equal(cls.type, 'LIGHT_CODING');
   });
 
-  test('LIGHT_CODING routes to gemini-3-flash-preview', () => {
+  test('LIGHT_CODING routes to gemini-3.5-flash', () => {
     const chain = getTaskModelChain('LIGHT_CODING');
-    assert.equal(chain[0], 'gemini-3-flash-preview');
+    assert.equal(chain[0], 'gemini-3.5-flash');
   });
 });
 
@@ -190,9 +190,9 @@ describe('WEB_SEARCH routing', () => {
     assert.equal(cls.type, 'WEB_SEARCH');
   });
 
-  test('WEB_SEARCH routes to gemini-3-flash-preview', () => {
+  test('WEB_SEARCH routes to gemini-2.5-flash-lite', () => {
     const chain = getTaskModelChain('WEB_SEARCH');
-    assert.equal(chain[0], 'gemini-3-flash-preview');
+    assert.equal(chain[0], 'gemini-2.5-flash-lite');
   });
 });
 

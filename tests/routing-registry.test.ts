@@ -41,40 +41,40 @@ describe('routing registry precedence', () => {
     await __setRoutingTestAdapters({
       redisClient: fake,
       localRegistry: {
-        'claude-sonnet-4-5': { primary: 'gemini-2.5-flash', fallback: ['gemini-flash-latest'] },
+        'gemini-3.5-flash': { primary: 'gemini-3.5-flash', fallback: ['gemini-2.5-flash'] },
       },
     });
 
     await fake.set('models:registry', JSON.stringify({
-      'claude-sonnet-4-5': { primary: 'gemini-3-flash-preview', fallback: ['gemini-2.5-flash'] },
+      'gemini-3.5-flash': { primary: 'gemini-flash-latest', fallback: ['gemini-2.5-flash'] },
     }));
     await fake.set('models:registry:version', '9');
 
-    const mapping = await getModelMapping('claude-sonnet-4-5', {
+    const mapping = await getModelMapping('gemini-3.5-flash', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
     assert.equal(mapping.routingSource, 'redis');
     assert.equal(mapping.routeVersion, '9');
-    assert.equal(mapping.primary, 'gemini-3-flash-preview');
+    assert.equal(mapping.primary, 'gemini-flash-latest');
   });
 
   test('dashboard-style save updates runtime mapping immediately', async () => {
     const fake = new FakeRedis();
     await __setRoutingTestAdapters({ redisClient: fake, localRegistry: null });
 
-    const before = await getModelMapping('claude-haiku-4-5', {
+    const before = await getModelMapping('gemini-2.5-flash-lite', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
 
     await saveRoutingRegistry({
-      'claude-haiku-4-5': { primary: 'gemini-flash-latest', fallback: ['gemini-2.5-flash-lite'] },
+      'gemini-2.5-flash-lite': { primary: 'gemini-3.1-flash-lite-preview', fallback: ['gemini-2.5-flash-lite'] },
     });
 
-    const after = await getModelMapping('claude-haiku-4-5', {
+    const after = await getModelMapping('gemini-2.5-flash-lite', {
       requestBody: makeTaskBody('Refactor the authentication module'),
     });
     assert.notEqual(after.primary, before.primary);
-    assert.equal(after.primary, 'gemini-flash-latest');
+    assert.equal(after.primary, 'gemini-3.1-flash-lite-preview');
     assert.equal(after.routingSource, 'redis');
   });
 });

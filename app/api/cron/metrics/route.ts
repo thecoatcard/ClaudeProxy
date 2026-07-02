@@ -2,8 +2,12 @@ import { NextResponse } from 'next/server';
 import { redis } from '@/lib/redis';
 
 export async function GET(req: Request) {
+  const cronSecret = process.env.CRON_SECRET?.trim();
+  if (!cronSecret) {
+    return new Response('Cron authentication is not configured', { status: 503 });
+  }
   const authHeader = req.headers.get('authorization');
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (authHeader !== `Bearer ${cronSecret}`) {
     return new Response('Unauthorized', { status: 401 });
   }
 

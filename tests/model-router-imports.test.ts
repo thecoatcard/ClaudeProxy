@@ -46,13 +46,13 @@ describe('model-router public API surface', () => {
     expect(getRoutingRegistry).toBe(getEffectiveRoutingRegistry);
   });
 
-  test('HARD_DEFAULT_MODEL_ROUTING contains claude-sonnet entries', () => {
-    expect(HARD_DEFAULT_MODEL_ROUTING['claude-sonnet-4-5']).toBeDefined();
-    expect(HARD_DEFAULT_MODEL_ROUTING['claude-sonnet-4-5'].primary).toBeTruthy();
+  test('HARD_DEFAULT_MODEL_ROUTING contains gemini-3.5-flash entries', () => {
+    expect(HARD_DEFAULT_MODEL_ROUTING['gemini-3.5-flash']).toBeDefined();
+    expect(HARD_DEFAULT_MODEL_ROUTING['gemini-3.5-flash'].primary).toBeTruthy();
   });
 
-  test('getModelMapping resolves claude-sonnet-4-5 → gemini model', async () => {
-    const route = await getModelMapping('claude-sonnet-4-5', {
+  test('getModelMapping resolves gemini-3.5-flash', async () => {
+    const route = await getModelMapping('gemini-3.5-flash', {
       thinkingEnabled: false,
       requestBody: { messages: [{ role: 'user', content: 'hello' }] },
       userId: 'test-user',
@@ -62,8 +62,8 @@ describe('model-router public API surface', () => {
     expect(Array.isArray(route.fallback)).toBe(true);
   });
 
-  test('getModelMapping resolves claude-haiku-4-5 → fast model', async () => {
-    const route = await getModelMapping('claude-haiku-4-5', {
+  test('getModelMapping resolves gemini-2.5-flash-lite → fast model', async () => {
+    const route = await getModelMapping('gemini-2.5-flash-lite', {
       thinkingEnabled: false,
       requestBody: { messages: [{ role: 'user', content: 'ping' }] },
       userId: 'test-user',
@@ -72,7 +72,7 @@ describe('model-router public API surface', () => {
   });
 
   test('getModelMapping accepts boolean overload (legacy)', async () => {
-    const route = await getModelMapping('claude-3-5-sonnet', false);
+    const route = await getModelMapping('gemini-3.5-flash', false);
     expect(route.primary).toBeTruthy();
   });
 
@@ -91,7 +91,7 @@ describe('model-router public API surface', () => {
   });
 
   test('buildStickyRouteKey returns expected format', () => {
-    const key = buildStickyRouteKey('user123', 'claude-sonnet-4-5', '5');
-    expect(key).toBe('route:last:v5:user123:claude-sonnet-4-5');
+    const key = buildStickyRouteKey('user123', 'gemini-3.5-flash', '5');
+    expect(key).toBe('route:last:v5:user123:gemini-3.5-flash');
   });
 });

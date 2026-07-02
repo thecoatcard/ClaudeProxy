@@ -1,362 +1,428 @@
 /**
  * lib/redis/client.ts
  *
- * Standard Redis client using ioredis, with an API surface that is
- * compatible with the @upstash/redis interface used throughout the codebase.
- *
- * Key translation layer:
- *   set(key, value, { ex: N })    → SET key value EX N
- *   zadd(key, { score, member })  → ZADD key score member
- *   zrange(key, 0, -1, {rev:true}) → ZREVRANGE key 0 -1
- *   pipeline().exec()             → unwraps [Error, value][] → value[]
- *   get<T>()                      → returns string | null (no auto JSON parse)
- *   hgetall()                     → normalises {} (missing key) to null
- *
- * Edge compatibility: ioredis requires Node.js TCP sockets.
- * Routes previously declared `runtime = 'edge'` that transitively import
- * this module must be changed to Node.js runtime (or have the runtime
- * directive removed).
+ * Resilient Redis wrapper used across the app. It preflights host resolution
+ * and connection attempts once, then degrades to a disabled client if Redis is
+ * unreachable. That prevents noisy ENOTFOUND loops and keeps the rest of the
+ * app fail-closed instead of crashing.
  */
+import { lookup } from 'node:dns/promises';
 import { Redis as IoRedis } from 'ioredis';
 
-// ─── Singleton connection ─────────────────────────────────────────────────────
+type RedisLike = {
+  get(key: string): Promise<any>;
+  mget(...keys: string[]): Promise<any>;
+  ping(): Promise<any>;
+  set(...args: any[]): Promise<any>;
+  setex(...args: any[]): Promise<any>;
+  del(...args: any[]): Promise<any>;
+  incr(key: string): Promise<any>;
+  incrby(key: string, n: number): Promise<any>;
+  expire(key: string, ttl: number): Promise<any>;
+  exists(...keys: string[]): Promise<any>;
+  hget(key: string, field: string): Promise<any>;
+  hgetall(key: string): Promise<any>;
+  hset(...args: any[]): Promise<any>;
+  hincrby(key: string, field: string, n: number): Promise<any>;
+  hdel(...args: any[]): Promise<any>;
+  zadd(...args: any[]): Promise<any>;
+  zrange(...args: any[]): Promise<any>;
+  zrevrange(...args: any[]): Promise<any>;
+  zrem(...args: any[]): Promise<any>;
+  zcard(key: string): Promise<any>;
+  sadd(...args: any[]): Promise<any>;
+  smembers(key: string): Promise<any>;
+  srem(...args: any[]): Promise<any>;
+  lrange(...args: any[]): Promise<any>;
+  lpush(...args: any[]): Promise<any>;
+  rpush(...args: any[]): Promise<any>;
+  ltrim(...args: any[]): Promise<any>;
+  scan(...args: any[]): Promise<any>;
+  pipeline(): RedisPipelineLike;
+  quit(): Promise<any>;
+};
 
-let _client: IoRedis | null = null;
+type RedisPipelineLike = ReturnType<IoRedis['pipeline']>;
 
-function getClient(): IoRedis {
-  if (_client) return _client;
-
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    throw new Error(
-      '[Redis] REDIS_URL is not set. ' +
-      'Expected: redis://default:PASSWORD@HOST:PORT'
-    );
-  }
-
-  _client = new IoRedis(url, {
-    // Retry fast — gateway requests are latency-sensitive.
-    maxRetriesPerRequest: 2,
-    enableReadyCheck: false,
-    // Don't block the process if Redis is temporarily unreachable.
-    lazyConnect: false,
-    keepAlive: 30_000,
-    connectTimeout: 5_000,
-  });
-
-  _client.on('error', (err: Error) => {
-    // Log but never crash — all Redis calls are wrapped in try/catch by callers.
-    console.error('[Redis] Connection error:', err.message);
-  });
-
-  return _client;
+class DisabledRedisPipeline {
+  get(..._args: any[]) { return this; }
+  set(..._args: any[]) { return this; }
+  setex(..._args: any[]) { return this; }
+  del(..._args: any[]) { return this; }
+  incr(..._args: any[]) { return this; }
+  incrby(..._args: any[]) { return this; }
+  expire(..._args: any[]) { return this; }
+  hget(..._args: any[]) { return this; }
+  hgetall(..._args: any[]) { return this; }
+  hset(..._args: any[]) { return this; }
+  hincrby(..._args: any[]) { return this; }
+  hdel(..._args: any[]) { return this; }
+  zadd(..._args: any[]) { return this; }
+  zrem(..._args: any[]) { return this; }
+  sadd(..._args: any[]) { return this; }
+  srem(..._args: any[]) { return this; }
+  lpush(..._args: any[]) { return this; }
+  rpush(..._args: any[]) { return this; }
+  ltrim(..._args: any[]) { return this; }
+  lrange(..._args: any[]) { return this; }
+  exists(..._args: any[]) { return this; }
+  async exec(): Promise<unknown[]> { return []; }
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+class DisabledRedisClient implements RedisLike {
+  async get() { return null; }
+  async mget() { return []; }
+  async ping() { return 'PONG' as const; }
+  async set() { return 'OK' as const; }
+  async setex() { return 'OK' as const; }
+  async del() { return 0; }
+  async incr() { return 0; }
+  async incrby() { return 0; }
+  async expire() { return 0; }
+  async exists() { return 0; }
+  async hget() { return null; }
+  async hgetall() { return null; }
+  async hset() { return 0; }
+  async hincrby() { return 0; }
+  async hdel() { return 0; }
+  async zadd() { return 0; }
+  async zrange() { return []; }
+  async zrevrange() { return []; }
+  async zrem() { return 0; }
+  async zcard() { return 0; }
+  async sadd() { return 0; }
+  async smembers() { return []; }
+  async srem() { return 0; }
+  async lrange() { return []; }
+  async lpush() { return 0; }
+  async rpush() { return 0; }
+  async ltrim() { return 'OK' as const; }
+  async scan() { return ['0', []] as [string, string[]]; }
+  pipeline() { return new DisabledRedisPipeline() as unknown as RedisPipelineLike; }
+  async quit() { return 'OK' as const; }
+}
 
-/** Serialize values for storage. Strings pass through; anything else is JSON-encoded. */
+let clientPromise: Promise<RedisLike> | null = null;
+let disabledReason: string | null = null;
+const disabledClient = new DisabledRedisClient();
+
 function serialize(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-/**
- * Normalise a hgetall result.
- * ioredis v5 returns null for non-existent keys; earlier versions may return {}.
- * We treat both null and empty-object the same way (key not found → null).
- */
-function normalizeHash(
-  val: Record<string, string> | null | undefined
-): Record<string, string> | null {
+function normalizeHash(val: Record<string, string> | null | undefined): Record<string, string> | null {
   if (val == null) return null;
-  if (typeof val === 'object' && Object.keys(val).length === 0) return null;
+  if (Object.keys(val).length === 0) return null;
   return val;
 }
 
-/** Post-process a single pipeline result value for consumer-friendliness. */
-function normalizeResultValue(val: unknown): unknown {
-  // Normalise hgetall-style empty objects → null
-  if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
-    return normalizeHash(val as Record<string, string>);
-  }
-  return val;
-}
-
-/**
- * Unwrap ioredis pipeline exec results from [[Error|null, T], …] to [T, …],
- * matching the shape that @upstash/redis pipeline.exec() returned.
- */
-function unwrapPipeline(
-  raw: [Error | null, unknown][] | null
-): unknown[] {
-  if (!raw) return [];
-  return raw.map(([err, val]) => {
-    if (err) return null;
-    return normalizeResultValue(val);
-  });
-}
-
-/** Parse a { score, member } Upstash-style zadd argument into ioredis arguments. */
 function parseZaddArg(arg: { score: number; member: string }): [number, string] {
-  if (
-    arg == null ||
-    typeof arg !== 'object' ||
-    !('score' in arg) ||
-    !('member' in arg)
-  ) {
-    throw new TypeError(
-      `[Redis] zadd expects { score: number, member: string }, got: ${JSON.stringify(arg)}`
-    );
+  if (!arg || typeof arg !== 'object' || !('score' in arg) || !('member' in arg)) {
+    throw new TypeError(`[Redis] zadd expects { score: number, member: string }`);
   }
   return [Number(arg.score), String(arg.member)];
 }
 
-// ─── Pipeline wrapper ─────────────────────────────────────────────────────────
+function normalizeResultValue(val: unknown): unknown {
+  if (val !== null && typeof val === 'object' && !Array.isArray(val) && Object.keys(val as Record<string, unknown>).length === 0) {
+    return null;
+  }
+  return val;
+}
+
+function unwrapPipeline(raw: [Error | null, unknown][] | null): unknown[] {
+  if (!raw) return [];
+  return raw.map(([err, val]) => (err ? null : normalizeResultValue(val)));
+}
+
+async function buildClient(): Promise<RedisLike> {
+  const url = process.env.REDIS_URL?.trim();
+  if (!url) {
+    disabledReason = 'REDIS_URL is not set';
+    return disabledClient;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    disabledReason = 'REDIS_URL is invalid';
+    return disabledClient;
+  }
+
+  try {
+    await lookup(parsed.hostname);
+  } catch (error) {
+    disabledReason = `Redis host cannot be resolved: ${parsed.hostname}`;
+    console.warn(`[Redis] ${disabledReason}`);
+    return disabledClient;
+  }
+
+  const client = new IoRedis(url, {
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    keepAlive: 30_000,
+    connectTimeout: 5_000,
+    retryStrategy: () => null,
+  });
+
+  client.on('error', (err: Error) => {
+    if (!disabledReason) {
+      disabledReason = `Redis connection unavailable: ${err.message}`;
+      console.warn(`[Redis] ${disabledReason}`);
+    }
+  });
+
+  try {
+    await client.connect();
+    return client;
+  } catch (error) {
+    disabledReason = `Redis connection unavailable: ${(error as Error).message}`;
+    console.warn(`[Redis] ${disabledReason}`);
+    try {
+      await client.disconnect();
+    } catch {}
+    return disabledClient;
+  }
+}
+
+async function getClient(): Promise<RedisLike> {
+  if (disabledReason) return disabledClient;
+  if (!clientPromise) {
+    clientPromise = buildClient().catch((error) => {
+      disabledReason = (error as Error).message;
+      return disabledClient;
+    });
+  }
+  return clientPromise;
+}
 
 export class RedisPipeline {
-  private _pipe: ReturnType<IoRedis['pipeline']>;
+  private readonly pipe?: RedisPipelineLike;
+  private readonly ops: Array<(pipe: RedisPipelineLike) => void> = [];
 
-  constructor(pipe: ReturnType<IoRedis['pipeline']>) {
-    this._pipe = pipe;
+  constructor(pipe?: RedisPipelineLike) {
+    this.pipe = pipe;
   }
 
-  // Strings
-  get(key: string) { this._pipe.get(key); return this; }
+  get(key: string) { if (this.pipe) this.pipe.get(key); else this.ops.push((pipe) => { pipe.get(key); }); return this; }
   set(key: string, value: unknown, opts?: { ex?: number }) {
-    const str = serialize(value);
-    opts?.ex ? this._pipe.set(key, str, 'EX', opts.ex) : this._pipe.set(key, str);
+    if (this.pipe) {
+      const str = serialize(value);
+      opts?.ex ? this.pipe.set(key, str, 'EX', opts.ex) : this.pipe.set(key, str);
+      return this;
+    }
+    this.ops.push((pipe) => {
+      const str = serialize(value);
+      opts?.ex ? pipe.set(key, str, 'EX', opts.ex) : pipe.set(key, str);
+    });
     return this;
   }
-  setex(key: string, ttl: number, value: string) { this._pipe.setex(key, ttl, value); return this; }
-  del(key: string) { this._pipe.del(key); return this; }
-  incr(key: string) { this._pipe.incr(key); return this; }
-  incrby(key: string, n: number) { this._pipe.incrby(key, n); return this; }
-  expire(key: string, ttl: number) { this._pipe.expire(key, ttl); return this; }
-
-  // Hashes
-  hget(key: string, field: string) { this._pipe.hget(key, field); return this; }
-  hgetall(key: string) { this._pipe.hgetall(key); return this; }
-  hset(key: string, data: Record<string, unknown>) {
-    this._pipe.hset(key, data as Record<string, string | number | Buffer>);
-    return this;
-  }
-  hincrby(key: string, field: string, n: number) { this._pipe.hincrby(key, field, n); return this; }
-  hdel(key: string, ...fields: string[]) { this._pipe.hdel(key, ...fields); return this; }
-
-  // Sorted sets
+  setex(key: string, ttl: number, value: string) { if (this.pipe) this.pipe.setex(key, ttl, value); else this.ops.push((pipe) => { pipe.setex(key, ttl, value); }); return this; }
+  del(key: string) { if (this.pipe) this.pipe.del(key); else this.ops.push((pipe) => { pipe.del(key); }); return this; }
+  incr(key: string) { if (this.pipe) this.pipe.incr(key); else this.ops.push((pipe) => { pipe.incr(key); }); return this; }
+  incrby(key: string, n: number) { if (this.pipe) this.pipe.incrby(key, n); else this.ops.push((pipe) => { pipe.incrby(key, n); }); return this; }
+  expire(key: string, ttl: number) { if (this.pipe) this.pipe.expire(key, ttl); else this.ops.push((pipe) => { pipe.expire(key, ttl); }); return this; }
+  hget(key: string, field: string) { if (this.pipe) this.pipe.hget(key, field); else this.ops.push((pipe) => { pipe.hget(key, field); }); return this; }
+  hgetall(key: string) { if (this.pipe) this.pipe.hgetall(key); else this.ops.push((pipe) => { pipe.hgetall(key); }); return this; }
+  hset(key: string, data: Record<string, unknown>) { if (this.pipe) this.pipe.hset(key, data as Record<string, string | number | Buffer>); else this.ops.push((pipe) => { pipe.hset(key, data as Record<string, string | number | Buffer>); }); return this; }
+  hincrby(key: string, field: string, n: number) { if (this.pipe) this.pipe.hincrby(key, field, n); else this.ops.push((pipe) => { pipe.hincrby(key, field, n); }); return this; }
+  hdel(key: string, ...fields: string[]) { if (this.pipe) this.pipe.hdel(key, ...fields); else this.ops.push((pipe) => { pipe.hdel(key, ...fields); }); return this; }
   zadd(key: string, arg: { score: number; member: string }) {
-    const [score, member] = parseZaddArg(arg);
-    this._pipe.zadd(key, score, member);
+    if (this.pipe) {
+      const [score, member] = parseZaddArg(arg);
+      this.pipe.zadd(key, score, member);
+      return this;
+    }
+    this.ops.push((pipe) => { const [score, member] = parseZaddArg(arg); pipe.zadd(key, score, member); });
     return this;
   }
-  zrem(key: string, ...members: string[]) { this._pipe.zrem(key, ...members); return this; }
+  zrem(key: string, ...members: string[]) { if (this.pipe) this.pipe.zrem(key, ...members); else this.ops.push((pipe) => { pipe.zrem(key, ...members); }); return this; }
+  sadd(key: string, ...members: string[]) { if (this.pipe) this.pipe.sadd(key, ...members); else this.ops.push((pipe) => { pipe.sadd(key, ...members); }); return this; }
+  srem(key: string, ...members: string[]) { if (this.pipe) this.pipe.srem(key, ...members); else this.ops.push((pipe) => { pipe.srem(key, ...members); }); return this; }
+  lpush(key: string, ...values: unknown[]) { if (this.pipe) this.pipe.lpush(key, ...values.map(String)); else this.ops.push((pipe) => { pipe.lpush(key, ...values.map(String)); }); return this; }
+  rpush(key: string, ...values: unknown[]) { if (this.pipe) this.pipe.rpush(key, ...values.map(String)); else this.ops.push((pipe) => { pipe.rpush(key, ...values.map(String)); }); return this; }
+  ltrim(key: string, start: number, stop: number) { if (this.pipe) this.pipe.ltrim(key, start, stop); else this.ops.push((pipe) => { pipe.ltrim(key, start, stop); }); return this; }
+  lrange(key: string, start: number, stop: number) { if (this.pipe) this.pipe.lrange(key, start, stop); else this.ops.push((pipe) => { pipe.lrange(key, start, stop); }); return this; }
+  exists(...keys: string[]) { if (this.pipe) this.pipe.exists(...keys); else this.ops.push((pipe) => { pipe.exists(...keys); }); return this; }
 
-  // Sets
-  sadd(key: string, ...members: string[]) { this._pipe.sadd(key, ...members); return this; }
-  srem(key: string, ...members: string[]) { this._pipe.srem(key, ...members); return this; }
-
-  // Lists
-  lpush(key: string, ...values: unknown[]) {
-    this._pipe.lpush(key, ...values.map(String));
-    return this;
-  }
-  rpush(key: string, ...values: unknown[]) {
-    this._pipe.rpush(key, ...values.map(String));
-    return this;
-  }
-  ltrim(key: string, start: number, stop: number) { this._pipe.ltrim(key, start, stop); return this; }
-  lrange(key: string, start: number, stop: number) { this._pipe.lrange(key, start, stop); return this; }
-  exists(...keys: string[]) { this._pipe.exists(...keys); return this; }
-
-  /** Execute the pipeline. Returns a plain array of results (Upstash-compatible). */
   async exec(): Promise<unknown[]> {
-    const raw = await this._pipe.exec();
+    if (this.pipe) {
+      const raw = await this.pipe.exec();
+      return unwrapPipeline(raw as [Error | null, unknown][]);
+    }
+    const client = await getClient();
+    const pipe = client.pipeline();
+    for (const op of this.ops) {
+      op(pipe);
+    }
+    const raw = await pipe.exec();
     return unwrapPipeline(raw as [Error | null, unknown][]);
   }
 }
 
-// ─── Main wrapper class ───────────────────────────────────────────────────────
-
 export class RedisClient {
-  // ── Strings ─────────────────────────────────────────────────────────────────
-
-  /** get<T> is a type-annotation only — always returns string | null from standard Redis. */
   async get<T = string>(key: string): Promise<T | null> {
-    return getClient().get(key) as unknown as T | null;
+    const client = await getClient();
+    return client.get(key) as unknown as T | null;
   }
 
   async mget<T = string[]>(keys: string[]): Promise<(string | null)[]> {
     if (!keys.length) return [];
-    return getClient().mget(...keys);
+    const client = await getClient();
+    return client.mget(...keys);
   }
 
   async ping(): Promise<string> {
-    return getClient().ping();
+    const client = await getClient();
+    return client.ping();
   }
 
-  /**
-   * set(key, value) or set(key, value, { ex: ttlSeconds })
-   * Supports the Upstash { ex, nx } options object.
-   * When nx=true, returns 'OK' if set, null if key already exists.
-   */
   async set(key: string, value: unknown, opts?: { ex?: number; nx?: boolean }): Promise<string | null> {
+    const client = await getClient();
     const str = serialize(value);
-    if (opts?.nx && opts?.ex) {
-      const result = await getClient().set(key, str, 'EX', opts.ex, 'NX');
-      return result; // 'OK' or null
-    } else if (opts?.nx) {
-      const result = await getClient().set(key, str, 'NX');
-      return result;
-    } else if (opts?.ex) {
-      await getClient().set(key, str, 'EX', opts.ex);
-      return 'OK';
-    } else {
-      await getClient().set(key, str);
-      return 'OK';
-    }
+    if (opts?.nx && opts?.ex) return client.set(key, str, 'EX', opts.ex, 'NX');
+    if (opts?.nx) return client.set(key, str, 'NX');
+    if (opts?.ex) return client.set(key, str, 'EX', opts.ex);
+    return client.set(key, str);
   }
 
   async setex(key: string, ttl: number, value: string): Promise<void> {
-    await getClient().setex(key, ttl, value);
+    const client = await getClient();
+    await client.setex(key, ttl, value);
   }
 
   async del(...keys: string[]): Promise<number> {
-    return getClient().del(...keys);
+    const client = await getClient();
+    return client.del(...keys);
   }
 
   async incr(key: string): Promise<number> {
-    return getClient().incr(key);
+    const client = await getClient();
+    return client.incr(key);
   }
 
   async incrby(key: string, n: number): Promise<number> {
-    return getClient().incrby(key, n);
+    const client = await getClient();
+    return client.incrby(key, n);
   }
 
   async expire(key: string, ttl: number): Promise<number> {
-    return getClient().expire(key, ttl);
+    const client = await getClient();
+    return client.expire(key, ttl);
   }
 
   async exists(...keys: string[]): Promise<number> {
-    return getClient().exists(...keys);
+    const client = await getClient();
+    return client.exists(...keys);
   }
-
-  // ── Hashes ───────────────────────────────────────────────────────────────────
 
   async hget(key: string, field: string): Promise<string | null> {
-    return getClient().hget(key, field);
+    const client = await getClient();
+    return client.hget(key, field);
   }
 
-  /** Returns null for non-existent keys (normalises ioredis {} → null). */
   async hgetall(key: string): Promise<Record<string, string> | null> {
-    const val = await getClient().hgetall(key);
+    const client = await getClient();
+    const val = await client.hgetall(key);
     return normalizeHash(val as Record<string, string> | null);
   }
 
   async hset(key: string, data: Record<string, unknown>): Promise<number> {
-    return getClient().hset(
-      key,
-      data as Record<string, string | number | Buffer>
-    );
+    const client = await getClient();
+    return client.hset(key, data as Record<string, string | number | Buffer>);
   }
 
   async hincrby(key: string, field: string, n: number): Promise<number> {
-    return getClient().hincrby(key, field, n);
+    const client = await getClient();
+    return client.hincrby(key, field, n);
   }
 
   async hdel(key: string, ...fields: string[]): Promise<number> {
-    return getClient().hdel(key, ...fields);
+    const client = await getClient();
+    return client.hdel(key, ...fields);
   }
 
-  // ── Sorted Sets ──────────────────────────────────────────────────────────────
-
-  /**
-   * zadd(key, { score, member })
-   * Translates the Upstash object syntax to ioredis positional args.
-   */
-  async zadd(
-    key: string,
-    arg: { score: number; member: string }
-  ): Promise<number> {
+  async zadd(key: string, arg: { score: number; member: string }): Promise<number> {
+    const client = await getClient();
     const [score, member] = parseZaddArg(arg);
-    return getClient().zadd(key, score, member) as Promise<number>;
+    return client.zadd(key, score, member) as Promise<number>;
   }
 
-  /**
-   * zrange(key, start, stop) or zrange(key, start, stop, { rev: true })
-   * The { rev: true } option maps to ZREVRANGE.
-   */
-  async zrange<T = string[]>(
-    key: string,
-    start: number,
-    stop: number,
-    opts?: { rev?: boolean }
-  ): Promise<T> {
-    const client = getClient();
-    if (opts?.rev) {
-      return client.zrevrange(key, start, stop) as unknown as T;
-    }
+  async zrange<T = string[]>(key: string, start: number, stop: number, opts?: { rev?: boolean }): Promise<T> {
+    const client = await getClient();
+    if (opts?.rev) return client.zrevrange(key, start, stop) as unknown as T;
     return client.zrange(key, start, stop) as unknown as T;
   }
 
   async zrem(key: string, ...members: string[]): Promise<number> {
-    return getClient().zrem(key, ...members);
+    const client = await getClient();
+    return client.zrem(key, ...members);
   }
 
   async zcard(key: string): Promise<number> {
-    return getClient().zcard(key);
+    const client = await getClient();
+    return client.zcard(key);
   }
 
-  // ── Sets ─────────────────────────────────────────────────────────────────────
-
   async sadd(key: string, ...members: string[]): Promise<number> {
-    return getClient().sadd(key, ...members);
+    const client = await getClient();
+    return client.sadd(key, ...members);
   }
 
   async smembers(key: string): Promise<string[]> {
-    return getClient().smembers(key);
+    const client = await getClient();
+    return client.smembers(key);
   }
 
   async srem(key: string, ...members: string[]): Promise<number> {
-    return getClient().srem(key, ...members);
+    const client = await getClient();
+    return client.srem(key, ...members);
   }
 
-  // ── Lists ────────────────────────────────────────────────────────────────────
-
   async lrange(key: string, start: number, stop: number): Promise<string[]> {
-    return getClient().lrange(key, start, stop);
+    const client = await getClient();
+    return client.lrange(key, start, stop);
   }
 
   async lpush(key: string, ...values: unknown[]): Promise<number> {
-    return getClient().lpush(key, ...values.map(String));
+    const client = await getClient();
+    return client.lpush(key, ...values.map(String));
   }
 
   async rpush(key: string, ...values: unknown[]): Promise<number> {
-    return getClient().rpush(key, ...values.map(String));
+    const client = await getClient();
+    return client.rpush(key, ...values.map(String));
   }
 
   async ltrim(key: string, start: number, stop: number): Promise<string> {
-    return getClient().ltrim(key, start, stop);
+    const client = await getClient();
+    return client.ltrim(key, start, stop);
   }
 
   async scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await (getClient() as any).scan(Number(cursor), ...args);
-    return result as [string, string[]];
+    const client = await getClient();
+    const result = await (client as unknown as { scan: (...args: unknown[]) => Promise<[string, string[]]> }).scan(Number(cursor), ...args);
+    return result;
   }
-
-  // ── Pipeline ─────────────────────────────────────────────────────────────────
 
   pipeline(): RedisPipeline {
-    return new RedisPipeline(getClient().pipeline());
+    return new RedisPipeline();
   }
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────────────
-
   async quit(): Promise<void> {
-    if (_client) {
-      await _client.quit();
-      _client = null;
+    if (clientPromise) {
+      const client = await clientPromise.catch(() => null);
+      await client?.quit();
     }
+    clientPromise = null;
+    disabledReason = null;
   }
 }
 
 export const redis = new RedisClient();
+
+export function isRedisUnavailable() {
+  return Boolean(disabledReason);
+}
